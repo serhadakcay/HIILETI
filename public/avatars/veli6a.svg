@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100">
+  <circle cx="50" cy="50" r="50" fill="#2d3748"/>
+  <g transform="translate(50,50)">
+    <!-- Daisy Petals -->
+    <ellipse cx="0" cy="-34" rx="8" ry="16" fill="#ffffff" />
+    <ellipse cx="24" cy="-24" rx="8" ry="16" transform="rotate(45, 24, -24)" fill="#ffffff" />
+    <ellipse cx="34" cy="0" rx="16" ry="8" fill="#ffffff" />
+    <ellipse cx="24" cy="24" rx="8" ry="16" transform="rotate(-45, 24, 24)" fill="#ffffff" />
+    <ellipse cx="0" cy="34" rx="8" ry="16" fill="#ffffff" />
+    <ellipse cx="-24" cy="24" rx="8" ry="16" transform="rotate(45, -24, 24)" fill="#ffffff" />
+    <ellipse cx="-34" cy="0" rx="16" ry="8" fill="#ffffff" />
+    <ellipse cx="-24" cy="-24" rx="8" ry="16" transform="rotate(-45, -24, -24)" fill="#ffffff" />
+    <!-- Yellow center -->
+    <circle cx="0" cy="0" r="18" fill="#eab308" stroke="#ca8a04" stroke-width="2"/>
+    <text x="0" y="5" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="#713f12" text-anchor="middle">6-A</text>
+  </g>
+</svg>

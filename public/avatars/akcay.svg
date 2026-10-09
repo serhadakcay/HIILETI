@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100">
+  <circle cx="50" cy="50" r="50" fill="#0f172a"/>
+  <!-- Two friends silhouette with sunglasses -->
+  <circle cx="36" cy="44" r="14" fill="#fed7aa"/>
+  <rect x="29" y="42" width="14" height="5" rx="2" fill="#020617"/>
+  <path d="M14 100 C14 76 24 70 36 70 C48 70 56 76 56 100 Z" fill="#334155"/>
+  <circle cx="64" cy="42" r="14" fill="#fed7aa"/>
+  <rect x="57" y="40" width="14" height="5" rx="2" fill="#020617"/>
+  <path d="M44 100 C44 74 54 68 64 68 C76 68 86 74 86 100 Z" fill="#475569"/>
+</svg>

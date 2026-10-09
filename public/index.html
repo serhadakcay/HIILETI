@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
+    <title>HIHaberleşme</title>
+    <link rel="manifest" href="/manifest.json">
+    <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+    <meta name="theme-color" content="#0b141a">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="HIHaberleşme">
+    <meta name="mobile-web-app-capable" content="yes">
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <!-- ==========================================
+         ONLINE / OFFLINE ANLIK BİLDİRİM UYARISI (TOAST)
+         ========================================== -->
+    <div class="status-toast" id="statusToast" style="display:none;">
+        <span class="status-toast-dot" id="statusToastDot"></span>
+        <span class="status-toast-text" id="statusToastText">Online</span>
+    </div>
+
+    <!-- ==========================================
+         GELEN YENİ MESAJ ANLIK AÇILIR PENCERESİ (TOAST & İKON)
+         ========================================== -->
+    <div class="message-notify-toast" id="messageNotifyToast" style="display:none;">
+        <div class="notify-icon-badge">✉️</div>
+        <div class="notify-info" id="notifyInfoClick">
+            <div class="notify-top-row">
+                <span class="notify-sender-name" id="notifySender">Kullanıcı</span>
+                <span class="notify-badge-tag">Yeni Mesaj</span>
+            </div>
+            <div class="notify-message-text" id="notifyText">Mesaj içeriği</div>
+        </div>
+        <button type="button" class="notify-open-btn" id="btnNotifyOpen" title="Sohbete Git">Aç</button>
+        <button type="button" class="notify-close-btn" id="btnNotifyClose" title="Kapat">&times;</button>
+    </div>
+
+    <div class="app-root" id="appRoot">
+
+        <!-- ==========================================
+             1. EKRAN: SOHBETLER / KAYITLI KULLANICILAR (RESİM 1)
+             ========================================== -->
+        <section class="chats-screen" id="chatsScreen">
+            <!-- ÜST BAŞLIK (Header) -->
+            <header class="main-header">
+                <div class="header-brand-wrap">
+                    <div class="header-title">HIHaberleşme</div>
+                    <div class="header-unread-counter" id="headerUnreadBadge" style="display:none;" title="Okunmamış Yeni Mesaj">
+                        <span class="header-mail-icon">✉️</span>
+                        <span id="headerUnreadCount">0</span>
+                    </div>
+                </div>
+                <div class="header-actions">
+                    <!-- Kamera Simgesi -->
+                    <button class="icon-btn" id="btnHeaderCamera" title="Kamera">
+                        <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor">
+                            <circle cx="12" cy="12" r="3.2"/>
+                            <path d="M9 2L7.17 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2h-3.17L15 2H9zm3 15c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5z"/>
+                        </svg>
+                    </button>
+                    <!-- Üç Nokta Menü -->
+                    <button class="icon-btn" id="btnHeaderMenu" title="Seçenekler">
+                        <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor">
+                            <path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/>
+                        </svg>
+                    </button>
+                </div>
+
+                <!-- Açılır Menü (Üç Nokta) -->
+                <div class="dropdown-menu" id="headerDropdown" style="display:none;">
+                    <div class="dropdown-item" id="menuItemQr">📱 Telefondan Bağlan / QR Kod</div>
+                    <div class="dropdown-item" id="menuItemCloudGuide">☁️ 7/24 Kullanım (PC Kapalıyken)</div>
+                    <div class="dropdown-item" id="menuItemNewChat">➕ Yeni Kullanıcı Kaydet</div>
+                    <div class="dropdown-item" id="menuItemInstall">📲 Uygulamayı Yükle (PWA)</div>
+                    <div class="dropdown-divider"></div>
+                    <div class="dropdown-item" id="menuItemProfile">👤 Profilim: <span id="menuUsernameDisplay">...</span></div>
+                    <div class="dropdown-item logout" id="menuItemLogout">🚪 Çıkış Yap</div>
+                </div>
+            </header>
+
+            <!-- ARAMA ÇUBUĞU (Capsule Search) -->
+            <div class="search-bar-wrapper">
+                <div class="search-capsule">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" class="search-icon">
+                        <path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/>
+                    </svg>
+                    <input type="text" id="inputSearchChats" placeholder="Kullanıcı ara veya sohbet başlat" autocomplete="off" />
+                    <button class="clear-search-btn" id="btnClearSearch" style="display:none;">&times;</button>
+                </div>
+            </div>
+
+            <!-- FİLTRE HAPLARI (Filter Chips) -->
+            <div class="filter-chips-row">
+                <button type="button" class="filter-chip active" data-filter="all">Tümü</button>
+                <button type="button" class="filter-chip" data-filter="online">Online</button>
+                <button type="button" class="filter-chip" data-filter="unread">Okunmamış</button>
+                <button type="button" class="filter-chip" data-filter="favorites">Favoriler</button>
+                <button type="button" class="filter-chip plus-chip" id="btnAddFilter" title="Filtre Ekle">+</button>
+            </div>
+
+            <!-- SOHBETLER / KAYITLI KULLANICILAR LİSTESİ -->
+            <div class="chat-list-container" id="chatListContainer">
+                <!-- JavaScript ile dinamik olarak render edilecek -->
+                <div class="loading-spinner" id="chatListLoading">
+                    <div class="spinner"></div>
+                    <span>Kayıtlı kullanıcılar yükleniyor...</span>
+                </div>
+            </div>
+
+            <!-- YÜZEN İŞLEM BUTONU (FAB - Yeni Kullanıcı Ekle) -->
+            <button class="fab-new-chat" id="btnFabNewChat" title="Yeni Kullanıcı Kaydet">
+                <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
+                    <path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/>
+                </svg>
+            </button>
+        </section>
+
+        <!-- ==========================================
+             2. EKRAN: BİREBİR YAZIŞMA VE ARAMA EKRANI
+             ========================================== -->
+        <main class="chat-screen" id="chatScreen">
+            <!-- SOHBET ÜST BAŞLIĞI -->
+            <header class="chat-header">
+                <button class="back-btn" id="btnBackToChats" title="Kullanıcı Listesine Dön">
+                    <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor">
+                        <path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/>
+                    </svg>
+                    <span class="back-btn-text">Kullanıcılar</span>
+                    <span class="back-unread-bubble" id="backUnreadBadge" style="display:none;" title="Yeni Mesaj">✉️ <span id="backUnreadCount">0</span></span>
+                </button>
+                <div class="chat-user-avatar-wrap" id="headerAvatarWrap">
+                    <img id="chatContactAvatar" class="avatar chat-header-avatar" src="/avatars/default.svg" alt="Avatar">
+                    <span class="chat-header-online-dot" id="headerOnlineDot" style="display:none;"></span>
+                </div>
+                <div class="chat-user-meta" id="headerMetaWrap">
+                    <div class="chat-user-name" id="chatContactName">Kişi Seçin</div>
+                    <div class="chat-user-status" id="chatContactStatus">Offline</div>
+                </div>
+                <div class="chat-header-actions">
+                    <!-- Görüntülü Arama -->
+                    <button class="icon-btn" id="btnVideoCall" title="Görüntülü Arama">
+                        <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor">
+                            <path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/>
+                        </svg>
+                    </button>
+                    <!-- Sesli Arama -->
+                    <button class="icon-btn" id="btnVoiceCall" title="Sesli Arama">
+                        <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor">
+                            <path d="M20.01 15.38c-1.23 0-2.42-.2-3.53-.56a.977.977 0 0 0-1.01.24l-1.57 1.97c-2.83-1.35-5.43-3.9-6.63-6.81l1.97-1.51c.31-.24.4-.67.27-1.04-.37-1.12-.57-2.32-.57-3.57 0-.55-.45-1-1-1H4.51c-.55 0-1 .45-1 1 0 9.39 7.63 17.02 17.02 17.02.55 0 1-.45 1-1v-4.52c0-.55-.45-1-1-1z"/>
+                        </svg>
+                    </button>
+                    <!-- Üç Nokta Menü -->
+                    <button class="icon-btn" id="btnChatMenu" title="Seçenekler">
+                        <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor">
+                            <path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/>
+                        </svg>
+                    </button>
+                </div>
+            </header>
+
+            <!-- MESAJLAR ALANI (WHATSAPP KOYU DOODLE DUVAR KAĞIDI) -->
+            <div class="chat-messages-canvas" id="messagesContainer">
+                <!-- TARİH ROZETİ -->
+                <div class="date-pill-badge" id="chatDateBadge">Bugün</div>
+
+                <!-- SARI ŞİFRELEME UYARISI BANNERI (RESİM 2) -->
+                <div class="encryption-warning-banner">
+                    <span class="enc-icon">🔒</span>
+                    <span class="enc-text">
+                        Mesajlar ve aramalar uçtan uca şifrelidir. Yalnızca bu sohbetteki kişiler bu içerikleri okuyabilir, dinleyebilir veya paylaşabilir.
+                        <a href="javascript:void(0);" class="enc-link" id="btnEncDetails">Daha fazla bilgi</a>
+                    </span>
+                </div>
+            </div>
+
+            <!-- YAZIYOR... GÖSTERGESİ -->
+            <div class="typing-notice" id="typingIndicator" style="display:none;"></div>
+
+            <!-- DOSYA YÜKLEME ÇUBUĞU -->
+            <div class="upload-progress-wrapper" id="uploadProgress" style="display:none;">
+                <div class="progress-bar-fill" id="progressFill"></div>
+                <span id="progressText">Dosya yükleniyor...</span>
+            </div>
+
+            <!-- ALT MESAJ GİRİŞ ÇUBUĞU (RESİM 2 DÜZENİ) -->
+            <form class="chat-bottom-input-bar" id="chatInputForm" onsubmit="return false;">
+                <input type="file" id="fileInput" style="display:none;" />
+                <input type="file" id="cameraInput" accept="image/*" capture="environment" style="display:none;" />
+
+                <!-- SOLDAKİ OVAL HAP KUTU -->
+                <div class="input-capsule-pill">
+                    <!-- Emoji Simgesi -->
+                    <button type="button" class="pill-btn" id="btnEmoji" title="Emoji">
+                        <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
+                            <path d="M12 2C6.47 2 2 6.47 2 12s4.47 10 10 10 10-4.47 10-10S17.53 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm3.5-9c.83 0 1.5-.67 1.5-1.5S16.33 8 15.5 8 14 8.67 14 9.5s.67 1.5 1.5 1.5zm-7 0c.83 0 1.5-.67 1.5-1.5S9.33 8 8.5 8 7 8.67 7 9.5 7.67 11 8.5 11zm3.5 6.5c2.33 0 4.31-1.46 5.11-3.5H6.89c.8 2.04 2.78 3.5 5.11 3.5z"/>
+                        </svg>
+                    </button>
+
+                    <!-- Mesaj Metin Giriş Alanı -->
+                    <input type="text" id="messageInput" placeholder="Mesaj" autocomplete="off" autocapitalize="sentences" enterkeyhint="send" />
+
+                    <!-- Ataş (Dosya / Belge) Simgesi -->
+                    <button type="button" class="pill-btn" id="btnAttach" title="Dosya Gönder">
+                        <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor">
+                            <path d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5a2.5 2.5 0 0 1 5 0v10.5c0 .83-.67 1.5-1.5 1.5s-1.5-.67-1.5-1.5V6H9v9.5a3 3 0 0 0 6 0V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z"/>
+                        </svg>
+                    </button>
+
+                    <!-- Kamera Simgesi -->
+                    <button type="button" class="pill-btn" id="btnCamera" title="Fotoğraf Çek">
+                        <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor">
+                            <circle cx="12" cy="12" r="3.2"/>
+                            <path d="M9 2L7.17 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2h-3.17L15 2H9zm3 15c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5z"/>
+                        </svg>
+                    </button>
+                </div>
+
+                <!-- SAĞDAKİ YUVARLAK YEŞİL DÜĞME (MİKROFON / GÖNDER) -->
+                <button type="submit" class="circle-action-btn" id="btnSendOrMic" title="Sesli Mesaj / Gönder">
+                    <svg id="iconMic" viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
+                        <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/>
+                        <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/>
+                    </svg>
+                    <svg id="iconSend" viewBox="0 0 24 24" width="22" height="22" fill="currentColor" style="display:none;">
+                        <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+                    </svg>
+                </button>
+            </form>
+        </main>
+    </div>
+
+    <!-- ==========================================
+         KULLANICI GİRİŞİ / ŞİFRE EKRANI (AUTH MODAL)
+         ========================================== -->
+    <div class="auth-overlay" id="authModal" style="display:none;">
+        <div class="auth-card-whatsapp">
+            <div class="auth-card-header">
+                <div class="auth-wa-logo">
+                    <svg viewBox="0 0 24 24" width="56" height="56" fill="#00a884">
+                        <path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H6l-2 2V4h16v12z"/>
+                        <path d="M7 9h10v2H7zm0-3h10v2H7zm0 6h7v2H7z"/>
+                    </svg>
+                </div>
+                <h2>HIHaberleşme Güvenli Giriş</h2>
+                <p id="authSubtitle">Devam etmek için şifrenizi girin</p>
+            </div>
+
+            <!-- HATIRLANAN KULLANICI PROFİLİ -->
+            <div class="remembered-user-box" id="rememberedUserBox" style="display:none;">
+                <img id="rememberedAvatar" class="avatar" src="/avatars/default.svg" alt="Avatar">
+                <div class="remembered-info">
+                    <span class="remembered-name" id="rememberedName">Kullanıcı</span>
+                    <button type="button" class="btn-switch-account" id="btnSwitchAccount">Farklı hesap seç</button>
+                </div>
+            </div>
+
+            <form id="authForm" autocomplete="on">
+                <!-- Kullanıcı Seçim / Giriş Alanı -->
+                <div class="form-field" id="fieldUsernameSelect">
+                    <label for="inputUsername">Kullanıcı Adı</label>
+                    <div class="input-with-select">
+                        <select id="selectRegisteredUser" class="auth-select" style="display:none;">
+                            <option value="">-- Kayıtlı Kullanıcı Seçin --</option>
+                        </select>
+                        <input type="text" id="inputUsername" class="auth-input" placeholder="Kullanıcı adınızı yazın" autocomplete="username" required />
+                    </div>
+                </div>
+
+                <!-- Şifre Alanı -->
+                <div class="form-field">
+                    <label for="inputPassword">Şifre</label>
+                    <input type="password" id="inputPassword" class="auth-input" placeholder="Şifrenizi girin" required autocomplete="current-password" />
+                </div>
+
+                <!-- Yeni Kayıt İçin Şifre Tekrar -->
+                <div class="form-field" id="fieldConfirmPassword" style="display:none;">
+                    <label for="inputConfirmPassword">Şifre Tekrar</label>
+                    <input type="password" id="inputConfirmPassword" class="auth-input" placeholder="Şifrenizi tekrar girin" autocomplete="new-password" />
+                </div>
+
+                <!-- Beni Hatırla -->
+                <div class="form-checkbox">
+                    <label>
+                        <input type="checkbox" id="chkRememberMe" checked />
+                        <span>Beni bu cihazda hatırla (Tekrar şifre sorma)</span>
+                    </label>
+                </div>
+
+                <!-- Hata Mesajı -->
+                <div class="auth-error-alert" id="authErrorMsg" style="display:none;"></div>
+
+                <!-- Gönder Butonu -->
+                <button type="submit" class="auth-submit-btn" id="btnAuthSubmit">Giriş Yap</button>
+
+                <!-- Kayıt Ol / Giriş Yap Mod Değiştirici -->
+                <div class="auth-toggle-row">
+                    <button type="button" class="btn-toggle-mode" id="btnToggleAuthMode">Hesabınız yok mu? Yeni Kullanıcı Aç</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- ==========================================
+         GELEN WEBRTC ARAMA EKRANI
+         ========================================== -->
+    <div class="call-incoming-overlay" id="incomingCallModal" style="display:none;">
+        <div class="incoming-card">
+            <img id="incomingCallerAvatar" class="avatar call-pulse-avatar" src="/avatars/default.svg" alt="Arayan">
+            <h2 id="incomingCallerName">Arayan Kişi</h2>
+            <p id="incomingCallType">Görüntülü Arama Geliyor...</p>
+            <div class="call-action-buttons">
+                <button class="call-btn btn-decline" id="btnRejectCall" title="Reddet">
+                    <svg viewBox="0 0 24 24" width="28" height="28" fill="currentColor">
+                        <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm5 11H7v-2h10v2z"/>
+                    </svg>
+                </button>
+                <button class="call-btn btn-accept" id="btnAcceptCall" title="Cevapla">
+                    <svg viewBox="0 0 24 24" width="28" height="28" fill="currentColor">
+                        <path d="M20.01 15.38c-1.23 0-2.42-.2-3.53-.56a.977.977 0 0 0-1.01.24l-1.57 1.97c-2.83-1.35-5.43-3.9-6.63-6.81l1.97-1.51c.31-.24.4-.67.27-1.04-.37-1.12-.57-2.32-.57-3.57 0-.55-.45-1-1-1H4.51c-.55 0-1 .45-1 1 0 9.39 7.63 17.02 17.02 17.02.55 0 1-.45 1-1v-4.52c0-.55-.45-1-1-1z"/>
+                    </svg>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ==========================================
+         AKTİF WEBRTC ARAMA EKRANI
+         ========================================== -->
+    <div class="active-call-overlay" id="activeCallScreen" style="display:none;">
+        <div class="call-video-container">
+            <video id="remoteVideo" autoplay playsinline></video>
+            <div id="remoteAudioPlaceholder" class="audio-call-placeholder" style="display:none;">
+                <img id="activeCallAvatar" class="avatar call-pulse-avatar" src="/avatars/default.svg" alt="Avatar">
+                <h3 id="activeCallName">Kişi</h3>
+                <span id="callDuration">00:00</span>
+            </div>
+            <div class="local-video-pip" id="localVideoContainer">
+                <video id="localVideo" autoplay playsinline muted></video>
+            </div>
+            <div class="active-call-info-bar">
+                <span id="activeCallTargetTitle">Görüşme</span>
+                <span id="activeCallTimer">00:00</span>
+            </div>
+            <div class="active-call-controls">
+                <button class="ctrl-btn" id="btnToggleMic" title="Mikrofon Aç/Kapat">
+                    <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
+                        <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/><path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/>
+                    </svg>
+                </button>
+                <button class="ctrl-btn" id="btnToggleCam" title="Kamera Aç/Kapat">
+                    <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
+                        <path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/>
+                    </svg>
+                </button>
+                <button class="ctrl-btn btn-hangup" id="btnEndCall" title="Sonlandır">
+                    <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
+                        <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm5 11H7v-2h10v2z"/>
+                    </svg>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ==========================================
+         QR KOD & AĞ PAYLAŞIM MODALI
+         ========================================== -->
+    <div class="qr-modal-overlay" id="qrModal" style="display:none;">
+        <div class="qr-modal-card">
+            <div class="qr-modal-header">
+                <h3>Telefondan Bağlan & Uzak Erişim</h3>
+                <button class="icon-btn" id="btnCloseQr">&times;</button>
+            </div>
+            <div class="qr-tabs">
+                <button type="button" class="qr-tab active" id="tabLocalWifi">📱 Yerel Wi-Fi</button>
+                <button type="button" class="qr-tab" id="tabRemoteTunnel">🌍 Uzak Erişim</button>
+            </div>
+            <div id="contentLocalWifi" class="qr-tab-content">
+                <p>Telefon kameranızla bu QR kodu okutun:</p>
+                <div class="qr-image-wrap">
+                    <img id="qrImage" src="" alt="QR Kod">
+                </div>
+                <div class="url-info-row">
+                    <strong>HTTPS Adresi (Kamera/Mikrofon için):</strong>
+                    <a id="httpsLink" href="#" target="_blank">Yükleniyor...</a>
+                </div>
+            </div>
+            <div id="contentRemoteTunnel" class="qr-tab-content" style="display:none;">
+                <p>Dışarıdayken veya mobil veride bağlanmak için:</p>
+                <div class="qr-image-wrap" id="tunnelQrWrap">
+                    <img id="tunnelQrImage" src="" alt="Tünel QR">
+                </div>
+                <div class="url-info-row">
+                    <strong>Global Tünel Bağlantısı:</strong>
+                    <a id="tunnelLink" href="#" target="_blank">Hazırlanıyor...</a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ==========================================
+         7/24 BİLGİSAYARSIZ BULUT KULLANIM REHBERİ
+         ========================================== -->
+    <div class="qr-modal-overlay" id="cloudGuideModal" style="display:none;">
+        <div class="qr-modal-card" style="max-width: 500px; text-align: left;">
+            <div class="qr-modal-header">
+                <h3>☁️ 7/24 Kesintisiz Kullanım (PC Kapalıyken)</h3>
+                <button class="icon-btn" id="btnCloseCloudGuide">&times;</button>
+            </div>
+            <div style="font-size: 13.5px; line-height: 1.6; color: var(--text-secondary);">
+                <p style="margin-bottom: 12px; color: var(--text-primary);">
+                    Bilgisayarınız kapalıyken bile telefonlarınızın <strong>7/24 kesintisiz mesajlaşması ve araması</strong> için sistem ücretsiz bir bulut sunucusuna (Render.com) bağlanabilir.
+                </p>
+                <div style="background: rgba(0, 168, 132, 0.12); border-left: 3px solid #00a884; padding: 10px 14px; border-radius: 6px; margin-bottom: 14px; color: var(--text-primary);">
+                    💡 <strong>Projeniz zaten hazır!</strong> Klasörde Render için <code>render.yaml</code> ve <code>Procfile</code> ayarları yapılmıştır.
+                </div>
+                <h4 style="color: #00a884; margin-bottom: 8px;">2 Dakikada Ücretsiz 7/24 Kurulum:</h4>
+                <ol style="padding-left: 20px; margin-bottom: 14px;">
+                    <li style="margin-bottom: 5px;"><strong>Render.com</strong> sitesinde ücretsiz hesap açın.</li>
+                    <li style="margin-bottom: 5px;">Masaüstündeki <strong>MSJ</strong> klasörünü GitHub'a bağlayıp Render'da <em>"New Web Service"</em> deyin.</li>
+                    <li style="margin-bottom: 5px;">Render size <code>https://msj-app.onrender.com</code> şeklinde kalıcı bir adres verir.</li>
+                </ol>
+                <p style="color: var(--text-primary); font-size: 13px;">
+                    ✅ Artık bilgisayar kapalıyken de telefonunuzdan bu adresi açıp <strong>7/24</strong> kullanabilirsiniz!
+                </p>
+            </div>
+        </div>
+    </div>
+
+    <!-- ==========================================
+         BÜYÜK RESİM ÖNİZLEME MODALI
+         ========================================== -->
+    <div class="image-preview-overlay" id="imageModal" style="display:none;">
+        <div class="image-preview-card">
+            <img id="enlargedImage" src="" alt="Önizleme">
+            <button class="image-close-btn" id="btnCloseImageModal">&times;</button>
+        </div>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="/app.js"></script>
+</body>
+</html>

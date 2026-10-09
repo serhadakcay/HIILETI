@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100">
+  <defs>
+    <radialGradient id="teaGrad" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#b83b1d"/>
+      <stop offset="70%" stop-color="#6e1a06"/>
+      <stop offset="100%" stop-color="#380d03"/>
+    </radialGradient>
+    <linearGradient id="glassGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.6"/>
+      <stop offset="40%" stop-color="#ffffff" stop-opacity="0.1"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0.4"/>
+    </linearGradient>
+  </defs>
+  <!-- Background circular portrait -->
+  <circle cx="50" cy="50" r="50" fill="#1b2a26"/>
+  <!-- Table surface -->
+  <ellipse cx="50" cy="84" rx="42" ry="12" fill="#0d1815"/>
+  <!-- Saucer -->
+  <ellipse cx="50" cy="78" rx="34" ry="7" fill="#e0e0e0" stroke="#b0b0b0" stroke-width="1.5"/>
+  <ellipse cx="50" cy="76" rx="26" ry="4.5" fill="#f5f5f5"/>
+  <circle cx="50" cy="76" r="14" fill="#d32f2f" opacity="0.3"/>
+  <!-- Tea glass (Armudi) liquid -->
+  <path d="M37 36 C37 54 44 57 44 73 L56 73 C56 57 63 54 63 36 Z" fill="url(#teaGrad)"/>
+  <!-- Tea glass outer body -->
+  <path d="M35 24 C35 54 43 56 43 75 L57 75 C57 56 65 54 65 24 Z" fill="url(#glassGrad)" stroke="#ffffff" stroke-width="1" stroke-opacity="0.7"/>
+  <!-- Rim of glass -->
+  <ellipse cx="50" cy="24" rx="15" ry="3.5" fill="none" stroke="#ffffff" stroke-width="1.2" opacity="0.8"/>
+  <ellipse cx="50" cy="36" rx="13" ry="2.5" fill="#8d1c07" opacity="0.9"/>
+  <!-- Steam lines -->
+  <path d="M46 19 Q44 14 47 10" fill="none" stroke="#ffffff" stroke-width="1.2" opacity="0.4" stroke-linecap="round"/>
+  <path d="M52 18 Q55 13 52 8" fill="none" stroke="#ffffff" stroke-width="1.2" opacity="0.4" stroke-linecap="round"/>
+</svg>

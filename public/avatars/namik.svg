@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100">
+  <circle cx="50" cy="50" r="50" fill="#fef08a"/>
+  <!-- Elder man face -->
+  <circle cx="48" cy="42" r="17" fill="#fed7aa"/>
+  <!-- Gray hair / glasses -->
+  <path d="M33 38 C33 24 63 24 63 38 C60 27 55 25 48 25 C41 25 36 27 33 38 Z" fill="#94a3b8"/>
+  <!-- Glasses -->
+  <rect x="38" y="38" width="8" height="6" rx="2" fill="none" stroke="#475569" stroke-width="1.5"/>
+  <rect x="50" y="38" width="8" height="6" rx="2" fill="none" stroke="#475569" stroke-width="1.5"/>
+  <line x1="46" y1="41" x2="50" y2="41" stroke="#475569" stroke-width="1.5"/>
+  <!-- Smile -->
+  <path d="M44 49 Q48 53 52 49" fill="none" stroke="#9a3412" stroke-width="1.5" stroke-linecap="round"/>
+  <!-- Jacket -->
+  <path d="M22 100 C22 74 34 66 48 66 C62 66 74 74 74 100 Z" fill="#475569"/>
+  <!-- Little child beside him -->
+  <circle cx="75" cy="62" r="11" fill="#fed7aa"/>
+  <path d="M66 58 C66 48 84 48 84 58 Z" fill="#78350f"/>
+</svg>
