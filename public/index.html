@@ -75,7 +75,7 @@
                 <div class="dropdown-menu" id="headerDropdown" style="display:none;">
                     <div class="dropdown-item" id="menuItemQr">📱 Telefondan Bağlan / QR Kod</div>
                     <div class="dropdown-item" id="menuItemCloudGuide">☁️ 7/24 Kullanım (PC Kapalıyken)</div>
-                    <div class="dropdown-item" id="menuItemNewChat">➕ Yeni Kullanıcı Kaydet</div>
+                    <div class="dropdown-item" id="menuItemNewChat">💬 Yeni Yazışma Başlat</div>
                     <div class="dropdown-item" id="menuItemInstall">📲 Uygulamayı Yükle (PWA)</div>
                     <div class="dropdown-divider"></div>
                     <div class="dropdown-item" id="menuItemProfile">👤 Profilim: <span id="menuUsernameDisplay">...</span></div>
@@ -113,8 +113,8 @@
                 </div>
             </div>
 
-            <!-- YÜZEN İŞLEM BUTONU (FAB - Yeni Kullanıcı Ekle) -->
-            <button class="fab-new-chat" id="btnFabNewChat" title="Yeni Kullanıcı Kaydet">
+            <!-- YÜZEN İŞLEM BUTONU (FAB - Yeni Yazışma Başlat) -->
+            <button class="fab-new-chat" id="btnFabNewChat" title="Yeni Yazışma Başlat">
                 <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
                     <path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/>
                 </svg>
@@ -452,6 +452,55 @@
         <div class="image-preview-card">
             <img id="enlargedImage" src="" alt="Önizleme">
             <button class="image-close-btn" id="btnCloseImageModal">&times;</button>
+        </div>
+    </div>
+
+    <!-- ==========================================
+         YENİ YAZIŞMA / KİŞİ SEÇ EKRANI (NEW CHAT MODAL)
+         ========================================== -->
+    <div class="new-chat-overlay" id="newChatModal" style="display:none;">
+        <div class="new-chat-card">
+            <!-- ÜST BAŞLIK -->
+            <header class="new-chat-header">
+                <button type="button" class="back-btn" id="btnCloseNewChat" title="Geri / Kapat">
+                    <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor">
+                        <path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/>
+                    </svg>
+                </button>
+                <div class="new-chat-header-info">
+                    <h3 class="new-chat-title">Yeni Yazışma Başlat</h3>
+                    <span class="new-chat-subtitle" id="newChatUserCount">Kişi seçin</span>
+                </div>
+            </header>
+
+            <!-- KİŞİ ARAMA KUTUSU -->
+            <div class="new-chat-search-wrapper">
+                <div class="search-capsule">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" class="search-icon">
+                        <path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/>
+                    </svg>
+                    <input type="text" id="inputSearchNewChat" placeholder="Kişi ara veya adını yazın..." autocomplete="off" />
+                    <button type="button" class="clear-search-btn" id="btnClearNewChatSearch" style="display:none;">&times;</button>
+                </div>
+            </div>
+
+            <!-- HIZLI İŞLEM: YENİ KULLANICI EKLE -->
+            <div class="new-chat-quick-actions">
+                <div class="new-chat-action-item" id="btnActionCreateNewUser">
+                    <div class="action-icon-circle">➕</div>
+                    <div class="action-text">
+                        <strong>Yeni Kullanıcı Hesabı Ekle</strong>
+                        <span>Sisteme yeni bir kullanıcı tanımlayın</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="new-chat-section-label">Kayıtlı Kişiler (Mesajlaşmak veya aramak için dokunun)</div>
+
+            <!-- KİŞİLER LİSTESİ -->
+            <div class="new-chat-users-list" id="newChatUsersList">
+                <!-- JavaScript dinamik olarak ekleyecek -->
+            </div>
         </div>
     </div>
 

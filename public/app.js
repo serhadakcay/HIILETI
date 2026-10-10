@@ -94,6 +94,15 @@ const menuItemSwitchUser = document.getElementById('menuItemSwitchUser');
 const quickUsersContainer = document.getElementById('quickUsersContainer');
 const quickUsersList = document.getElementById('quickUsersList');
 
+// Yeni Yazışma Ekranı (New Chat Modal)
+const newChatModal = document.getElementById('newChatModal');
+const btnCloseNewChat = document.getElementById('btnCloseNewChat');
+const newChatUserCount = document.getElementById('newChatUserCount');
+const inputSearchNewChat = document.getElementById('inputSearchNewChat');
+const btnClearNewChatSearch = document.getElementById('btnClearNewChatSearch');
+const btnActionCreateNewUser = document.getElementById('btnActionCreateNewUser');
+const newChatUsersList = document.getElementById('newChatUsersList');
+
 const messagesContainer = document.getElementById('messagesContainer');
 const chatDateBadge = document.getElementById('chatDateBadge');
 const typingIndicator = document.getElementById('typingIndicator');
@@ -758,9 +767,150 @@ filterChips.forEach(chip => {
     });
 });
 
-// FAB Butonu: Yeni Kullanıcı Kaydet / Sohbet Başlat
+// ==========================================================
+// YENİ YAZIŞMA / KİŞİ SEÇ EKRANI (FAB '+' VE MENÜ BUTONU)
+// ==========================================================
+function openNewChatModal() {
+    if (!newChatModal) return;
+    newChatModal.style.display = 'flex';
+    if (inputSearchNewChat) {
+        inputSearchNewChat.value = '';
+        if (btnClearNewChatSearch) btnClearNewChatSearch.style.display = 'none';
+    }
+
+    renderNewChatUsers(contactsList);
+
+    // Taze listeyi sunucudan çekip güncelle
+    loadChatsList().then(() => {
+        renderNewChatUsers(contactsList);
+    });
+
+    if (inputSearchNewChat) {
+        setTimeout(() => inputSearchNewChat.focus(), 150);
+    }
+}
+
+function closeNewChatModal() {
+    if (newChatModal) {
+        newChatModal.style.display = 'none';
+    }
+}
+
+function renderNewChatUsers(list) {
+    if (!newChatUsersList) return;
+    newChatUsersList.innerHTML = '';
+
+    if (newChatUserCount) {
+        newChatUserCount.textContent = `${list.length} kayıtlı kişi`;
+    }
+
+    if (!list || list.length === 0) {
+        newChatUsersList.innerHTML = `
+            <div style="padding: 35px 20px; text-align: center; color: var(--text-secondary); font-size: 13.5px;">
+                Kayıtlı başka kullanıcı bulunamadı.<br>
+                Yeni bir kişi eklemek için yukarıdaki <strong>"Yeni Kullanıcı Hesabı Ekle"</strong> butonunu kullanabilirsiniz.
+            </div>
+        `;
+        return;
+    }
+
+    list.forEach(contact => {
+        const item = document.createElement('div');
+        item.className = 'new-chat-user-item';
+
+        item.innerHTML = `
+            <div class="new-chat-user-left">
+                <div class="chat-avatar-wrap" style="position:relative;">
+                    <img class="avatar" src="${contact.avatar || '/avatars/default.svg'}" alt="${escapeHtml(contact.username)}">
+                    ${contact.isOnline ? '<span class="online-badge" title="Online"></span>' : '<span class="offline-badge" title="Offline"></span>'}
+                </div>
+                <div class="new-chat-user-info">
+                    <span class="new-chat-username">${escapeHtml(contact.username)}</span>
+                    <span class="new-chat-status ${contact.isOnline ? 'online' : 'offline'}">
+                        ${contact.isOnline ? '🟢 Online' : '⚪ Offline'}
+                    </span>
+                </div>
+            </div>
+            <div class="new-chat-actions">
+                <button type="button" class="btn-new-chat-action message" title="Yazışma Ekranına Geç">
+                    💬 Mesaj
+                </button>
+                <button type="button" class="btn-new-chat-action call" title="Sesli Ara" data-action="voice">
+                    📞
+                </button>
+                <button type="button" class="btn-new-chat-action call" title="Görüntülü Ara" data-action="video">
+                    📹
+                </button>
+            </div>
+        `;
+
+        // Satıra veya butonlara basıldığında doğrudan o kullanıcı seçilip yazışma ekranı açılsın
+        item.addEventListener('click', (e) => {
+            const callBtn = e.target.closest('.btn-new-chat-action.call');
+            if (callBtn) {
+                const actionType = callBtn.dataset.action;
+                closeNewChatModal();
+                selectContact(contact);
+                setTimeout(() => initiateCall(actionType), 300);
+                return;
+            }
+
+            closeNewChatModal();
+            selectContact(contact);
+        });
+
+        newChatUsersList.appendChild(item);
+    });
+}
+
+// Yeni Yazışma Kişi Arama Filtresi
+if (inputSearchNewChat) {
+    inputSearchNewChat.addEventListener('input', () => {
+        const query = normalizeKey(inputSearchNewChat.value);
+        if (btnClearNewChatSearch) {
+            btnClearNewChatSearch.style.display = query ? 'block' : 'none';
+        }
+
+        if (!query) {
+            renderNewChatUsers(contactsList);
+            return;
+        }
+
+        const filtered = contactsList.filter(c => normalizeKey(c.username).includes(query));
+        renderNewChatUsers(filtered);
+    });
+}
+
+if (btnClearNewChatSearch) {
+    btnClearNewChatSearch.addEventListener('click', () => {
+        inputSearchNewChat.value = '';
+        btnClearNewChatSearch.style.display = 'none';
+        renderNewChatUsers(contactsList);
+    });
+}
+
+if (btnCloseNewChat) {
+    btnCloseNewChat.addEventListener('click', closeNewChatModal);
+}
+
+if (btnActionCreateNewUser) {
+    btnActionCreateNewUser.addEventListener('click', () => {
+        closeNewChatModal();
+        showRegisterPrompt();
+    });
+}
+
+if (newChatModal) {
+    newChatModal.addEventListener('click', (e) => {
+        if (e.target === newChatModal) {
+            closeNewChatModal();
+        }
+    });
+}
+
+// FAB Butonu: Sağ alttaki (+) işaretine basınca YENİ YAZIŞMA EKRANINA geçsin
 btnFabNewChat.addEventListener('click', () => {
-    showRegisterPrompt();
+    openNewChatModal();
 });
 
 // ==========================================================
@@ -831,10 +981,16 @@ function closeActiveChat() {
 
 btnBackToChats.addEventListener('click', closeActiveChat);
 
-// ESC tuşuyla da aktif sohbeti kapatıp kullanıcı ekranına dönme
+// ESC tuşuyla aktif sohbeti veya yeni yazışma modalını kapatma
 window.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && activeContact) {
-        closeActiveChat();
+    if (e.key === 'Escape') {
+        if (newChatModal && newChatModal.style.display === 'flex') {
+            closeNewChatModal();
+            return;
+        }
+        if (activeContact) {
+            closeActiveChat();
+        }
     }
 });
 
@@ -1674,7 +1830,7 @@ if (btnCloseCloudGuide && cloudGuideModal) {
 
 if (menuItemNewChat) {
     menuItemNewChat.addEventListener('click', () => {
-        showRegisterPrompt();
+        openNewChatModal();
     });
 }
 
