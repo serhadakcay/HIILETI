@@ -79,6 +79,7 @@
                     <div class="dropdown-item" id="menuItemInstall">📲 Uygulamayı Yükle (PWA)</div>
                     <div class="dropdown-divider"></div>
                     <div class="dropdown-item" id="menuItemProfile">👤 Profilim: <span id="menuUsernameDisplay">...</span></div>
+                    <div class="dropdown-item" id="menuItemSwitchUser">🔄 Hesap Değiştir</div>
                     <div class="dropdown-item logout" id="menuItemLogout">🚪 Çıkış Yap</div>
                 </div>
             </header>
@@ -160,6 +161,13 @@
                             <path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/>
                         </svg>
                     </button>
+                    <!-- Sohbet Seçenekleri Açılır Menüsü -->
+                    <div class="dropdown-menu chat-options-dropdown" id="chatDropdownMenu" style="display:none;">
+                        <div class="dropdown-item danger" id="menuItemClearChat">🗑️ Sohbeti Temizle (Yazışmaları Sil)</div>
+                        <div class="dropdown-item" id="menuItemContactInfo">👤 Kullanıcı Bilgisi</div>
+                        <div class="dropdown-divider"></div>
+                        <div class="dropdown-item" id="menuItemCloseChat">❌ Sohbeti Kapat</div>
+                    </div>
                 </div>
             </header>
 
@@ -257,6 +265,12 @@
                     <span class="remembered-name" id="rememberedName">Kullanıcı</span>
                     <button type="button" class="btn-switch-account" id="btnSwitchAccount">Farklı hesap seç</button>
                 </div>
+            </div>
+
+            <!-- KAYITLI KULLANICILAR HIZLI GİRİŞ LİSTESİ -->
+            <div class="quick-users-wrapper" id="quickUsersContainer" style="display:none;">
+                <div class="quick-users-label">Kayıtlı Kullanıcılar:</div>
+                <div class="quick-users-list" id="quickUsersList"></div>
             </div>
 
             <form id="authForm" autocomplete="on">

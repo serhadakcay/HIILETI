@@ -65,338 +65,300 @@ function getPrimaryIp() {
 }
 
 // ==========================================
-// KULLANICI, ŞİFRE, KALICI OTURUM VE GİZLİ MESAJ VERİTABANI
+// KULLANICI, ŞİFRE, KALICI OTURUM VE GİZLİ MESAJ VERİTABANI (LITE SQL / MYSQL)
 // ==========================================
-const usersFilePath = path.join(dataDir, 'users.json');
-const sessionsFilePath = path.join(dataDir, 'sessions.json');
-const messagesFilePath = path.join(dataDir, 'messages.json');
-
-let registeredUsers = {}; // userKey -> { username, salt, hash, avatar, lastSeen, createdAt }
-let persistentSessions = {}; // token -> { username, createdAt, lastUsed }
-let conversations = {}; // "user1___user2" -> [ { id, sender, recipient, text, file, timestamp, date, createdAt, read } ]
+const { db, normalizeKey, getConvoKey } = require('./db');
 let globalIo = null;
-
-function normalizeKey(str) {
-    if (!str) return '';
-    return str.trim().toLocaleLowerCase('tr-TR');
-}
-
-function getConvoKey(u1, u2) {
-    if (!u1 || !u2) return '';
-    return [normalizeKey(u1), normalizeKey(u2)].sort().join('___');
-}
-
-function loadData() {
-    try {
-        if (fs.existsSync(usersFilePath)) {
-            registeredUsers = JSON.parse(fs.readFileSync(usersFilePath, 'utf8'));
-        }
-    } catch (err) {
-        console.error('Kullanıcı verisi okunamadı:', err);
-        registeredUsers = {};
-    }
-
-    try {
-        if (fs.existsSync(sessionsFilePath)) {
-            persistentSessions = JSON.parse(fs.readFileSync(sessionsFilePath, 'utf8'));
-        }
-    } catch (err) {
-        console.error('Oturum verisi okunamadı:', err);
-        persistentSessions = {};
-    }
-
-    try {
-        if (fs.existsSync(messagesFilePath)) {
-            const raw = JSON.parse(fs.readFileSync(messagesFilePath, 'utf8'));
-            if (raw && !Array.isArray(raw)) {
-                conversations = raw;
-            } else {
-                conversations = {};
-            }
-        }
-    } catch (err) {
-        console.error('Mesaj verisi okunamadı:', err);
-        conversations = {};
-    }
-
-    if (!fs.existsSync(usersFilePath)) saveUsers();
-    if (!fs.existsSync(sessionsFilePath)) saveSessions();
-    if (!fs.existsSync(messagesFilePath)) saveMessages();
-}
-
-function saveUsers() {
-    try {
-        fs.writeFileSync(usersFilePath, JSON.stringify(registeredUsers, null, 2), 'utf8');
-    } catch (err) {
-        console.error('Kullanıcı verisi kaydedilemedi:', err);
-    }
-}
-
-function saveSessions() {
-    try {
-        fs.writeFileSync(sessionsFilePath, JSON.stringify(persistentSessions, null, 2), 'utf8');
-    } catch (err) {
-        console.error('Oturum verisi kaydedilemedi:', err);
-    }
-}
-
-function saveMessages() {
-    try {
-        fs.writeFileSync(messagesFilePath, JSON.stringify(conversations, null, 2), 'utf8');
-    } catch (err) {
-        console.error('Mesaj verisi kaydedilemedi:', err);
-    }
-}
-
-loadData();
 
 function hashPassword(password, salt) {
     return crypto.pbkdf2Sync(password, salt, 1000, 64, 'sha512').toString('hex');
 }
 
 // Kimlik Doğrulama Middleware
-function authenticateToken(req, res, next) {
-    const authHeader = req.headers['authorization'];
-    const token = (authHeader && authHeader.split(' ')[1]) || req.headers['x-auth-token'] || req.query.token;
-    if (!token || !persistentSessions[token]) {
-        return res.status(401).json({ success: false, error: 'Oturum açılmamış veya geçersiz' });
-    }
-    const session = persistentSessions[token];
-    session.lastUsed = new Date().toISOString();
-    saveSessions();
+async function authenticateToken(req, res, next) {
+    try {
+        const authHeader = req.headers['authorization'];
+        const token = (authHeader && authHeader.split(' ')[1]) || req.headers['x-auth-token'] || req.query.token;
+        if (!token) {
+            return res.status(401).json({ success: false, error: 'Oturum açılmamış veya geçersiz' });
+        }
+        const session = await db.getSession(token);
+        if (!session) {
+            return res.status(401).json({ success: false, error: 'Oturum açılmamış veya geçersiz' });
+        }
+        await db.updateSessionLastUsed(token);
 
-    const userKey = normalizeKey(session.username);
-    const user = registeredUsers[userKey];
-    if (!user) {
-        return res.status(401).json({ success: false, error: 'Kullanıcı bulunamadı' });
+        const user = await db.getUser(session.username);
+        if (!user) {
+            await db.deleteSession(token);
+            return res.status(401).json({ success: false, error: 'Kullanıcı bulunamadı' });
+        }
+        req.user = user;
+        req.token = token;
+        next();
+    } catch (err) {
+        return res.status(500).json({ success: false, error: err.message });
     }
-    req.user = user;
-    next();
 }
 
 // 1. Kayıt Ol API
-app.post('/api/auth/register', (req, res) => {
-    const { username, password } = req.body;
-    if (!username || !password) {
-        return res.status(400).json({ success: false, error: 'Kullanıcı adı ve şifre zorunludur' });
-    }
-    const cleanUser = username.trim();
-    if (cleanUser.length < 2) {
-        return res.status(400).json({ success: false, error: 'Kullanıcı adı en az 2 karakter olmalıdır' });
-    }
-    if (password.length < 3) {
-        return res.status(400).json({ success: false, error: 'Şifre en az 3 karakter olmalıdır' });
-    }
+app.post('/api/auth/register', async (req, res) => {
+    try {
+        const { username, password } = req.body;
+        if (!username || !password) {
+            return res.status(400).json({ success: false, error: 'Kullanıcı adı ve şifre zorunludur' });
+        }
+        const cleanUser = username.trim();
+        if (cleanUser.length < 2) {
+            return res.status(400).json({ success: false, error: 'Kullanıcı adı en az 2 karakter olmalıdır' });
+        }
+        if (password.length < 3) {
+            return res.status(400).json({ success: false, error: 'Şifre en az 3 karakter olmalıdır' });
+        }
 
-    const userKey = normalizeKey(cleanUser);
-    if (registeredUsers[userKey]) {
-        const existing = registeredUsers[userKey];
-        const testHash = hashPassword(password, existing.salt);
-        if (testHash === existing.hash) {
-            const token = crypto.randomBytes(32).toString('hex');
-            persistentSessions[token] = {
-                username: existing.username,
-                createdAt: new Date().toISOString(),
-                lastUsed: new Date().toISOString()
-            };
-            saveSessions();
-            return res.json({
-                success: true,
-                token,
-                user: { username: existing.username, avatar: existing.avatar },
-                message: 'Zaten kayıtlısınız, giriş yapıldı.'
+        const existing = await db.getUser(cleanUser);
+        if (existing) {
+            const testHash = hashPassword(password, existing.salt);
+            if (testHash === existing.hash) {
+                const token = crypto.randomBytes(32).toString('hex');
+                await db.saveSession(token, existing.username);
+                return res.json({
+                    success: true,
+                    token,
+                    user: { username: existing.username, avatar: existing.avatar },
+                    message: 'Zaten kayıtlısınız, giriş yapıldı.'
+                });
+            }
+            return res.status(400).json({ success: false, error: 'Bu kullanıcı adı zaten kayıtlı. Lütfen şifrenizle giriş yapın.' });
+        }
+
+        const salt = crypto.randomBytes(16).toString('hex');
+        const hash = hashPassword(password, salt);
+        const avatar = `/avatars/default.svg`;
+
+        const newUser = await db.createUser({
+            username: cleanUser,
+            salt,
+            hash,
+            avatar,
+            lastSeen: 'Online',
+            createdAt: new Date().toISOString()
+        });
+
+        const token = crypto.randomBytes(32).toString('hex');
+        await db.saveSession(token, cleanUser);
+
+        if (globalIo) {
+            globalIo.emit('user:new_registered', {
+                username: cleanUser,
+                avatar,
+                isOnline: true
             });
         }
-        return res.status(400).json({ success: false, error: 'Bu kullanıcı adı zaten kayıtlı. Lütfen şifrenizle giriş yapın.' });
-    }
 
-    const salt = crypto.randomBytes(16).toString('hex');
-    const hash = hashPassword(password, salt);
-    const avatar = `/avatars/default.svg`;
-
-    registeredUsers[userKey] = {
-        username: cleanUser,
-        salt,
-        hash,
-        avatar,
-        lastSeen: 'Online',
-        createdAt: new Date().toISOString()
-    };
-    saveUsers();
-
-    const token = crypto.randomBytes(32).toString('hex');
-    persistentSessions[token] = {
-        username: cleanUser,
-        createdAt: new Date().toISOString(),
-        lastUsed: new Date().toISOString()
-    };
-    saveSessions();
-
-    if (globalIo) {
-        globalIo.emit('user:new_registered', {
-            username: cleanUser,
-            avatar,
-            isOnline: true
+        res.json({
+            success: true,
+            token,
+            user: { username: cleanUser, avatar }
         });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
     }
-
-    res.json({
-        success: true,
-        token,
-        user: { username: cleanUser, avatar }
-    });
 });
 
 // 2. Giriş Yap API
-app.post('/api/auth/login', (req, res) => {
-    const { username, password } = req.body;
-    if (!username || !password) {
-        return res.status(400).json({ success: false, error: 'Kullanıcı adı ve şifre giriniz' });
-    }
-    const cleanUser = username.trim();
-    const userKey = normalizeKey(cleanUser);
-    const existing = registeredUsers[userKey];
-
-    if (!existing) {
-        return res.status(401).json({ success: false, error: 'Bu kullanıcı bulunamadı. Lütfen yeni kullanıcı olarak kayıt olun.' });
-    }
-
-    const testHash = hashPassword(password, existing.salt);
-    let isPassValid = (testHash === existing.hash);
-    if (!isPassValid) {
-        const hash1234 = hashPassword('1234', existing.salt);
-        const hash123456 = hashPassword('123456', existing.salt);
-        if (testHash === hash1234 || testHash === hash123456) {
-            isPassValid = true;
+app.post('/api/auth/login', async (req, res) => {
+    try {
+        const { username, password } = req.body;
+        if (!username || !password) {
+            return res.status(400).json({ success: false, error: 'Kullanıcı adı ve şifre giriniz' });
         }
+        const cleanUser = username.trim();
+        const existing = await db.getUser(cleanUser);
+
+        if (!existing) {
+            return res.status(401).json({ success: false, error: 'Bu kullanıcı bulunamadı. Lütfen yeni kullanıcı olarak kayıt olun.' });
+        }
+
+        const testHash = hashPassword(password, existing.salt);
+        let isPassValid = (testHash === existing.hash);
+        if (!isPassValid) {
+            const hash1234 = hashPassword('1234', existing.salt);
+            const hash123456 = hashPassword('123456', existing.salt);
+            if (testHash === hash1234 || testHash === hash123456) {
+                isPassValid = true;
+            }
+        }
+
+        if (!isPassValid) {
+            return res.status(401).json({ success: false, error: 'Şifre hatalı, lütfen kontrol edin' });
+        }
+
+        const token = crypto.randomBytes(32).toString('hex');
+        await db.saveSession(token, existing.username);
+
+        res.json({
+            success: true,
+            token,
+            user: { username: existing.username, avatar: existing.avatar }
+        });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
     }
-
-    if (!isPassValid) {
-        return res.status(401).json({ success: false, error: 'Şifre hatalı, lütfen kontrol edin' });
-    }
-
-    const token = crypto.randomBytes(32).toString('hex');
-    persistentSessions[token] = {
-        username: existing.username,
-        createdAt: new Date().toISOString(),
-        lastUsed: new Date().toISOString()
-    };
-    saveSessions();
-
-    res.json({
-        success: true,
-        token,
-        user: { username: existing.username, avatar: existing.avatar }
-    });
 });
 
 // 3. Oturum Doğrulama API
-app.post('/api/auth/verify', (req, res) => {
-    const { token } = req.body;
-    if (!token || !persistentSessions[token]) {
-        return res.status(401).json({ success: false, error: 'Geçersiz veya süresi dolmuş oturum' });
+app.post('/api/auth/verify', async (req, res) => {
+    try {
+        const { token } = req.body;
+        if (!token) {
+            return res.status(401).json({ success: false, error: 'Geçersiz oturum' });
+        }
+
+        const session = await db.getSession(token);
+        if (!session) {
+            return res.status(401).json({ success: false, error: 'Geçersiz veya süresi dolmuş oturum' });
+        }
+
+        await db.updateSessionLastUsed(token);
+        const user = await db.getUser(session.username);
+        if (!user) {
+            await db.deleteSession(token);
+            return res.status(401).json({ success: false, error: 'Kullanıcı bulunamadı' });
+        }
+
+        res.json({
+            success: true,
+            user: { username: user.username, avatar: user.avatar }
+        });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
     }
-
-    const session = persistentSessions[token];
-    session.lastUsed = new Date().toISOString();
-    saveSessions();
-
-    const user = registeredUsers[normalizeKey(session.username)];
-    if (!user) {
-        delete persistentSessions[token];
-        saveSessions();
-        return res.status(401).json({ success: false, error: 'Kullanıcı bulunamadı' });
-    }
-
-    res.json({
-        success: true,
-        user: { username: user.username, avatar: user.avatar }
-    });
 });
 
 // 4. Çıkış Yap API
-app.post('/api/auth/logout', (req, res) => {
-    const { token } = req.body;
-    if (token && persistentSessions[token]) {
-        delete persistentSessions[token];
-        saveSessions();
+app.post('/api/auth/logout', async (req, res) => {
+    try {
+        const { token } = req.body;
+        if (token) {
+            await db.deleteSession(token);
+        }
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
     }
-    res.json({ success: true });
 });
 
-// 5. Kayıtlı Kullanıcıları Listele
-app.get('/api/users/registered', (req, res) => {
-    const list = Object.values(registeredUsers).map(u => ({
-        username: u.username,
-        avatar: u.avatar || '/avatars/default.svg',
-        lastSeen: u.lastSeen || 'Offline'
-    }));
-    res.json({ success: true, users: list });
+// 5. Kayıtlı Kullanıcıları Listele (Lite SQL Veritabanından)
+app.get('/api/users/registered', async (req, res) => {
+    try {
+        const all = await db.getAllUsers();
+        const list = all.map(u => {
+            const isOnline = onlineUserSockets.has(u.userKey) && onlineUserSockets.get(u.userKey).size > 0;
+            return {
+                username: u.username,
+                avatar: u.avatar || '/avatars/default.svg',
+                lastSeen: isOnline ? 'Online' : (u.lastSeen || 'Offline'),
+                isOnline
+            };
+        });
+        res.json({ success: true, users: list });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
 });
 
 // 6. Kullanıcının Özel Sohbet Listesi
-// KULLANICI ÇIKMIŞ OLSA BİLE LİSTEDE HER ZAMAN KAYITLI KALIR!
-// KULLANICILAR ARASI YAZIŞMALAR ASLA BAŞKASI TARAFINDAN GÖRÜLEMEZ!
-app.get('/api/chats', authenticateToken, (req, res) => {
-    const currentUsername = req.user.username;
-    const currentKey = normalizeKey(currentUsername);
+// PROGRAM KAPATILIP AÇILSA BİLE TÜM KAYITLI KULLANICILAR VE YAZIŞMALAR LİTÈ SQL İLE KORUNUR!
+app.get('/api/chats', authenticateToken, async (req, res) => {
+    try {
+        const currentUsername = req.user.username;
+        const chatItems = await db.getChatsList(currentUsername, onlineUserSockets);
 
-    const chatItems = [];
-    for (const key of Object.keys(registeredUsers)) {
-        if (key === currentKey) continue;
-        const contact = registeredUsers[key];
-        const convoKey = getConvoKey(currentUsername, contact.username);
-        const msgs = conversations[convoKey] || [];
-        const lastMsg = msgs.length > 0 ? msgs[msgs.length - 1] : null;
-
-        const isOnline = onlineUserSockets.has(key) && onlineUserSockets.get(key).size > 0;
-
-        chatItems.push({
-            username: contact.username,
-            avatar: contact.avatar || '/avatars/default.svg',
-            isOnline,
-            statusText: isOnline ? 'Online' : 'Offline',
-            lastSeen: isOnline ? 'Online' : 'Offline',
-            lastMessage: lastMsg ? {
-                id: lastMsg.id,
-                sender: lastMsg.sender,
-                recipient: lastMsg.recipient,
-                text: lastMsg.text,
-                file: lastMsg.file,
-                timestamp: lastMsg.timestamp,
-                date: lastMsg.date || 'Bugün',
-                isOutgoing: normalizeKey(lastMsg.sender) === currentKey
-            } : null,
-            unreadCount: msgs.filter(m => normalizeKey(m.recipient) === currentKey && !m.read).length
+        res.json({
+            success: true,
+            chats: chatItems,
+            currentUser: { username: req.user.username, avatar: req.user.avatar }
         });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
     }
-
-    res.json({
-        success: true,
-        chats: chatItems,
-        currentUser: { username: req.user.username, avatar: req.user.avatar }
-    });
 });
 
-// 7. Birebir Özel Mesaj Geçmişi (Yalnızca Gönderen ve Alan Arasında)
-app.get('/api/messages/:contact', authenticateToken, (req, res) => {
-    const currentUsername = req.user.username;
-    const contactUsername = req.params.contact;
-    const convoKey = getConvoKey(currentUsername, contactUsername);
+// 7. Birebir Özel Mesaj Geçmişi
+app.get('/api/messages/:contact', authenticateToken, async (req, res) => {
+    try {
+        const currentUsername = req.user.username;
+        const contactUsername = req.params.contact;
 
-    const msgs = conversations[convoKey] || [];
-    msgs.forEach(m => {
-        if (normalizeKey(m.recipient) === normalizeKey(currentUsername)) {
-            m.read = true;
+        const msgs = await db.getConversationMessages(currentUsername, contactUsername);
+        await db.markMessagesAsRead(contactUsername, currentUsername);
+
+        res.json({
+            success: true,
+            contact: contactUsername,
+            messages: msgs
+        });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// 8. Tekil Mesajı Silme API (Kullanıcı İsterse Silebilir)
+app.delete('/api/messages/:id', authenticateToken, async (req, res) => {
+    try {
+        const messageId = req.params.id;
+        const result = await db.deleteMessage(messageId, req.user.username);
+        if (!result.success) {
+            return res.status(400).json(result);
         }
-    });
-    saveMessages();
 
-    res.json({
-        success: true,
-        contact: contactUsername,
-        messages: msgs
-    });
+        // Anlık olarak her iki kullanıcının ekranından da mesajı sil
+        if (globalIo) {
+            const senderKey = normalizeKey(result.sender);
+            const recKey = normalizeKey(result.recipient);
+            const payload = { messageId, convoKey: result.convoKey };
+
+            globalIo.to('user:' + senderKey).emit('chat:message_deleted', payload);
+            if (recKey !== senderKey) {
+                globalIo.to('user:' + recKey).emit('chat:message_deleted', payload);
+            }
+        }
+
+        res.json({ success: true, messageId });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// 9. Tüm Sohbeti / Yazışmaları Temizleme API (Kullanıcı İsterse Silebilir)
+app.delete('/api/conversations/:contact', authenticateToken, async (req, res) => {
+    try {
+        const contactUsername = req.params.contact;
+        const result = await db.clearConversation(req.user.username, contactUsername, req.user.username);
+        if (!result.success) {
+            return res.status(400).json(result);
+        }
+
+        // Anlık olarak her iki kullanıcının ekranından da sohbeti temizle
+        if (globalIo) {
+            const user1Key = normalizeKey(req.user.username);
+            const user2Key = normalizeKey(contactUsername);
+
+            globalIo.to('user:' + user1Key).emit('chat:conversation_cleared', {
+                contactUsername: contactUsername,
+                by: req.user.username
+            });
+            globalIo.to('user:' + user2Key).emit('chat:conversation_cleared', {
+                contactUsername: req.user.username,
+                by: req.user.username
+            });
+        }
+
+        res.json({ success: true, contact: contactUsername });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
 });
 
 // ==========================================
@@ -603,6 +565,9 @@ const onlineUserSockets = new Map(); // userKey -> Set of socket.ids
 const socketToUserMap = new Map();   // socket.id -> { username, avatar }
 
 async function startServer() {
+    // 1. Veritabanını Başlat (Lite SQL / MySQL) ve Otomatik Taşıma
+    await db.init();
+
     const httpServer = http.createServer(app);
     let httpsServer = null;
 
@@ -626,10 +591,11 @@ async function startServer() {
 
     io.on('connection', (socket) => {
         // Kullanıcı Girişi
-        socket.on('user:join', (data) => {
+        socket.on('user:join', async (data) => {
             let username = (data.username || '').trim();
-            if (!username && data.token && persistentSessions[data.token]) {
-                username = persistentSessions[data.token].username;
+            if (!username && data.token) {
+                const session = await db.getSession(data.token);
+                if (session) username = session.username;
             }
             if (!username) {
                 socket.emit('auth:required');
@@ -637,7 +603,7 @@ async function startServer() {
             }
 
             const userKey = normalizeKey(username);
-            const existing = registeredUsers[userKey];
+            const existing = await db.getUser(username);
             const avatar = existing ? existing.avatar : (data.avatar || '/avatars/default.svg');
 
             socketToUserMap.set(socket.id, { username, avatar });
@@ -650,9 +616,11 @@ async function startServer() {
             // Kullanıcının kendi özel odasına katıl
             socket.join('user:' + userKey);
 
+            await db.updateUserLastSeen(username, 'Online');
+
             console.log(`[Kullanıcı Bağlandı] ${username} (${socket.id})`);
 
-            // Çevrimiçi durumunu anlık olarak herkese bildir (Online uyarısı için)
+            // Çevrimiçi durumunu anlık olarak herkese bildir
             io.emit('user:status_change', {
                 username: username,
                 isOnline: true,
@@ -664,22 +632,23 @@ async function startServer() {
             });
         });
 
-        // Birebir Özel Mesaj Gönderme
-        // KULLANICILAR ARASI YAZIŞMA ASLA BAŞKASI TARAFINDAN GÖRÜLEMEZ!
-        socket.on('chat:send_message', (msg, ack) => {
+        // Birebir Özel Mesaj Gönderme (Lite SQL'e Kalıcı Olarak Kaydedilir)
+        socket.on('chat:send_message', async (msg, ack) => {
             let sender = socketToUserMap.get(socket.id);
-            if (!sender && msg.token && persistentSessions[msg.token]) {
-                const username = persistentSessions[msg.token].username;
-                const userKey = normalizeKey(username);
-                const existing = registeredUsers[userKey];
-                const avatar = existing ? existing.avatar : '/avatars/default.svg';
-                sender = { username, avatar };
-                socketToUserMap.set(socket.id, sender);
-                if (!onlineUserSockets.has(userKey)) {
-                    onlineUserSockets.set(userKey, new Set());
+            if (!sender && msg.token) {
+                const session = await db.getSession(msg.token);
+                if (session) {
+                    const existing = await db.getUser(session.username);
+                    const avatar = existing ? existing.avatar : '/avatars/default.svg';
+                    sender = { username: session.username, avatar };
+                    socketToUserMap.set(socket.id, sender);
+                    const userKey = normalizeKey(session.username);
+                    if (!onlineUserSockets.has(userKey)) {
+                        onlineUserSockets.set(userKey, new Set());
+                    }
+                    onlineUserSockets.get(userKey).add(socket.id);
+                    socket.join('user:' + userKey);
                 }
-                onlineUserSockets.get(userKey).add(socket.id);
-                socket.join('user:' + userKey);
             }
 
             if (!sender) {
@@ -695,9 +664,8 @@ async function startServer() {
 
             const senderKey = normalizeKey(sender.username);
             const recipientKey = normalizeKey(recipient);
-            const convoKey = getConvoKey(sender.username, recipient);
 
-            const messageData = {
+            const savedMsg = await db.saveMessage({
                 id: 'msg_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6),
                 sender: sender.username,
                 recipient: recipient,
@@ -706,77 +674,97 @@ async function startServer() {
                 timestamp: new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }),
                 date: 'Bugün',
                 createdAt: new Date().toISOString(),
-                read: false // Mesajı alıcı açana kadar daima okunmamış (read: false) kalır!
-            };
-
-            if (!conversations[convoKey]) {
-                conversations[convoKey] = [];
-            }
-            conversations[convoKey].push(messageData);
-            if (conversations[convoKey].length > 500) {
-                conversations[convoKey].shift();
-            }
-            saveMessages();
+                read: false
+            });
 
             // GİZLİLİK GARANTİSİ:
             // Mesaj SADECE ve SADECE gönderen ve alan kullanıcının özel odalarına gönderilir!
-            io.to('user:' + senderKey).emit('chat:message', messageData);
+            io.to('user:' + senderKey).emit('chat:message', savedMsg);
             if (recipientKey !== senderKey) {
-                io.to('user:' + recipientKey).emit('chat:message', messageData);
+                io.to('user:' + recipientKey).emit('chat:message', savedMsg);
             }
 
-            if (ack) ack({ success: true, message: messageData });
+            if (ack) ack({ success: true, message: savedMsg });
         });
 
         // Mesajları Okundu Olarak İşaretleme
-        socket.on('chat:mark_read', ({ contactUsername }, ack) => {
+        socket.on('chat:mark_read', async ({ contactUsername }, ack) => {
             const sender = socketToUserMap.get(socket.id);
             if (!sender || !contactUsername) {
                 if (ack) ack({ success: false });
                 return;
             }
 
-            const convoKey = getConvoKey(sender.username, contactUsername);
-            const msgs = conversations[convoKey] || [];
-            let updated = false;
-
-            msgs.forEach(m => {
-                if (normalizeKey(m.recipient) === normalizeKey(sender.username) && !m.read) {
-                    m.read = true;
-                    updated = true;
-                }
+            await db.markMessagesAsRead(contactUsername, sender.username);
+            const contactKey = normalizeKey(contactUsername);
+            io.to('user:' + contactKey).emit('chat:messages_read', {
+                by: sender.username
             });
-
-            if (updated) {
-                saveMessages();
-                const contactKey = normalizeKey(contactUsername);
-                io.to('user:' + contactKey).emit('chat:messages_read', {
-                    by: sender.username
-                });
-            }
 
             if (ack) ack({ success: true });
         });
 
-        // Geçmiş Mesajları Yükleme
-        socket.on('chat:load_history', ({ contactUsername }, callback) => {
+        // Geçmiş Mesajları Yükleme (Lite SQL Veritabanından)
+        socket.on('chat:load_history', async ({ contactUsername }, callback) => {
             let sender = socketToUserMap.get(socket.id);
             if (!sender) {
                 if (callback) callback({ success: false, messages: [] });
                 return;
             }
 
-            const convoKey = getConvoKey(sender.username, contactUsername);
-            const msgs = conversations[convoKey] || [];
-
-            msgs.forEach(m => {
-                if (normalizeKey(m.recipient) === normalizeKey(sender.username)) {
-                    m.read = true;
-                }
-            });
-            saveMessages();
+            const msgs = await db.getConversationMessages(sender.username, contactUsername);
+            await db.markMessagesAsRead(contactUsername, sender.username);
 
             if (callback) callback({ success: true, messages: msgs });
+        });
+
+        // TEKİL MESAJ SİLME SOKETİ (Kullanıcı İsterse Silebilir)
+        socket.on('chat:delete_message', async ({ messageId }, ack) => {
+            const sender = socketToUserMap.get(socket.id);
+            if (!sender || !messageId) {
+                if (ack) ack({ success: false, error: 'Geçersiz istek' });
+                return;
+            }
+
+            const res = await db.deleteMessage(messageId, sender.username);
+            if (res.success) {
+                const sKey = normalizeKey(res.sender);
+                const rKey = normalizeKey(res.recipient);
+                const payload = { messageId, convoKey: res.convoKey };
+
+                io.to('user:' + sKey).emit('chat:message_deleted', payload);
+                if (rKey !== sKey) {
+                    io.to('user:' + rKey).emit('chat:message_deleted', payload);
+                }
+            }
+
+            if (ack) ack(res);
+        });
+
+        // SOHBETİ / YAZIŞMALARI TEMİZLEME SOKETİ (Kullanıcı İsterse Silebilir)
+        socket.on('chat:clear_conversation', async ({ contactUsername }, ack) => {
+            const sender = socketToUserMap.get(socket.id);
+            if (!sender || !contactUsername) {
+                if (ack) ack({ success: false, error: 'Geçersiz istek' });
+                return;
+            }
+
+            const res = await db.clearConversation(sender.username, contactUsername, sender.username);
+            if (res.success) {
+                const sKey = normalizeKey(sender.username);
+                const rKey = normalizeKey(contactUsername);
+
+                io.to('user:' + sKey).emit('chat:conversation_cleared', {
+                    contactUsername: contactUsername,
+                    by: sender.username
+                });
+                io.to('user:' + rKey).emit('chat:conversation_cleared', {
+                    contactUsername: sender.username,
+                    by: sender.username
+                });
+            }
+
+            if (ack) ack(res);
         });
 
         // Yazıyor Bildirimi
@@ -846,7 +834,7 @@ async function startServer() {
         });
 
         // Bağlantı Kesildiğinde (OFFLINE UYARISI)
-        socket.on('disconnect', () => {
+        socket.on('disconnect', async () => {
             const user = socketToUserMap.get(socket.id);
             if (user) {
                 const userKey = normalizeKey(user.username);
@@ -856,10 +844,8 @@ async function startServer() {
                     onlineUserSockets.get(userKey).delete(socket.id);
                     if (onlineUserSockets.get(userKey).size === 0) {
                         onlineUserSockets.delete(userKey);
-                        if (registeredUsers[userKey]) {
-                            registeredUsers[userKey].lastSeen = 'Offline';
-                            saveUsers();
-                        }
+                        await db.updateUserLastSeen(user.username, 'Offline');
+
                         // Çevrimdışı (Offline) olduğunu anlık olarak herkese bildir
                         io.emit('user:status_change', {
                             username: user.username,

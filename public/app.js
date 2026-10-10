@@ -86,6 +86,13 @@ const chatContactStatus = document.getElementById('chatContactStatus');
 const btnVideoCall = document.getElementById('btnVideoCall');
 const btnVoiceCall = document.getElementById('btnVoiceCall');
 const btnChatMenu = document.getElementById('btnChatMenu');
+const chatDropdownMenu = document.getElementById('chatDropdownMenu');
+const menuItemClearChat = document.getElementById('menuItemClearChat');
+const menuItemContactInfo = document.getElementById('menuItemContactInfo');
+const menuItemCloseChat = document.getElementById('menuItemCloseChat');
+const menuItemSwitchUser = document.getElementById('menuItemSwitchUser');
+const quickUsersContainer = document.getElementById('quickUsersContainer');
+const quickUsersList = document.getElementById('quickUsersList');
 
 const messagesContainer = document.getElementById('messagesContainer');
 const chatDateBadge = document.getElementById('chatDateBadge');
@@ -391,14 +398,27 @@ function updateUnreadBadges() {
 // ==========================================================
 
 async function initAuth() {
-    const token = sessionStorage.getItem('msj_token') || localStorage.getItem('msj_token');
+    // 0. Önceden kayıtlı ve önbelleğe alınmış sohbet listesi varsa ANINDA ekrana bas
+    // Böylece program kapatılıp açılınca kayıtlı kullanıcılar ekranda kalır!
+    const cachedContacts = localStorage.getItem('msj_cached_contacts');
+    if (cachedContacts) {
+        try {
+            const parsed = JSON.parse(cachedContacts);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+                contactsList = parsed;
+                renderChatsList(contactsList);
+            }
+        } catch (e) {}
+    }
+
+    const token = localStorage.getItem('msj_token') || sessionStorage.getItem('msj_token');
     const savedUserStr = localStorage.getItem('msj_user');
     const savedUsername = localStorage.getItem('msj_saved_username') || '';
 
-    // Kayıtlı kullanıcı listesini sunucudan çek (Giriş seçimi için)
+    // Kayıtlı kullanıcı listesini Lite SQL veritabanından çek
     const userCount = await loadRegisteredUsersDropdown();
 
-    // 1. Eğer yerel hafızada geçerli token varsa sessizce doğrudan giriş yap
+    // 1. Eğer yerel hafızada kayıtlı kullanıcı ve kalıcı token varsa doğrudan giriş yap
     if (token) {
         try {
             const res = await fetch('/api/auth/verify', {
@@ -407,7 +427,7 @@ async function initAuth() {
                 body: JSON.stringify({ token })
             });
             const data = await res.json();
-            if (data.success) {
+            if (data.success && data.user) {
                 onUserAuthenticated(data.user, token);
                 return;
             }
@@ -422,8 +442,7 @@ async function initAuth() {
         }
     }
 
-    // 2. Token yoksa: Eğer veritabanı tamamen boşsa doğrudan Yeni Kayıt aç,
-    // kayıtlı kullanıcı varsa Şifre Giriş ekranı aç (Sürekli kayıt ekranı çıkmaz!)
+    // 2. Token yoksa veya oturum açılmamışsa:
     if (userCount === 0 && !savedUsername) {
         showRegisterPrompt();
     } else {
@@ -476,13 +495,36 @@ async function loadRegisteredUsersDropdown() {
         const data = await res.json();
         if (data.success && data.users) {
             selectRegisteredUser.innerHTML = '<option value="">-- Kayıtlı Kullanıcı Seçin --</option>';
+            if (quickUsersList) quickUsersList.innerHTML = '';
+
             data.users.forEach(u => {
                 const opt = document.createElement('option');
                 opt.value = u.username;
                 const statusSuffix = u.lastSeen === 'Online' ? ' (Online)' : ' (Offline)';
                 opt.textContent = `${u.username}${statusSuffix}`;
                 selectRegisteredUser.appendChild(opt);
+
+                if (quickUsersList) {
+                    const chip = document.createElement('button');
+                    chip.type = 'button';
+                    chip.className = 'quick-user-chip';
+                    chip.innerHTML = `
+                        <img src="${u.avatar || '/avatars/default.svg'}" class="avatar-mini" alt="${escapeHtml(u.username)}">
+                        <span><strong>${escapeHtml(u.username)}</strong></span>
+                    `;
+                    chip.addEventListener('click', () => {
+                        inputUsername.value = u.username;
+                        inputPassword.value = '';
+                        inputPassword.focus();
+                    });
+                    quickUsersList.appendChild(chip);
+                }
             });
+
+            if (quickUsersContainer) {
+                quickUsersContainer.style.display = data.users.length > 0 ? 'block' : 'none';
+            }
+
             return data.users.length;
         }
     } catch (e) {}
@@ -586,7 +628,7 @@ function onUserAuthenticated(user, token) {
 // ==========================================================
 
 async function loadChatsList() {
-    const token = sessionStorage.getItem('msj_token') || localStorage.getItem('msj_token');
+    const token = localStorage.getItem('msj_token') || sessionStorage.getItem('msj_token');
     if (!token) return;
 
     try {
@@ -597,6 +639,7 @@ async function loadChatsList() {
 
         if (data.success && data.chats) {
             contactsList = data.chats;
+            localStorage.setItem('msj_cached_contacts', JSON.stringify(contactsList));
             renderChatsList(contactsList);
         }
     } catch (err) {
@@ -859,8 +902,10 @@ function appendMessageBubble(msg) {
     }
 
     const textContent = msg.text ? `<span class="message-text">${formatMessageText(msg.text)}</span>` : '';
+    const deleteBtn = msg.id ? `<button type="button" class="btn-msg-delete" title="Bu mesajı sil" onclick="requestDeleteMessage('${msg.id}')">&times;</button>` : '';
 
     bubble.innerHTML = `
+        ${deleteBtn}
         ${fileContent}
         ${textContent}
         <div class="bubble-meta">
@@ -1181,6 +1226,25 @@ socket.on('chat:messages_read', (data) => {
     }
 });
 
+// Mesaj Silindi Bildirimi (Her iki taraf için)
+socket.on('chat:message_deleted', (data) => {
+    if (data && data.messageId) {
+        removeMessageBubbleFromDom(data.messageId);
+        loadChatsList();
+    }
+});
+
+// Sohbet Temizlendi Bildirimi (Her iki taraf için)
+socket.on('chat:conversation_cleared', (data) => {
+    if (activeContact && (
+        normalizeKey(activeContact.username) === normalizeKey(data.contactUsername) ||
+        normalizeKey(activeContact.username) === normalizeKey(data.by)
+    )) {
+        clearMessagesFromDom();
+    }
+    loadChatsList();
+});
+
 // Karşı Taraf Yazıyor Bildirimi
 socket.on('chat:typing', (data) => {
     if (activeContact && normalizeKey(data.username) === normalizeKey(activeContact.username)) {
@@ -1470,7 +1534,90 @@ btnHeaderMenu.addEventListener('click', (e) => {
 
 document.addEventListener('click', () => {
     headerDropdown.style.display = 'none';
+    if (chatDropdownMenu) chatDropdownMenu.style.display = 'none';
 });
+
+// ==========================================================
+// MESAJ VE SOHBET SİLME İŞLEMLERİ (LİTE SQL İLE ENTEGRE)
+// ==========================================================
+window.requestDeleteMessage = function(msgId) {
+    if (!msgId) return;
+    if (confirm('Bu mesajı her iki taraftan da kalıcı olarak silmek istediğinize emin misiniz?')) {
+        socket.emit('chat:delete_message', { messageId: msgId }, (res) => {
+            if (res && res.success) {
+                removeMessageBubbleFromDom(msgId);
+                loadChatsList();
+            } else {
+                alert(res && res.error ? res.error : 'Mesaj silinemedi.');
+            }
+        });
+    }
+};
+
+function removeMessageBubbleFromDom(msgId) {
+    const el = document.getElementById(msgId);
+    if (el) {
+        el.style.transition = 'opacity 0.25s, transform 0.25s';
+        el.style.opacity = '0';
+        el.style.transform = 'scale(0.92)';
+        setTimeout(() => el.remove(), 250);
+    }
+}
+
+function clearMessagesFromDom() {
+    const todayFormatted = new Date().toLocaleDateString('tr-TR', { day: 'numeric', month: 'long', year: 'numeric' });
+    messagesContainer.innerHTML = `
+        <div class="date-pill-badge" id="chatDateBadge">${todayFormatted}</div>
+        <div class="encryption-warning-banner">
+            <span class="enc-icon">🔒</span>
+            <span class="enc-text">
+                Mesajlar ve aramalar uçtan uca şifrelidir. Bu sohbetteki yazışmalar temizlendi.
+            </span>
+        </div>
+    `;
+}
+
+if (btnChatMenu && chatDropdownMenu) {
+    btnChatMenu.addEventListener('click', (e) => {
+        e.stopPropagation();
+        chatDropdownMenu.style.display = chatDropdownMenu.style.display === 'none' ? 'block' : 'none';
+    });
+}
+
+if (menuItemClearChat) {
+    menuItemClearChat.addEventListener('click', () => {
+        if (!activeContact) return;
+        if (confirm(`${activeContact.username} ile olan tüm yazışmaları silmek istediğinize emin misiniz?\nBu işlem geri alınamaz.`)) {
+            socket.emit('chat:clear_conversation', { contactUsername: activeContact.username }, (res) => {
+                if (res && res.success) {
+                    clearMessagesFromDom();
+                    loadChatsList();
+                } else {
+                    alert(res && res.error ? res.error : 'Sohbet temizlenemedi.');
+                }
+            });
+        }
+    });
+}
+
+if (menuItemCloseChat) {
+    menuItemCloseChat.addEventListener('click', () => {
+        closeActiveChat();
+    });
+}
+
+if (menuItemContactInfo) {
+    menuItemContactInfo.addEventListener('click', () => {
+        if (!activeContact) return;
+        alert(`Kullanıcı: ${activeContact.username}\nDurum: ${activeContact.isOnline ? 'Çevrimiçi (Online)' : 'Çevrimdışı (Offline)'}`);
+    });
+}
+
+if (menuItemSwitchUser) {
+    menuItemSwitchUser.addEventListener('click', () => {
+        showPasswordPrompt('');
+    });
+}
 
 menuItemLogout.addEventListener('click', () => {
     if (confirm('Oturumu kapatmak istediğinize emin misiniz?')) {

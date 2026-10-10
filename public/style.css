@@ -1734,3 +1734,100 @@ html, body {
         max-width: 88%;
     }
 }
+
+/* ==========================================================
+   MESAJ SİLME VE SOHBET SEÇENEKLERİ
+   ========================================================== */
+.message-bubble {
+    position: relative;
+    padding-right: 22px;
+}
+
+.btn-msg-delete {
+    position: absolute;
+    top: 3px;
+    right: 3px;
+    background: transparent;
+    border: none;
+    color: rgba(255, 255, 255, 0.35);
+    font-size: 13px;
+    line-height: 1;
+    padding: 2px 4px;
+    cursor: pointer;
+    border-radius: 4px;
+    opacity: 0;
+    transition: opacity 0.2s, color 0.2s, background-color 0.2s;
+    user-select: none;
+}
+
+.message-bubble:hover .btn-msg-delete,
+.message-bubble:focus-within .btn-msg-delete {
+    opacity: 1;
+}
+
+@media (hover: none) {
+    .btn-msg-delete {
+        opacity: 0.65;
+    }
+}
+
+.btn-msg-delete:hover {
+    color: #ff5252;
+    background-color: rgba(255, 82, 82, 0.18);
+}
+
+.chat-options-dropdown {
+    position: absolute;
+    top: 56px;
+    right: 14px;
+    z-index: 1000;
+}
+
+.quick-users-wrapper {
+    margin-bottom: 14px;
+    padding: 10px 12px;
+    background: rgba(255, 255, 255, 0.04);
+    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.quick-users-label {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-bottom: 8px;
+    font-weight: 500;
+}
+
+.quick-users-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.quick-user-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    background: var(--bg-hover);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 20px;
+    padding: 4px 12px 4px 6px;
+    color: var(--text-primary);
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.quick-user-chip:hover {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+    transform: translateY(-1px);
+}
+
+.quick-user-chip .avatar-mini {
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+}
+

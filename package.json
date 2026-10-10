@@ -6,6 +6,9 @@
   "scripts": {
     "start": "node server.js"
   },
+  "engines": {
+    "node": ">=22.5.0"
+  },
   "keywords": [
     "messaging",
     "webrtc",
@@ -19,6 +22,7 @@
     "cors": "^2.8.6",
     "express": "^5.2.1",
     "multer": "^2.4.0",
+    "mysql2": "^3.24.5",
     "qrcode": "^1.5.4",
     "selfsigned": "^5.5.0",
     "socket.io": "^4.8.4",
