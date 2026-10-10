@@ -1,5 +1,5 @@
 // MSJ Service Worker - PWA Kurulabilirlik, Çevrimdışı Önbellek ve Bildirimler
-const CACHE_NAME = 'msj-cache-v5';
+const CACHE_NAME = 'msj-cache-v7';
 const ASSETS = [
     '/',
     '/index.html',

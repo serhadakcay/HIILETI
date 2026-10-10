@@ -13,7 +13,7 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="HIHaberleşme">
     <meta name="mobile-web-app-capable" content="yes">
-    <link rel="stylesheet" href="/style.css">
+    <link rel="stylesheet" href="/style.css?v=6">
 </head>
 <body>
     <!-- ==========================================
@@ -258,6 +258,12 @@
                 <p id="authSubtitle">Devam etmek için şifrenizi girin</p>
             </div>
 
+            <!-- GİRİŞ YAP / YENİ KULLANICI EKLE SEKMELERİ -->
+            <div class="auth-tabs-header">
+                <button type="button" class="auth-tab-btn active" id="tabAuthLogin">🔑 Giriş Yap</button>
+                <button type="button" class="auth-tab-btn" id="tabAuthRegister">➕ Yeni Kullanıcı Ekle</button>
+            </div>
+
             <!-- HATIRLANAN KULLANICI PROFİLİ -->
             <div class="remembered-user-box" id="rememberedUserBox" style="display:none;">
                 <img id="rememberedAvatar" class="avatar" src="/avatars/default.svg" alt="Avatar">
@@ -288,13 +294,22 @@
                 <!-- Şifre Alanı -->
                 <div class="form-field">
                     <label for="inputPassword">Şifre</label>
-                    <input type="password" id="inputPassword" class="auth-input" placeholder="Şifrenizi girin" required autocomplete="current-password" />
+                    <div class="input-password-wrap">
+                        <input type="password" id="inputPassword" class="auth-input" placeholder="Şifrenizi girin" required autocomplete="current-password" />
+                        <button type="button" class="btn-toggle-password" id="btnTogglePassword" title="Şifreyi Göster/Gizle" tabindex="-1">👁️</button>
+                    </div>
+                    <div class="forgot-password-row" id="rowForgotPassword">
+                        <button type="button" class="btn-forgot-password" id="btnForgotPassword">🔑 Şifremi Unuttum / Sıfırla</button>
+                    </div>
                 </div>
 
                 <!-- Yeni Kayıt İçin Şifre Tekrar -->
                 <div class="form-field" id="fieldConfirmPassword" style="display:none;">
                     <label for="inputConfirmPassword">Şifre Tekrar</label>
-                    <input type="password" id="inputConfirmPassword" class="auth-input" placeholder="Şifrenizi tekrar girin" autocomplete="new-password" />
+                    <div class="input-password-wrap">
+                        <input type="password" id="inputConfirmPassword" class="auth-input" placeholder="Şifrenizi tekrar girin" autocomplete="new-password" />
+                        <button type="button" class="btn-toggle-password" id="btnToggleConfirmPassword" title="Şifreyi Göster/Gizle" tabindex="-1">👁️</button>
+                    </div>
                 </div>
 
                 <!-- Beni Hatırla -->
@@ -314,8 +329,43 @@
                 <!-- Kayıt Ol / Giriş Yap Mod Değiştirici -->
                 <div class="auth-toggle-row">
                     <button type="button" class="btn-toggle-mode" id="btnToggleAuthMode">Hesabınız yok mu? Yeni Kullanıcı Aç</button>
+                    <button type="button" class="btn-cancel-auth" id="btnCancelAuth" style="display:none;">← Vazgeç ve Mevcut Hesaba Dön</button>
                 </div>
             </form>
+        </div>
+    </div>
+
+    <!-- ==========================================
+         KULLANICI PROFİLİ MODALI (PROFILE MODAL)
+         ========================================== -->
+    <div class="profile-modal-overlay" id="profileModal" style="display:none;">
+        <div class="profile-modal-card">
+            <div class="profile-modal-header">
+                <h3>👤 Kullanıcı Profilim</h3>
+                <button type="button" class="profile-close-btn" id="btnCloseProfileModal">&times;</button>
+            </div>
+            <div class="profile-modal-body">
+                <div class="profile-avatar-large-wrap">
+                    <img id="profileUserAvatar" class="avatar-large" src="/avatars/default.svg" alt="Avatar">
+                </div>
+                <h2 id="profileUsernameDisplay" class="profile-name">Kullanıcı</h2>
+                <div class="profile-badge-online">🟢 Çevrimiçi (Aktif Hesap)</div>
+                
+                <div class="profile-actions-list">
+                    <button type="button" class="profile-action-btn primary" id="btnProfileNewUser">
+                        ➕ Yeni Kullanıcı Hesabı Ekle
+                    </button>
+                    <button type="button" class="profile-action-btn secondary" id="btnProfileSwitchUser">
+                        🔄 Başka Kullanıcı Hesabına Geç
+                    </button>
+                    <button type="button" class="profile-action-btn warning" id="btnProfileChangePass">
+                        🔑 Şifremi Değiştir / Güncelle
+                    </button>
+                    <button type="button" class="profile-action-btn danger" id="btnProfileLogout">
+                        🚪 Profilden Çıkış Yap
+                    </button>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -505,6 +555,6 @@
     </div>
 
     <script src="/socket.io/socket.io.js"></script>
-    <script src="/app.js"></script>
+    <script src="/app.js?v=6"></script>
 </body>
 </html>

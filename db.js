@@ -304,6 +304,32 @@ class DatabaseManager {
         }
     }
 
+    async updateUserPassword(usernameOrKey, salt, hash) {
+        const userKey = normalizeKey(usernameOrKey);
+        if (!userKey) return null;
+        if (this.type === 'mysql') {
+            await this.mysqlPool.query('UPDATE users SET salt = ?, hash = ? WHERE user_key = ?', [salt, hash, userKey]);
+        } else {
+            this.sqliteDb.prepare('UPDATE users SET salt = ?, hash = ? WHERE user_key = ?').run(salt, hash, userKey);
+            try { this.sqliteDb.exec('PRAGMA wal_checkpoint(PASSIVE);'); } catch (e) {}
+        }
+
+        // users.json varsa senkronize güncelle
+        try {
+            const usersFile = path.join(__dirname, 'data', 'users.json');
+            if (fs.existsSync(usersFile)) {
+                const raw = JSON.parse(fs.readFileSync(usersFile, 'utf8'));
+                if (raw[userKey]) {
+                    raw[userKey].salt = salt;
+                    raw[userKey].hash = hash;
+                    fs.writeFileSync(usersFile, JSON.stringify(raw, null, 2), 'utf8');
+                }
+            }
+        } catch (e) {}
+
+        return await this.getUser(userKey);
+    }
+
     formatUserRow(row) {
         return {
             id: row.id,
@@ -345,6 +371,32 @@ class DatabaseManager {
         }
     }
 
+    async getLastSessionForUser(usernameOrKey) {
+        const userKey = normalizeKey(usernameOrKey);
+        if (!userKey) return null;
+        if (this.type === 'mysql') {
+            const [rows] = await this.mysqlPool.query('SELECT * FROM sessions WHERE user_key = ? ORDER BY last_used DESC LIMIT 1', [userKey]);
+            if (rows.length === 0) return null;
+            return {
+                token: rows[0].token,
+                userKey: rows[0].user_key,
+                username: rows[0].username,
+                createdAt: rows[0].created_at,
+                lastUsed: rows[0].last_used
+            };
+        } else {
+            const row = this.sqliteDb.prepare('SELECT * FROM sessions WHERE user_key = ? ORDER BY last_used DESC LIMIT 1').get(userKey);
+            if (!row) return null;
+            return {
+                token: row.token,
+                userKey: row.user_key,
+                username: row.username,
+                createdAt: row.created_at,
+                lastUsed: row.last_used
+            };
+        }
+    }
+
     async saveSession(token, username, createdAt, lastUsed) {
         const userKey = normalizeKey(username);
         const created = createdAt || new Date().toISOString();
@@ -363,6 +415,7 @@ class DatabaseManager {
                 VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(token) DO UPDATE SET last_used = excluded.last_used
             `).run(token, userKey, username, created, used);
+            try { this.sqliteDb.exec('PRAGMA wal_checkpoint(PASSIVE);'); } catch (e) {}
         }
     }
 
@@ -381,6 +434,16 @@ class DatabaseManager {
             await this.mysqlPool.query('DELETE FROM sessions WHERE token = ?', [token]);
         } else {
             this.sqliteDb.prepare('DELETE FROM sessions WHERE token = ?').run(token);
+        }
+    }
+
+    async deleteSessionsForUser(usernameOrKey) {
+        const userKey = normalizeKey(usernameOrKey);
+        if (!userKey) return;
+        if (this.type === 'mysql') {
+            await this.mysqlPool.query('DELETE FROM sessions WHERE user_key = ?', [userKey]);
+        } else {
+            this.sqliteDb.prepare('DELETE FROM sessions WHERE user_key = ?').run(userKey);
         }
     }
 

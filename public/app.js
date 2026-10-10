@@ -150,6 +150,23 @@ const chkRememberMe = document.getElementById('chkRememberMe');
 const authErrorMsg = document.getElementById('authErrorMsg');
 const btnAuthSubmit = document.getElementById('btnAuthSubmit');
 const btnToggleAuthMode = document.getElementById('btnToggleAuthMode');
+const btnTogglePassword = document.getElementById('btnTogglePassword');
+const btnToggleConfirmPassword = document.getElementById('btnToggleConfirmPassword');
+const rowForgotPassword = document.getElementById('rowForgotPassword');
+const btnForgotPassword = document.getElementById('btnForgotPassword');
+const tabAuthLogin = document.getElementById('tabAuthLogin');
+const tabAuthRegister = document.getElementById('tabAuthRegister');
+const btnCancelAuth = document.getElementById('btnCancelAuth');
+
+// Profil Modalı
+const profileModal = document.getElementById('profileModal');
+const btnCloseProfileModal = document.getElementById('btnCloseProfileModal');
+const profileUserAvatar = document.getElementById('profileUserAvatar');
+const profileUsernameDisplay = document.getElementById('profileUsernameDisplay');
+const btnProfileNewUser = document.getElementById('btnProfileNewUser');
+const btnProfileSwitchUser = document.getElementById('btnProfileSwitchUser');
+const btnProfileChangePass = document.getElementById('btnProfileChangePass');
+const btnProfileLogout = document.getElementById('btnProfileLogout');
 
 // Arama & Önizleme Modalları
 const incomingCallModal = document.getElementById('incomingCallModal');
@@ -423,35 +440,74 @@ async function initAuth() {
     const token = localStorage.getItem('msj_token') || sessionStorage.getItem('msj_token');
     const savedUserStr = localStorage.getItem('msj_user');
     const savedUsername = localStorage.getItem('msj_saved_username') || '';
+    const isAutoLogin = localStorage.getItem('msj_auto_login') === 'true';
 
-    // Kayıtlı kullanıcı listesini Lite SQL veritabanından çek
-    const userCount = await loadRegisteredUsersDropdown();
+    // 1. Eğer yerel hafızada kalıcı token varsa (Beni Hatırla aktifken) doğrudan giriş yapmayı dene
+    // Sunucu yeni açılıyorsa birkaç saniye bekle ve tekrar dene (hemen şifre ekranına atma!)
+    if (token && isAutoLogin) {
+        let attempts = 0;
+        let verified = false;
 
-    // 1. Eğer yerel hafızada kayıtlı kullanıcı ve kalıcı token varsa doğrudan giriş yap
-    if (token) {
+        while (attempts < 5 && !verified) {
+            try {
+                const res = await fetch('/api/auth/verify', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ token })
+                });
+                const data = await res.json();
+                if (data.success && data.user) {
+                    onUserAuthenticated(data.user, token);
+                    authModal.style.display = 'none';
+                    return;
+                } else {
+                    // Token geçersizse döngüden çık
+                    break;
+                }
+            } catch (e) {
+                // Sunucu henüz açılıyor olabilir, 600ms bekle ve tekrar dene
+                attempts++;
+                if (attempts < 5) {
+                    await new Promise(r => setTimeout(r, 600));
+                }
+            }
+        }
+    }
+
+    // 2. Token geçersiz veya yoksa, ama bu cihazda kayıtlı bir kullanıcı ve "Beni Hatırla" varsa:
+    // Otomatik giriş API'si ile şifre sormadan oturumu yenile
+    if (savedUsername && isAutoLogin) {
         try {
-            const res = await fetch('/api/auth/verify', {
+            const autoRes = await fetch('/api/auth/auto_login', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ token })
+                body: JSON.stringify({ username: savedUsername, token })
             });
-            const data = await res.json();
-            if (data.success && data.user) {
-                onUserAuthenticated(data.user, token);
+            const autoData = await autoRes.json();
+            if (autoData.success && autoData.user) {
+                localStorage.setItem('msj_token', autoData.token);
+                localStorage.setItem('msj_user', JSON.stringify(autoData.user));
+                onUserAuthenticated(autoData.user, autoData.token);
+                authModal.style.display = 'none';
                 return;
             }
         } catch (e) {
+            // Çevrimdışı / yerel kullanıcı yedeği
             if (savedUserStr) {
                 try {
                     const localUser = JSON.parse(savedUserStr);
-                    onUserAuthenticated(localUser, token);
+                    onUserAuthenticated(localUser, token || 'local_session');
+                    authModal.style.display = 'none';
                     return;
                 } catch(err) {}
             }
         }
     }
 
-    // 2. Token yoksa veya oturum açılmamışsa:
+    // 3. Kullanıcı listesini yükle
+    const userCount = await loadRegisteredUsersDropdown();
+
+    // 4. Otomatik giriş yapılmadıysa şifre veya kayıt modunu aç
     if (userCount === 0 && !savedUsername) {
         showRegisterPrompt();
     } else {
@@ -461,11 +517,16 @@ async function initAuth() {
 
 function showRegisterPrompt() {
     authMode = 'register';
+    if (tabAuthRegister) tabAuthRegister.classList.add('active');
+    if (tabAuthLogin) tabAuthLogin.classList.remove('active');
     authModal.style.display = 'flex';
     authErrorMsg.style.display = 'none';
+    authErrorMsg.innerHTML = '';
     rememberedUserBox.style.display = 'none';
     fieldUsernameSelect.style.display = 'block';
     fieldConfirmPassword.style.display = 'block';
+    if (rowForgotPassword) rowForgotPassword.style.display = 'none';
+    if (btnCancelAuth) btnCancelAuth.style.display = currentUser ? 'inline-block' : 'none';
     authSubtitle.textContent = 'Yeni kullanıcı hesabı oluşturun';
     btnAuthSubmit.textContent = 'Kayıt Ol ve Giriş Yap';
     btnToggleAuthMode.textContent = 'Zaten hesabınız var mı? Giriş Yap';
@@ -477,24 +538,33 @@ function showRegisterPrompt() {
 
 function showPasswordPrompt(username) {
     authMode = 'login';
+    if (tabAuthLogin) tabAuthLogin.classList.add('active');
+    if (tabAuthRegister) tabAuthRegister.classList.remove('active');
     authModal.style.display = 'flex';
     authErrorMsg.style.display = 'none';
+    authErrorMsg.innerHTML = '';
     fieldConfirmPassword.style.display = 'none';
+    if (btnCancelAuth) btnCancelAuth.style.display = currentUser ? 'inline-block' : 'none';
     btnAuthSubmit.textContent = 'Giriş Yap';
     btnToggleAuthMode.textContent = 'Hesabınız yok mu? Yeni Kullanıcı Aç';
 
     if (username) {
+        authSubtitle.textContent = 'Devam etmek için şifrenizi girin';
         rememberedUserBox.style.display = 'flex';
         rememberedName.textContent = username;
         rememberedAvatar.src = `/avatars/default.svg`;
         fieldUsernameSelect.style.display = 'none';
         inputUsername.value = username;
         inputPassword.value = '';
+        if (rowForgotPassword) rowForgotPassword.style.display = 'block';
         inputPassword.focus();
     } else {
+        authSubtitle.textContent = 'Kullanıcı adı ve şifrenizle giriş yapın';
         rememberedUserBox.style.display = 'none';
         fieldUsernameSelect.style.display = 'block';
         inputPassword.value = '';
+        if (rowForgotPassword) rowForgotPassword.style.display = 'none';
+        inputUsername.focus();
     }
 }
 
@@ -523,6 +593,11 @@ async function loadRegisteredUsersDropdown() {
                     `;
                     chip.addEventListener('click', () => {
                         inputUsername.value = u.username;
+                        rememberedName.textContent = u.username;
+                        rememberedAvatar.src = u.avatar || '/avatars/default.svg';
+                        rememberedUserBox.style.display = 'flex';
+                        fieldUsernameSelect.style.display = 'none';
+                        if (rowForgotPassword) rowForgotPassword.style.display = 'block';
                         inputPassword.value = '';
                         inputPassword.focus();
                     });
@@ -550,6 +625,7 @@ selectRegisteredUser.addEventListener('change', () => {
 btnSwitchAccount.addEventListener('click', () => {
     rememberedUserBox.style.display = 'none';
     fieldUsernameSelect.style.display = 'block';
+    if (rowForgotPassword) rowForgotPassword.style.display = 'none';
     inputUsername.value = '';
     inputPassword.value = '';
     inputUsername.focus();
@@ -559,15 +635,94 @@ btnToggleAuthMode.addEventListener('click', () => {
     if (authMode === 'login') {
         showRegisterPrompt();
     } else {
-        showPasswordPrompt('');
+        showPasswordPrompt(inputUsername.value.trim() || localStorage.getItem('msj_saved_username') || '');
     }
 });
+
+if (tabAuthLogin) {
+    tabAuthLogin.addEventListener('click', () => {
+        const u = inputUsername.value.trim() || (rememberedUserBox.style.display !== 'none' ? rememberedName.textContent.trim() : '') || localStorage.getItem('msj_saved_username') || '';
+        showPasswordPrompt(u);
+    });
+}
+
+if (tabAuthRegister) {
+    tabAuthRegister.addEventListener('click', () => {
+        showRegisterPrompt();
+    });
+}
+
+if (btnCancelAuth) {
+    btnCancelAuth.addEventListener('click', () => {
+        authModal.style.display = 'none';
+    });
+}
+
+// Şifre Göster / Gizle Butonları
+if (btnTogglePassword) {
+    btnTogglePassword.addEventListener('click', () => {
+        const isPass = inputPassword.type === 'password';
+        inputPassword.type = isPass ? 'text' : 'password';
+        btnTogglePassword.textContent = isPass ? '🙈' : '👁️';
+    });
+}
+if (btnToggleConfirmPassword) {
+    btnToggleConfirmPassword.addEventListener('click', () => {
+        const isPass = inputConfirmPassword.type === 'password';
+        inputConfirmPassword.type = isPass ? 'text' : 'password';
+        btnToggleConfirmPassword.textContent = isPass ? '🙈' : '👁️';
+    });
+}
+
+// Şifremi Unuttum / Sıfırla Butonu
+if (btnForgotPassword) {
+    btnForgotPassword.addEventListener('click', async () => {
+        const user = inputUsername.value.trim() || rememberedName.textContent.trim();
+        if (!user) {
+            alert('Lütfen önce bir kullanıcı adı seçin.');
+            return;
+        }
+        const newPass = prompt(`"${user}" hesabı için yeni şifrenizi girin (en az 3 karakter):`);
+        if (newPass === null) return;
+        if (!newPass || newPass.trim().length < 3) {
+            alert('Şifre en az 3 karakter olmalıdır.');
+            return;
+        }
+        try {
+            btnForgotPassword.disabled = true;
+            btnForgotPassword.textContent = 'Güncelleniyor...';
+            const res = await fetch('/api/auth/reset_password', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username: user, newPassword: newPass.trim() })
+            });
+            const data = await res.json();
+            if (data.success) {
+                localStorage.setItem('msj_saved_username', data.user.username);
+                localStorage.setItem('msj_auto_login', 'true');
+                localStorage.setItem('msj_token', data.token);
+                localStorage.setItem('msj_user', JSON.stringify(data.user));
+                onUserAuthenticated(data.user, data.token);
+                authModal.style.display = 'none';
+                alert('Şifreniz başarıyla güncellendi ve giriş yapıldı!');
+            } else {
+                alert(data.error || 'Şifre güncellenemedi.');
+            }
+        } catch(e) {
+            alert('Sunucuya bağlanılamadı.');
+        } finally {
+            btnForgotPassword.disabled = false;
+            btnForgotPassword.textContent = '🔑 Şifremi Unuttum / Sıfırla';
+        }
+    });
+}
 
 document.getElementById('authForm').addEventListener('submit', async (e) => {
     e.preventDefault();
     authErrorMsg.style.display = 'none';
+    authErrorMsg.innerHTML = '';
 
-    const username = inputUsername.value.trim();
+    const username = (inputUsername.value.trim() || (rememberedUserBox.style.display !== 'none' ? rememberedName.textContent.trim() : '')).trim();
     const password = inputPassword.value;
 
     if (!username || !password) {
@@ -599,9 +754,8 @@ document.getElementById('authForm').addEventListener('submit', async (e) => {
 
         if (data.success) {
             const remember = chkRememberMe.checked;
-            if (remember) {
-                localStorage.setItem('msj_saved_username', data.user.username);
-            }
+            localStorage.setItem('msj_saved_username', data.user.username);
+            localStorage.setItem('msj_auto_login', remember ? 'true' : 'false');
             sessionStorage.setItem('msj_token', data.token);
             localStorage.setItem('msj_token', data.token);
             localStorage.setItem('msj_user', JSON.stringify(data.user));
@@ -609,7 +763,75 @@ document.getElementById('authForm').addEventListener('submit', async (e) => {
             onUserAuthenticated(data.user, data.token);
             authModal.style.display = 'none';
         } else {
-            authErrorMsg.textContent = data.error || 'İşlem başarısız.';
+            authErrorMsg.innerHTML = escapeHtml(data.error || 'İşlem başarısız.');
+
+            // Eğer şifre sıfırlanabilir durumdaysa hızlı aksiyon butonu ekle
+            if (data.canReset) {
+                if (authMode === 'login') {
+                    const resetBtn = document.createElement('button');
+                    resetBtn.type = 'button';
+                    resetBtn.className = 'btn-inline-reset';
+                    resetBtn.textContent = '🔄 Bu Şifreyi Yeni Şifrem Yap ve Giriş Yap';
+                    resetBtn.addEventListener('click', async () => {
+                        try {
+                            resetBtn.disabled = true;
+                            resetBtn.textContent = 'Kaydediliyor...';
+                            const rRes = await fetch('/api/auth/reset_password', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ username, newPassword: password })
+                            });
+                            const rData = await rRes.json();
+                            if (rData.success) {
+                                localStorage.setItem('msj_saved_username', rData.user.username);
+                                localStorage.setItem('msj_auto_login', 'true');
+                                localStorage.setItem('msj_token', rData.token);
+                                localStorage.setItem('msj_user', JSON.stringify(rData.user));
+                                onUserAuthenticated(rData.user, rData.token);
+                                authModal.style.display = 'none';
+                            } else {
+                                alert(rData.error || 'Şifre güncellenemedi.');
+                            }
+                        } catch(err) {
+                            alert('Sunucuya bağlanılamadı.');
+                        }
+                    });
+                    authErrorMsg.appendChild(document.createElement('br'));
+                    authErrorMsg.appendChild(resetBtn);
+                } else if (authMode === 'register') {
+                    const resetBtn = document.createElement('button');
+                    resetBtn.type = 'button';
+                    resetBtn.className = 'btn-inline-reset';
+                    resetBtn.textContent = '⚡ Bu Kullanıcı Adıyla Şifreyi Güncelle ve Gir';
+                    resetBtn.addEventListener('click', async () => {
+                        try {
+                            resetBtn.disabled = true;
+                            resetBtn.textContent = 'Kaydediliyor...';
+                            const rRes = await fetch('/api/auth/register', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ username, password, resetExisting: true })
+                            });
+                            const rData = await rRes.json();
+                            if (rData.success) {
+                                localStorage.setItem('msj_saved_username', rData.user.username);
+                                localStorage.setItem('msj_auto_login', 'true');
+                                localStorage.setItem('msj_token', rData.token);
+                                localStorage.setItem('msj_user', JSON.stringify(rData.user));
+                                onUserAuthenticated(rData.user, rData.token);
+                                authModal.style.display = 'none';
+                            } else {
+                                alert(rData.error || 'İşlem başarısız.');
+                            }
+                        } catch(err) {
+                            alert('Sunucuya bağlanılamadı.');
+                        }
+                    });
+                    authErrorMsg.appendChild(document.createElement('br'));
+                    authErrorMsg.appendChild(resetBtn);
+                }
+            }
+
             authErrorMsg.style.display = 'block';
         }
     } catch (err) {
@@ -1769,28 +1991,141 @@ if (menuItemContactInfo) {
     });
 }
 
-if (menuItemSwitchUser) {
-    menuItemSwitchUser.addEventListener('click', () => {
-        showPasswordPrompt('');
-    });
-}
+// ==========================================================
+// 8. PROFİL VE OTURUM KAPATMA (LOGOUT) YÖNETİMİ
+// ==========================================================
 
-menuItemLogout.addEventListener('click', () => {
-    if (confirm('Oturumu kapatmak istediğinize emin misiniz?')) {
-        const token = localStorage.getItem('msj_token');
-        if (token) {
-            fetch('/api/auth/logout', {
+async function performLogout() {
+    if (!confirm('Oturumu kapatmak istediğinize emin misiniz?')) {
+        return;
+    }
+
+    const token = localStorage.getItem('msj_token') || sessionStorage.getItem('msj_token');
+    if (token) {
+        try {
+            await fetch('/api/auth/logout', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ token })
             });
-        }
-        sessionStorage.removeItem('msj_token');
-        localStorage.removeItem('msj_token');
-        localStorage.removeItem('msj_user');
-        location.reload();
+        } catch (e) {}
     }
-});
+
+    // Kesinlikle otomatik girişi iptal et ve yerel oturumu sil
+    localStorage.setItem('msj_auto_login', 'false');
+    localStorage.removeItem('msj_token');
+    sessionStorage.removeItem('msj_token');
+    localStorage.removeItem('msj_user');
+    localStorage.removeItem('msj_cached_contacts');
+
+    // Sayfayı temiz şekilde yenileyerek giriş / kayıt ekranını aç
+    location.reload();
+}
+
+function openProfileModal() {
+    if (!profileModal) return;
+    if (currentUser) {
+        if (profileUsernameDisplay) profileUsernameDisplay.textContent = currentUser.username;
+        if (profileUserAvatar) profileUserAvatar.src = currentUser.avatar || '/avatars/default.svg';
+    }
+    profileModal.style.display = 'flex';
+}
+
+function closeProfileModal() {
+    if (profileModal) profileModal.style.display = 'none';
+}
+
+if (menuItemProfile) {
+    menuItemProfile.addEventListener('click', () => {
+        headerDropdown.style.display = 'none';
+        openProfileModal();
+    });
+}
+
+if (btnCloseProfileModal) {
+    btnCloseProfileModal.addEventListener('click', closeProfileModal);
+}
+
+if (profileModal) {
+    profileModal.addEventListener('click', (e) => {
+        if (e.target === profileModal) {
+            closeProfileModal();
+        }
+    });
+}
+
+if (btnProfileLogout) {
+    btnProfileLogout.addEventListener('click', () => {
+        closeProfileModal();
+        performLogout();
+    });
+}
+
+if (btnProfileNewUser) {
+    btnProfileNewUser.addEventListener('click', () => {
+        closeProfileModal();
+        showRegisterPrompt();
+    });
+}
+
+if (btnProfileSwitchUser) {
+    btnProfileSwitchUser.addEventListener('click', () => {
+        closeProfileModal();
+        showPasswordPrompt('');
+    });
+}
+
+if (btnProfileChangePass) {
+    btnProfileChangePass.addEventListener('click', async () => {
+        if (!currentUser || !currentUser.username) return;
+        const user = currentUser.username;
+        const newPass = prompt(`"${user}" hesabı için yeni şifrenizi girin (en az 3 karakter):`);
+        if (newPass === null) return;
+        if (!newPass || newPass.trim().length < 3) {
+            alert('Şifre en az 3 karakter olmalıdır.');
+            return;
+        }
+        try {
+            btnProfileChangePass.disabled = true;
+            btnProfileChangePass.textContent = 'Güncelleniyor...';
+            const res = await fetch('/api/auth/reset_password', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username: user, newPassword: newPass.trim() })
+            });
+            const data = await res.json();
+            if (data.success) {
+                if (data.token) {
+                    localStorage.setItem('msj_token', data.token);
+                    sessionStorage.setItem('msj_token', data.token);
+                }
+                alert('Şifreniz başarıyla güncellendi!');
+                closeProfileModal();
+            } else {
+                alert(data.error || 'Şifre güncellenemedi.');
+            }
+        } catch(e) {
+            alert('Sunucuya bağlanılamadı.');
+        } finally {
+            btnProfileChangePass.disabled = false;
+            btnProfileChangePass.textContent = '🔑 Şifremi Değiştir / Güncelle';
+        }
+    });
+}
+
+if (menuItemSwitchUser) {
+    menuItemSwitchUser.addEventListener('click', () => {
+        headerDropdown.style.display = 'none';
+        showPasswordPrompt('');
+    });
+}
+
+if (menuItemLogout) {
+    menuItemLogout.addEventListener('click', () => {
+        headerDropdown.style.display = 'none';
+        performLogout();
+    });
+}
 
 menuItemQr.addEventListener('click', async () => {
     try {
