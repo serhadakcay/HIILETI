@@ -988,6 +988,14 @@ async function startServer() {
     }
 }
 
+process.on('uncaughtException', (err) => {
+    console.error('[Sunucu Beklenmeyen Hata]:', err);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('[Sunucu İşlenmeyen Promise]:', reason);
+});
+
 startServer().catch(err => {
     console.error('Sunucu başlatma hatası:', err);
 });
