@@ -1,0 +1,105 @@
+{
+  "s1___serhad": [
+    {
+      "id": "msg_1791549750241_xiynlk",
+      "sender": "S1",
+      "recipient": "Serhad",
+      "text": "Denem",
+      "file": null,
+      "timestamp": "15:42",
+      "date": "Bugün",
+      "createdAt": "2026-10-09T12:42:30.273Z",
+      "read": true
+    },
+    {
+      "id": "msg_1791555746943_qyf7p0",
+      "sender": "Serhad",
+      "recipient": "S1",
+      "text": "Test message from Serhad",
+      "file": null,
+      "timestamp": "17:22",
+      "date": "Bugün",
+      "createdAt": "2026-10-09T14:22:26.944Z",
+      "read": true
+    },
+    {
+      "id": "msg_1791556481153_0i9nz6",
+      "sender": "Serhad",
+      "recipient": "S1",
+      "text": "Merhaba S1, yeni bildirim sistemi test mesajı!",
+      "file": null,
+      "timestamp": "17:34",
+      "date": "Bugün",
+      "createdAt": "2026-10-09T14:34:41.174Z",
+      "read": true
+    }
+  ],
+  "ser1___serhad": [
+    {
+      "id": "msg_1791553941545_gbj88z",
+      "sender": "Ser1",
+      "recipient": "Serhad",
+      "text": "S",
+      "file": null,
+      "timestamp": "16:52",
+      "date": "Bugün",
+      "createdAt": "2026-10-09T13:52:21.563Z",
+      "read": true
+    },
+    {
+      "id": "msg_1791554038617_sjxuxm",
+      "sender": "Serhad",
+      "recipient": "Ser1",
+      "text": "deneme",
+      "file": null,
+      "timestamp": "16:53",
+      "date": "Bugün",
+      "createdAt": "2026-10-09T13:53:58.618Z",
+      "read": true
+    },
+    {
+      "id": "msg_1791556694517_hu12nq",
+      "sender": "Serhad",
+      "recipient": "Ser1",
+      "text": "dd",
+      "file": null,
+      "timestamp": "17:38",
+      "date": "Bugün",
+      "createdAt": "2026-10-09T14:38:14.518Z",
+      "read": true
+    },
+    {
+      "id": "msg_1791556715041_qvtj1i",
+      "sender": "Ser1",
+      "recipient": "Serhad",
+      "text": "Dd",
+      "file": null,
+      "timestamp": "17:38",
+      "date": "Bugün",
+      "createdAt": "2026-10-09T14:38:35.041Z",
+      "read": true
+    },
+    {
+      "id": "msg_1791558296409_gwugwv",
+      "sender": "Serhad",
+      "recipient": "Ser1",
+      "text": "sss",
+      "file": null,
+      "timestamp": "18:04",
+      "date": "Bugün",
+      "createdAt": "2026-10-09T15:04:56.410Z",
+      "read": true
+    },
+    {
+      "id": "msg_1791558301281_bvgkqu",
+      "sender": "Ser1",
+      "recipient": "Serhad",
+      "text": "Ddd",
+      "file": null,
+      "timestamp": "18:05",
+      "date": "Bugün",
+      "createdAt": "2026-10-09T15:05:01.282Z",
+      "read": true
+    }
+  ]
+}

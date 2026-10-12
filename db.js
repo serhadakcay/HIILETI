@@ -12,6 +12,17 @@ function getConvoKey(u1, u2) {
     return [normalizeKey(u1), normalizeKey(u2)].sort().join('___');
 }
 
+const dataDir = path.join(__dirname, 'data');
+const usersFile = path.join(dataDir, 'users.json');
+const sessionsFile = path.join(dataDir, 'sessions.json');
+const messagesFile = path.join(dataDir, 'messages.json');
+
+function ensureDataDir() {
+    if (!fs.existsSync(dataDir)) {
+        try { fs.mkdirSync(dataDir, { recursive: true }); } catch (e) {}
+    }
+}
+
 class DatabaseManager {
     constructor() {
         this.type = config.type || 'sqlite';
@@ -20,18 +31,23 @@ class DatabaseManager {
     }
 
     async init() {
+        ensureDataDir();
+
         if (this.type === 'mysql') {
             await this.initMysql();
         } else {
             await this.initSqlite();
         }
 
-        // Eski JSON dosyalarından otomatik veri taşıma (ilk kurulumda)
-        await this.migrateFromJsonIfNeeded();
+        // Çift yönlü otomatik senkronizasyon:
+        // 1. JSON dosyalarındaki tüm kullanıcı ve mesajları veritabanına yükler.
+        // 2. Veritabanındaki tüm kullanıcı ve mesajları JSON dosyalarına yedekler.
+        // Böylece GitHub'a atıldığında veya sunucu yeniden başladığında veri ASLA kaybolmaz!
+        await this.syncAllWithJson();
     }
 
     // ========================================================
-    // SQLITE BAŞLATMA (Lite SQL)
+    // 1. SQLITE BAŞLATMA (Lite SQL)
     // ========================================================
     async initSqlite() {
         const { DatabaseSync } = require('node:sqlite');
@@ -43,16 +59,17 @@ class DatabaseManager {
 
         this.sqliteDb = new DatabaseSync(dbPath);
 
-        // WAL modu ile hızlı ve bozulmaya karşı güvenli çalışma
+        // WAL modu ile hızlı ve güvenli çalışma
         this.sqliteDb.exec('PRAGMA journal_mode = WAL;');
+        this.sqliteDb.exec('PRAGMA synchronous = NORMAL;');
         this.sqliteDb.exec('PRAGMA foreign_keys = ON;');
 
-        // Tabloları oluştur
+        // Tabloları oluştur (Büyük/Küçük harf duyarsızlığı için COLLATE NOCASE)
         this.sqliteDb.exec(`
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_key TEXT UNIQUE NOT NULL,
-                username TEXT NOT NULL,
+                user_key TEXT UNIQUE NOT NULL COLLATE NOCASE,
+                username TEXT NOT NULL COLLATE NOCASE,
                 salt TEXT NOT NULL,
                 hash TEXT NOT NULL,
                 avatar TEXT DEFAULT '/avatars/default.svg',
@@ -62,17 +79,17 @@ class DatabaseManager {
 
             CREATE TABLE IF NOT EXISTS sessions (
                 token TEXT PRIMARY KEY,
-                user_key TEXT NOT NULL,
-                username TEXT NOT NULL,
+                user_key TEXT NOT NULL COLLATE NOCASE,
+                username TEXT NOT NULL COLLATE NOCASE,
                 created_at TEXT,
                 last_used TEXT
             );
 
             CREATE TABLE IF NOT EXISTS messages (
                 id TEXT PRIMARY KEY,
-                convo_key TEXT NOT NULL,
-                sender TEXT NOT NULL,
-                recipient TEXT NOT NULL,
+                convo_key TEXT NOT NULL COLLATE NOCASE,
+                sender TEXT NOT NULL COLLATE NOCASE,
+                recipient TEXT NOT NULL COLLATE NOCASE,
                 text TEXT,
                 file_json TEXT,
                 timestamp TEXT,
@@ -85,13 +102,17 @@ class DatabaseManager {
             CREATE INDEX IF NOT EXISTS idx_sessions_key ON sessions(user_key);
             CREATE INDEX IF NOT EXISTS idx_messages_convo ON messages(convo_key);
             CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at);
+            CREATE INDEX IF NOT EXISTS idx_messages_unread ON messages(recipient, is_read);
         `);
+
+        // Başlangıçta WAL kontrol noktasını çalıştırarak veritabanı dosyasını tam olarak diske yaz
+        try { this.sqliteDb.exec('PRAGMA wal_checkpoint(TRUNCATE);'); } catch (e) {}
 
         console.log(`[Lite SQL] SQLite veritabanı aktif: ${dbPath}`);
     }
 
     // ========================================================
-    // MYSQL BAŞLATMA (İsteğe bağlı geçiş için)
+    // 2. MYSQL BAŞLATMA
     // ========================================================
     async initMysql() {
         const mysql = require('mysql2/promise');
@@ -135,7 +156,8 @@ class DatabaseManager {
                 created_at VARCHAR(50),
                 is_read TINYINT DEFAULT 0,
                 INDEX idx_messages_convo (convo_key),
-                INDEX idx_messages_created (created_at)
+                INDEX idx_messages_created (created_at),
+                INDEX idx_messages_unread (recipient, is_read)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
         `);
 
@@ -143,66 +165,46 @@ class DatabaseManager {
     }
 
     // ========================================================
-    // JSON'DAN VERİTABANINA OTOMATİK AKTARIM
+    // 3. ÇİFT YÖNLÜ JSON <-> VERİTABANI TAM SENKRONİZASYONU
     // ========================================================
-    async migrateFromJsonIfNeeded() {
+    async syncAllWithJson() {
         try {
-            const userCount = await this.getUserCount();
-            if (userCount > 0) return; // Zaten veritabanında veri var
+            ensureDataDir();
 
-            const dataDir = path.join(__dirname, 'data');
-            const usersFile = path.join(dataDir, 'users.json');
-            const sessionsFile = path.join(dataDir, 'sessions.json');
-            const messagesFile = path.join(dataDir, 'messages.json');
-
-            if (!fs.existsSync(usersFile)) return;
-
-            console.log('[Veritabanı] Eski JSON verileri veritabanına taşınıyor...');
-
+            // A) JSON'dan veritabanına aktar (Eksik kullanıcı veya mesajları geri yükle)
             // 1. Kullanıcılar
             if (fs.existsSync(usersFile)) {
                 try {
-                    const rawUsers = JSON.parse(fs.readFileSync(usersFile, 'utf8'));
+                    const rawUsers = JSON.parse(fs.readFileSync(usersFile, 'utf8') || '{}');
                     for (const key of Object.keys(rawUsers)) {
                         const u = rawUsers[key];
-                        await this.createUser({
-                            username: u.username,
-                            salt: u.salt,
-                            hash: u.hash,
-                            avatar: u.avatar || '/avatars/default.svg',
-                            lastSeen: u.lastSeen || 'Offline',
-                            createdAt: u.createdAt || new Date().toISOString()
-                        });
+                        if (!u || !u.username) continue;
+                        const existing = await this.getUser(u.username);
+                        if (!existing) {
+                            await this.insertUserToDb({
+                                username: u.username,
+                                salt: u.salt,
+                                hash: u.hash,
+                                avatar: u.avatar || '/avatars/default.svg',
+                                lastSeen: u.lastSeen || 'Offline',
+                                createdAt: u.createdAt || new Date().toISOString()
+                            });
+                        }
                     }
-                    console.log(`[Veritabanı] ${Object.keys(rawUsers).length} kullanıcı aktarıldı.`);
                 } catch (e) {
-                    console.error('Kullanıcı aktarım hatası:', e.message);
+                    console.error('[Sync] users.json okuma hatası:', e.message);
                 }
             }
 
-            // 2. Oturumlar
-            if (fs.existsSync(sessionsFile)) {
-                try {
-                    const rawSessions = JSON.parse(fs.readFileSync(sessionsFile, 'utf8'));
-                    for (const token of Object.keys(rawSessions)) {
-                        const s = rawSessions[token];
-                        await this.saveSession(token, s.username, s.createdAt, s.lastUsed);
-                    }
-                    console.log(`[Veritabanı] ${Object.keys(rawSessions).length} aktif oturum aktarıldı.`);
-                } catch (e) {
-                    console.error('Oturum aktarım hatası:', e.message);
-                }
-            }
-
-            // 3. Mesajlar
+            // 2. Mesajlar
             if (fs.existsSync(messagesFile)) {
                 try {
-                    const rawMessages = JSON.parse(fs.readFileSync(messagesFile, 'utf8'));
-                    let totalMsgs = 0;
+                    const rawMessages = JSON.parse(fs.readFileSync(messagesFile, 'utf8') || '{}');
                     for (const convoKey of Object.keys(rawMessages)) {
                         const list = rawMessages[convoKey] || [];
                         for (const msg of list) {
-                            await this.saveMessage({
+                            if (!msg || !msg.id) continue;
+                            await this.insertMessageToDbIfNotExists({
                                 id: msg.id,
                                 sender: msg.sender,
                                 recipient: msg.recipient,
@@ -213,44 +215,107 @@ class DatabaseManager {
                                 createdAt: msg.createdAt || new Date().toISOString(),
                                 read: !!msg.read
                             });
-                            totalMsgs++;
                         }
                     }
-                    console.log(`[Veritabanı] ${totalMsgs} mesaj başarıyla aktarıldı.`);
                 } catch (e) {
-                    console.error('Mesaj aktarım hatası:', e.message);
+                    console.error('[Sync] messages.json okuma hatası:', e.message);
                 }
             }
 
-            console.log('[Veritabanı] Tüm veriler kalıcı Lite SQL (SQLite) veritabanına başarıyla taşındı!');
+            // 3. Oturumlar
+            if (fs.existsSync(sessionsFile)) {
+                try {
+                    const rawSessions = JSON.parse(fs.readFileSync(sessionsFile, 'utf8') || '{}');
+                    for (const token of Object.keys(rawSessions)) {
+                        const s = rawSessions[token];
+                        if (!s || !s.username) continue;
+                        const existingSession = await this.getSession(token);
+                        if (!existingSession) {
+                            await this.insertSessionToDb(token, s.username, s.createdAt, s.lastUsed);
+                        }
+                    }
+                } catch (e) {
+                    console.error('[Sync] sessions.json okuma hatası:', e.message);
+                }
+            }
+
+            // B) Veritabanından JSON dosyalarına tam yansıtma (Her zaman güncel yedek)
+            await this.exportDbToJson();
+            console.log('[Veritabanı] Çift yönlü kalıcı veri senkronizasyonu tamamlandı.');
         } catch (err) {
-            console.error('Veri aktarımında genel hata:', err.message);
+            console.error('[Veritabanı] Senkronizasyon genel hatası:', err.message);
         }
     }
 
-    async getUserCount() {
-        if (this.type === 'mysql') {
-            const [rows] = await this.mysqlPool.query('SELECT COUNT(*) as cnt FROM users');
-            return rows[0].cnt;
-        } else {
-            const row = this.sqliteDb.prepare('SELECT COUNT(*) as cnt FROM users').get();
-            return row ? row.cnt : 0;
+    async exportDbToJson() {
+        try {
+            ensureDataDir();
+            // 1. Tüm kullanıcıları users.json dosyasına yaz
+            const allUsers = await this.getAllUsers();
+            const usersMap = {};
+            for (const u of allUsers) {
+                usersMap[u.userKey] = {
+                    username: u.username,
+                    salt: u.salt,
+                    hash: u.hash,
+                    avatar: u.avatar || '/avatars/default.svg',
+                    lastSeen: u.lastSeen || 'Offline',
+                    createdAt: u.createdAt || new Date().toISOString()
+                };
+            }
+            fs.writeFileSync(usersFile, JSON.stringify(usersMap, null, 2), 'utf8');
+
+            // 2. Tüm mesajları messages.json dosyasına yaz
+            let allMsgs = [];
+            if (this.type === 'mysql') {
+                const [rows] = await this.mysqlPool.query('SELECT * FROM messages ORDER BY created_at ASC');
+                allMsgs = rows.map(r => this.formatMessageRow(r));
+            } else {
+                const rows = this.sqliteDb.prepare('SELECT * FROM messages ORDER BY created_at ASC').all();
+                allMsgs = rows.map(r => this.formatMessageRow(r));
+            }
+
+            const messagesMap = {};
+            for (const msg of allMsgs) {
+                const convoKey = msg.convoKey || getConvoKey(msg.sender, msg.recipient);
+                if (!messagesMap[convoKey]) messagesMap[convoKey] = [];
+                messagesMap[convoKey].push({
+                    id: msg.id,
+                    sender: msg.sender,
+                    recipient: msg.recipient,
+                    text: msg.text || '',
+                    file: msg.file || null,
+                    timestamp: msg.timestamp || '',
+                    date: msg.date || 'Bugün',
+                    createdAt: msg.createdAt,
+                    read: !!msg.read
+                });
+            }
+            fs.writeFileSync(messagesFile, JSON.stringify(messagesMap, null, 2), 'utf8');
+        } catch (e) {
+            console.error('[exportDbToJson] JSON dışa aktarma hatası:', e.message);
         }
     }
 
     // ========================================================
-    // KULLANICI İŞLEMLERİ
+    // 4. KULLANICI İŞLEMLERİ
     // ========================================================
     async getUser(usernameOrKey) {
+        if (!usernameOrKey) return null;
         const userKey = normalizeKey(usernameOrKey);
-        if (!userKey) return null;
+        const rawTrim = usernameOrKey.trim();
 
         if (this.type === 'mysql') {
-            const [rows] = await this.mysqlPool.query('SELECT * FROM users WHERE user_key = ? LIMIT 1', [userKey]);
+            const [rows] = await this.mysqlPool.query(
+                'SELECT * FROM users WHERE user_key = ? OR LOWER(username) = ? LIMIT 1',
+                [userKey, userKey]
+            );
             if (rows.length === 0) return null;
             return this.formatUserRow(rows[0]);
         } else {
-            const row = this.sqliteDb.prepare('SELECT * FROM users WHERE user_key = ? LIMIT 1').get(userKey);
+            const row = this.sqliteDb.prepare(
+                'SELECT * FROM users WHERE user_key = ? OR LOWER(username) = ? LIMIT 1'
+            ).get(userKey, userKey);
             if (!row) return null;
             return this.formatUserRow(row);
         }
@@ -266,7 +331,7 @@ class DatabaseManager {
         }
     }
 
-    async createUser(userData) {
+    async insertUserToDb(userData) {
         const userKey = normalizeKey(userData.username);
         const avatar = userData.avatar || '/avatars/default.svg';
         const lastSeen = userData.lastSeen || 'Offline';
@@ -290,9 +355,35 @@ class DatabaseManager {
                     avatar = excluded.avatar
             `);
             stmt.run(userKey, userData.username, userData.salt, userData.hash, avatar, lastSeen, createdAt);
+            try { this.sqliteDb.exec('PRAGMA wal_checkpoint(PASSIVE);'); } catch (e) {}
+        }
+    }
+
+    async createUser(userData) {
+        await this.insertUserToDb(userData);
+
+        // users.json dosyasına anında kaydet
+        try {
+            ensureDataDir();
+            let rawUsers = {};
+            if (fs.existsSync(usersFile)) {
+                try { rawUsers = JSON.parse(fs.readFileSync(usersFile, 'utf8') || '{}'); } catch (e) {}
+            }
+            const userKey = normalizeKey(userData.username);
+            rawUsers[userKey] = {
+                username: userData.username,
+                salt: userData.salt,
+                hash: userData.hash,
+                avatar: userData.avatar || '/avatars/default.svg',
+                lastSeen: userData.lastSeen || 'Offline',
+                createdAt: userData.createdAt || new Date().toISOString()
+            };
+            fs.writeFileSync(usersFile, JSON.stringify(rawUsers, null, 2), 'utf8');
+        } catch (e) {
+            console.error('users.json kayıt hatası:', e.message);
         }
 
-        return await this.getUser(userKey);
+        return await this.getUser(userData.username);
     }
 
     async updateUserLastSeen(usernameOrKey, lastSeen) {
@@ -302,6 +393,17 @@ class DatabaseManager {
         } else {
             this.sqliteDb.prepare('UPDATE users SET last_seen = ? WHERE user_key = ?').run(lastSeen, userKey);
         }
+
+        // users.json güncelle
+        try {
+            if (fs.existsSync(usersFile)) {
+                const rawUsers = JSON.parse(fs.readFileSync(usersFile, 'utf8') || '{}');
+                if (rawUsers[userKey]) {
+                    rawUsers[userKey].lastSeen = lastSeen;
+                    fs.writeFileSync(usersFile, JSON.stringify(rawUsers, null, 2), 'utf8');
+                }
+            }
+        } catch (e) {}
     }
 
     async updateUserPassword(usernameOrKey, salt, hash) {
@@ -314,11 +416,10 @@ class DatabaseManager {
             try { this.sqliteDb.exec('PRAGMA wal_checkpoint(PASSIVE);'); } catch (e) {}
         }
 
-        // users.json varsa senkronize güncelle
+        // users.json senkronize et
         try {
-            const usersFile = path.join(__dirname, 'data', 'users.json');
             if (fs.existsSync(usersFile)) {
-                const raw = JSON.parse(fs.readFileSync(usersFile, 'utf8'));
+                const raw = JSON.parse(fs.readFileSync(usersFile, 'utf8') || '{}');
                 if (raw[userKey]) {
                     raw[userKey].salt = salt;
                     raw[userKey].hash = hash;
@@ -344,7 +445,7 @@ class DatabaseManager {
     }
 
     // ========================================================
-    // OTURUM (SESSION) İŞLEMLERİ
+    // 5. OTURUM (SESSION) İŞLEMLERİ
     // ========================================================
     async getSession(token) {
         if (!token) return null;
@@ -397,7 +498,7 @@ class DatabaseManager {
         }
     }
 
-    async saveSession(token, username, createdAt, lastUsed) {
+    async insertSessionToDb(token, username, createdAt, lastUsed) {
         const userKey = normalizeKey(username);
         const created = createdAt || new Date().toISOString();
         const used = lastUsed || new Date().toISOString();
@@ -415,8 +516,26 @@ class DatabaseManager {
                 VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(token) DO UPDATE SET last_used = excluded.last_used
             `).run(token, userKey, username, created, used);
-            try { this.sqliteDb.exec('PRAGMA wal_checkpoint(PASSIVE);'); } catch (e) {}
         }
+    }
+
+    async saveSession(token, username, createdAt, lastUsed) {
+        await this.insertSessionToDb(token, username, createdAt, lastUsed);
+
+        // sessions.json senkronize et
+        try {
+            ensureDataDir();
+            let raw = {};
+            if (fs.existsSync(sessionsFile)) {
+                try { raw = JSON.parse(fs.readFileSync(sessionsFile, 'utf8') || '{}'); } catch (e) {}
+            }
+            raw[token] = {
+                username,
+                createdAt: createdAt || new Date().toISOString(),
+                lastUsed: lastUsed || new Date().toISOString()
+            };
+            fs.writeFileSync(sessionsFile, JSON.stringify(raw, null, 2), 'utf8');
+        } catch (e) {}
     }
 
     async updateSessionLastUsed(token) {
@@ -426,6 +545,16 @@ class DatabaseManager {
         } else {
             this.sqliteDb.prepare('UPDATE sessions SET last_used = ? WHERE token = ?').run(now, token);
         }
+
+        try {
+            if (fs.existsSync(sessionsFile)) {
+                const raw = JSON.parse(fs.readFileSync(sessionsFile, 'utf8') || '{}');
+                if (raw[token]) {
+                    raw[token].lastUsed = now;
+                    fs.writeFileSync(sessionsFile, JSON.stringify(raw, null, 2), 'utf8');
+                }
+            }
+        } catch (e) {}
     }
 
     async deleteSession(token) {
@@ -435,6 +564,14 @@ class DatabaseManager {
         } else {
             this.sqliteDb.prepare('DELETE FROM sessions WHERE token = ?').run(token);
         }
+
+        try {
+            if (fs.existsSync(sessionsFile)) {
+                const raw = JSON.parse(fs.readFileSync(sessionsFile, 'utf8') || '{}');
+                delete raw[token];
+                fs.writeFileSync(sessionsFile, JSON.stringify(raw, null, 2), 'utf8');
+            }
+        } catch (e) {}
     }
 
     async deleteSessionsForUser(usernameOrKey) {
@@ -445,11 +582,48 @@ class DatabaseManager {
         } else {
             this.sqliteDb.prepare('DELETE FROM sessions WHERE user_key = ?').run(userKey);
         }
+
+        try {
+            if (fs.existsSync(sessionsFile)) {
+                const raw = JSON.parse(fs.readFileSync(sessionsFile, 'utf8') || '{}');
+                for (const t of Object.keys(raw)) {
+                    if (normalizeKey(raw[t].username) === userKey) {
+                        delete raw[t];
+                    }
+                }
+                fs.writeFileSync(sessionsFile, JSON.stringify(raw, null, 2), 'utf8');
+            }
+        } catch (e) {}
     }
 
     // ========================================================
-    // MESAJ (CHAT) İŞLEMLERİ
+    // 6. MESAJ (CHAT) İŞLEMLERİ & OFFLINE MESAJ YÖNETİMİ
     // ========================================================
+    async insertMessageToDbIfNotExists(msg) {
+        const convoKey = getConvoKey(msg.sender, msg.recipient);
+        const id = msg.id || ('msg_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6));
+        const fileJson = msg.file ? JSON.stringify(msg.file) : null;
+        const timestamp = msg.timestamp || new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' });
+        const dateStr = msg.date || 'Bugün';
+        const createdAt = msg.createdAt || new Date().toISOString();
+        const isRead = msg.read ? 1 : 0;
+
+        if (this.type === 'mysql') {
+            await this.mysqlPool.query(
+                `INSERT INTO messages (id, convo_key, sender, recipient, text, file_json, timestamp, date_str, created_at, is_read)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ON DUPLICATE KEY UPDATE is_read = VALUES(is_read)`,
+                [id, convoKey, msg.sender, msg.recipient, msg.text || '', fileJson, timestamp, dateStr, createdAt, isRead]
+            );
+        } else {
+            this.sqliteDb.prepare(`
+                INSERT INTO messages (id, convo_key, sender, recipient, text, file_json, timestamp, date_str, created_at, is_read)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET is_read = excluded.is_read
+            `).run(id, convoKey, msg.sender, msg.recipient, msg.text || '', fileJson, timestamp, dateStr, createdAt, isRead);
+        }
+    }
+
     async saveMessage(msg) {
         const convoKey = getConvoKey(msg.sender, msg.recipient);
         const id = msg.id || ('msg_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6));
@@ -470,9 +644,10 @@ class DatabaseManager {
                 INSERT INTO messages (id, convo_key, sender, recipient, text, file_json, timestamp, date_str, created_at, is_read)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `).run(id, convoKey, msg.sender, msg.recipient, msg.text || '', fileJson, timestamp, dateStr, createdAt, isRead);
+            try { this.sqliteDb.exec('PRAGMA wal_checkpoint(PASSIVE);'); } catch (e) {}
         }
 
-        return {
+        const savedResult = {
             id,
             convoKey,
             sender: msg.sender,
@@ -484,6 +659,22 @@ class DatabaseManager {
             createdAt,
             read: !!isRead
         };
+
+        // messages.json dosyasına anında ekle (Offline kullanıcı için kalıcı güvence)
+        try {
+            ensureDataDir();
+            let raw = {};
+            if (fs.existsSync(messagesFile)) {
+                try { raw = JSON.parse(fs.readFileSync(messagesFile, 'utf8') || '{}'); } catch (e) {}
+            }
+            if (!raw[convoKey]) raw[convoKey] = [];
+            raw[convoKey].push(savedResult);
+            fs.writeFileSync(messagesFile, JSON.stringify(raw, null, 2), 'utf8');
+        } catch (e) {
+            console.error('messages.json kayıt hatası:', e.message);
+        }
+
+        return savedResult;
     }
 
     async getConversationMessages(u1, u2) {
@@ -506,27 +697,63 @@ class DatabaseManager {
         return rows.map(r => this.formatMessageRow(r));
     }
 
+    // OFFLINE OLAN KULLANICI AÇTIĞINDA TESLİM EDİLECEK TÜM BEKLEYEN MESAJLARI GETİR
+    async getUnreadMessagesForUser(username) {
+        if (!username) return [];
+        const userKey = normalizeKey(username);
+
+        let rows = [];
+        if (this.type === 'mysql') {
+            const [dbRows] = await this.mysqlPool.query(
+                'SELECT * FROM messages WHERE (LOWER(recipient) = ? OR recipient = ?) AND is_read = 0 ORDER BY created_at ASC',
+                [userKey, username]
+            );
+            rows = dbRows;
+        } else {
+            rows = this.sqliteDb.prepare(
+                'SELECT * FROM messages WHERE (LOWER(recipient) = ? OR recipient = ?) AND is_read = 0 ORDER BY created_at ASC'
+            ).all(userKey, username);
+        }
+
+        return rows.map(r => this.formatMessageRow(r));
+    }
+
     async markMessagesAsRead(contactUsername, currentUsername) {
         const convoKey = getConvoKey(contactUsername, currentUsername);
         const recipientUser = currentUsername;
+        const recipientKey = normalizeKey(currentUsername);
 
         if (this.type === 'mysql') {
             await this.mysqlPool.query(
-                'UPDATE messages SET is_read = 1 WHERE convo_key = ? AND recipient = ? AND is_read = 0',
-                [convoKey, recipientUser]
+                'UPDATE messages SET is_read = 1 WHERE convo_key = ? AND (LOWER(recipient) = ? OR recipient = ?) AND is_read = 0',
+                [convoKey, recipientKey, recipientUser]
             );
         } else {
             this.sqliteDb.prepare(
-                'UPDATE messages SET is_read = 1 WHERE convo_key = ? AND recipient = ? AND is_read = 0'
-            ).run(convoKey, recipientUser);
+                'UPDATE messages SET is_read = 1 WHERE convo_key = ? AND (LOWER(recipient) = ? OR recipient = ?) AND is_read = 0'
+            ).run(convoKey, recipientKey, recipientUser);
         }
+
+        // messages.json içinde de okunma durumunu güncelle
+        try {
+            if (fs.existsSync(messagesFile)) {
+                const raw = JSON.parse(fs.readFileSync(messagesFile, 'utf8') || '{}');
+                if (raw[convoKey]) {
+                    raw[convoKey].forEach(m => {
+                        if (normalizeKey(m.recipient) === recipientKey) {
+                            m.read = true;
+                        }
+                    });
+                    fs.writeFileSync(messagesFile, JSON.stringify(raw, null, 2), 'utf8');
+                }
+            }
+        } catch (e) {}
     }
 
     // TEKİL MESAJ SİLME
     async deleteMessage(messageId, requesterUsername) {
         if (!messageId) return { success: false, error: 'Mesaj ID bulunamadı' };
 
-        // Güvenlik kontrolü: Mesajı yalnızca gönderen veya alan kişi silebilir
         let row = null;
         if (this.type === 'mysql') {
             const [rows] = await this.mysqlPool.query('SELECT * FROM messages WHERE id = ? LIMIT 1', [messageId]);
@@ -552,6 +779,18 @@ class DatabaseManager {
         } else {
             this.sqliteDb.prepare('DELETE FROM messages WHERE id = ?').run(messageId);
         }
+
+        // messages.json içinden de sil
+        try {
+            if (fs.existsSync(messagesFile)) {
+                const raw = JSON.parse(fs.readFileSync(messagesFile, 'utf8') || '{}');
+                const convoKey = row.convo_key;
+                if (raw[convoKey]) {
+                    raw[convoKey] = raw[convoKey].filter(m => m.id !== messageId);
+                    fs.writeFileSync(messagesFile, JSON.stringify(raw, null, 2), 'utf8');
+                }
+            }
+        } catch (e) {}
 
         return {
             success: true,
@@ -581,6 +820,17 @@ class DatabaseManager {
             this.sqliteDb.prepare('DELETE FROM messages WHERE convo_key = ?').run(convoKey);
         }
 
+        // messages.json içinden de sil
+        try {
+            if (fs.existsSync(messagesFile)) {
+                const raw = JSON.parse(fs.readFileSync(messagesFile, 'utf8') || '{}');
+                if (raw[convoKey]) {
+                    delete raw[convoKey];
+                    fs.writeFileSync(messagesFile, JSON.stringify(raw, null, 2), 'utf8');
+                }
+            }
+        } catch (e) {}
+
         return {
             success: true,
             convoKey,
@@ -600,7 +850,6 @@ class DatabaseManager {
 
             const convoKey = getConvoKey(currentUsername, contact.username);
             
-            // Son mesajı getir
             let lastRow = null;
             let unreadCount = 0;
 
@@ -612,8 +861,8 @@ class DatabaseManager {
                 if (mRows.length > 0) lastRow = mRows[0];
 
                 const [uRows] = await this.mysqlPool.query(
-                    'SELECT COUNT(*) as cnt FROM messages WHERE convo_key = ? AND recipient = ? AND is_read = 0',
-                    [convoKey, currentUsername]
+                    'SELECT COUNT(*) as cnt FROM messages WHERE convo_key = ? AND (LOWER(recipient) = ? OR recipient = ?) AND is_read = 0',
+                    [convoKey, currentKey, currentUsername]
                 );
                 unreadCount = uRows[0].cnt;
             } else {
@@ -622,8 +871,8 @@ class DatabaseManager {
                 ).get(convoKey);
 
                 const uRow = this.sqliteDb.prepare(
-                    'SELECT COUNT(*) as cnt FROM messages WHERE convo_key = ? AND recipient = ? AND is_read = 0'
-                ).get(convoKey, currentUsername);
+                    'SELECT COUNT(*) as cnt FROM messages WHERE convo_key = ? AND (LOWER(recipient) = ? OR recipient = ?) AND is_read = 0'
+                ).get(convoKey, currentKey, currentUsername);
                 unreadCount = uRow ? uRow.cnt : 0;
             }
 

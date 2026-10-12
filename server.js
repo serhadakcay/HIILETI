@@ -745,9 +745,23 @@ async function startServer() {
             socket.emit('auth:success', {
                 user: { username, avatar }
             });
+
+            // OFFLINE OLAN KULLANICI ŞİMDİ GİRDİĞİNDE:
+            // Kullanıcı çevrimdışıyken gelmiş olan tüm okunmamış mesajları anında teslim et!
+            try {
+                const unreadMsgs = await db.getUnreadMessagesForUser(username);
+                if (unreadMsgs && unreadMsgs.length > 0) {
+                    console.log(`[Offline Mesaj Teslimi] ${username} kullanıcısına ${unreadMsgs.length} adet bekleyen mesaj iletiliyor.`);
+                    socket.emit('chat:offline_messages', {
+                        messages: unreadMsgs
+                    });
+                }
+            } catch (errOff) {
+                console.error('[Offline Mesaj Teslim Hatası]:', errOff.message);
+            }
         });
 
-        // Birebir Özel Mesaj Gönderme (Lite SQL'e Kalıcı Olarak Kaydedilir)
+        // Birebir Özel Mesaj Gönderme (Lite SQL'e Kalıcı Olarak Kaydedilir & Offline Kullanıcıya Saklanır)
         socket.on('chat:send_message', async (msg, ack) => {
             let sender = socketToUserMap.get(socket.id);
             if (!sender && msg.token) {
@@ -780,6 +794,9 @@ async function startServer() {
             const senderKey = normalizeKey(sender.username);
             const recipientKey = normalizeKey(recipient);
 
+            // Alıcı şu an bağlı ve Online mı kontrol et
+            const isRecipientOnline = onlineUserSockets.has(recipientKey) && onlineUserSockets.get(recipientKey).size > 0;
+
             const savedMsg = await db.saveMessage({
                 id: 'msg_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6),
                 sender: sender.username,
@@ -792,19 +809,29 @@ async function startServer() {
                 read: false
             });
 
+            savedMsg.isRecipientOnline = isRecipientOnline;
+
             // GİZLİLİK GARANTİSİ:
-            // Mesaj SADECE ve SADECE gönderen ve alan kullanıcının özel odalarına gönderilir!
+            // Gönderenin ekranına mesajı onayla
             io.to('user:' + senderKey).emit('chat:message', savedMsg);
-            if (recipientKey !== senderKey) {
+
+            // Alıcı Online ise anında alıcının odasına ilet
+            if (recipientKey !== senderKey && isRecipientOnline) {
                 io.to('user:' + recipientKey).emit('chat:message', savedMsg);
             }
 
-            if (ack) ack({ success: true, message: savedMsg });
+            if (ack) ack({ success: true, message: savedMsg, isRecipientOnline });
         });
 
         // Mesajları Okundu Olarak İşaretleme
-        socket.on('chat:mark_read', async ({ contactUsername }, ack) => {
-            const sender = socketToUserMap.get(socket.id);
+        socket.on('chat:mark_read', async (data, ack) => {
+            const contactUsername = data ? data.contactUsername : null;
+            let sender = socketToUserMap.get(socket.id);
+            if (!sender && data && data.token) {
+                const session = await db.getSession(data.token);
+                if (session) sender = { username: session.username };
+            }
+
             if (!sender || !contactUsername) {
                 if (ack) ack({ success: false });
                 return;
@@ -819,9 +846,28 @@ async function startServer() {
             if (ack) ack({ success: true });
         });
 
-        // Geçmiş Mesajları Yükleme (Lite SQL Veritabanından)
-        socket.on('chat:load_history', async ({ contactUsername }, callback) => {
+        // Geçmiş Mesajları Yükleme (Lite SQL Veritabanından - Token Korumalı)
+        socket.on('chat:load_history', async (data, callback) => {
+            const contactUsername = (data && data.contactUsername) || '';
             let sender = socketToUserMap.get(socket.id);
+
+            // Soket kopup bağlandıysa token ile oturumu kurtar
+            if (!sender && data && data.token) {
+                const session = await db.getSession(data.token);
+                if (session) {
+                    const existing = await db.getUser(session.username);
+                    const avatar = existing ? existing.avatar : '/avatars/default.svg';
+                    sender = { username: session.username, avatar };
+                    socketToUserMap.set(socket.id, sender);
+                    const userKey = normalizeKey(session.username);
+                    if (!onlineUserSockets.has(userKey)) {
+                        onlineUserSockets.set(userKey, new Set());
+                    }
+                    onlineUserSockets.get(userKey).add(socket.id);
+                    socket.join('user:' + userKey);
+                }
+            }
+
             if (!sender) {
                 if (callback) callback({ success: false, messages: [] });
                 return;
@@ -987,6 +1033,24 @@ async function startServer() {
         });
     }
 }
+
+function handleGracefulExit() {
+    try {
+        if (db && db.sqliteDb) {
+            db.sqliteDb.exec('PRAGMA wal_checkpoint(TRUNCATE);');
+        }
+    } catch (e) {}
+}
+
+process.on('SIGINT', () => {
+    handleGracefulExit();
+    process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+    handleGracefulExit();
+    process.exit(0);
+});
 
 process.on('uncaughtException', (err) => {
     console.error('[Sunucu Beklenmeyen Hata]:', err);

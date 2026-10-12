@@ -569,49 +569,57 @@ function showPasswordPrompt(username) {
 }
 
 async function loadRegisteredUsersDropdown() {
-    try {
-        const res = await fetch('/api/users/registered');
-        const data = await res.json();
-        if (data.success && data.users) {
-            selectRegisteredUser.innerHTML = '<option value="">-- Kayıtlı Kullanıcı Seçin --</option>';
-            if (quickUsersList) quickUsersList.innerHTML = '';
+    let attempts = 0;
+    while (attempts < 4) {
+        try {
+            const res = await fetch('/api/users/registered');
+            const data = await res.json();
+            if (data.success && Array.isArray(data.users)) {
+                selectRegisteredUser.innerHTML = '<option value="">-- Kayıtlı Kullanıcı Seçin --</option>';
+                if (quickUsersList) quickUsersList.innerHTML = '';
 
-            data.users.forEach(u => {
-                const opt = document.createElement('option');
-                opt.value = u.username;
-                const statusSuffix = u.lastSeen === 'Online' ? ' (Online)' : ' (Offline)';
-                opt.textContent = `${u.username}${statusSuffix}`;
-                selectRegisteredUser.appendChild(opt);
+                data.users.forEach(u => {
+                    const opt = document.createElement('option');
+                    opt.value = u.username;
+                    const statusSuffix = u.lastSeen === 'Online' ? ' (Online)' : ' (Offline)';
+                    opt.textContent = `${u.username}${statusSuffix}`;
+                    selectRegisteredUser.appendChild(opt);
 
-                if (quickUsersList) {
-                    const chip = document.createElement('button');
-                    chip.type = 'button';
-                    chip.className = 'quick-user-chip';
-                    chip.innerHTML = `
-                        <img src="${u.avatar || '/avatars/default.svg'}" class="avatar-mini" alt="${escapeHtml(u.username)}">
-                        <span><strong>${escapeHtml(u.username)}</strong></span>
-                    `;
-                    chip.addEventListener('click', () => {
-                        inputUsername.value = u.username;
-                        rememberedName.textContent = u.username;
-                        rememberedAvatar.src = u.avatar || '/avatars/default.svg';
-                        rememberedUserBox.style.display = 'flex';
-                        fieldUsernameSelect.style.display = 'none';
-                        if (rowForgotPassword) rowForgotPassword.style.display = 'block';
-                        inputPassword.value = '';
-                        inputPassword.focus();
-                    });
-                    quickUsersList.appendChild(chip);
+                    if (quickUsersList) {
+                        const chip = document.createElement('button');
+                        chip.type = 'button';
+                        chip.className = 'quick-user-chip';
+                        chip.innerHTML = `
+                            <img src="${u.avatar || '/avatars/default.svg'}" class="avatar-mini" alt="${escapeHtml(u.username)}">
+                            <span><strong>${escapeHtml(u.username)}</strong></span>
+                        `;
+                        chip.addEventListener('click', () => {
+                            inputUsername.value = u.username;
+                            rememberedName.textContent = u.username;
+                            rememberedAvatar.src = u.avatar || '/avatars/default.svg';
+                            rememberedUserBox.style.display = 'flex';
+                            fieldUsernameSelect.style.display = 'none';
+                            if (rowForgotPassword) rowForgotPassword.style.display = 'block';
+                            inputPassword.value = '';
+                            inputPassword.focus();
+                        });
+                        quickUsersList.appendChild(chip);
+                    }
+                });
+
+                if (quickUsersContainer) {
+                    quickUsersContainer.style.display = data.users.length > 0 ? 'block' : 'none';
                 }
-            });
 
-            if (quickUsersContainer) {
-                quickUsersContainer.style.display = data.users.length > 0 ? 'block' : 'none';
+                return data.users.length;
             }
-
-            return data.users.length;
+        } catch (e) {
+            attempts++;
+            if (attempts < 4) {
+                await new Promise(r => setTimeout(r, 600));
+            }
         }
-    } catch (e) {}
+    }
     return 0;
 }
 
@@ -1216,7 +1224,7 @@ window.addEventListener('keydown', (e) => {
     }
 });
 
-// Birebir Özel Mesaj Geçmişini Yükleme
+// Birebir Özel Mesaj Geçmişini Yükleme (Soket + HTTP Fallback Korumalı)
 async function loadConversationHistory(contactUsername) {
     const todayFormatted = new Date().toLocaleDateString('tr-TR', { day: 'numeric', month: 'long', year: 'numeric' });
     messagesContainer.innerHTML = `
@@ -1230,12 +1238,36 @@ async function loadConversationHistory(contactUsername) {
         </div>
     `;
 
-    socket.emit('chat:load_history', { contactUsername }, (res) => {
-        if (res && res.success && res.messages) {
+    const token = localStorage.getItem('msj_token') || sessionStorage.getItem('msj_token');
+    let hasLoaded = false;
+
+    // 1. Soket üzerinden hızlı çekim
+    socket.emit('chat:load_history', { contactUsername, token }, (res) => {
+        if (res && res.success && Array.isArray(res.messages)) {
+            hasLoaded = true;
+            messagesContainer.querySelectorAll('.message-bubble').forEach(b => b.remove());
             res.messages.forEach(msg => appendMessageBubble(msg));
             scrollToBottom();
         }
     });
+
+    // 2. HTTP REST Güvenlik Desteği (Soket gecikirse veya koparsa anında HTTP ile geçmişi getir)
+    setTimeout(async () => {
+        if (!hasLoaded && token) {
+            try {
+                const res = await fetch('/api/messages/' + encodeURIComponent(contactUsername), {
+                    headers: { 'x-auth-token': token }
+                });
+                const data = await res.json();
+                if (data && data.success && Array.isArray(data.messages)) {
+                    hasLoaded = true;
+                    messagesContainer.querySelectorAll('.message-bubble').forEach(b => b.remove());
+                    data.messages.forEach(msg => appendMessageBubble(msg));
+                    scrollToBottom();
+                }
+            } catch (err) {}
+        }
+    }, 700);
 }
 
 function appendMessageBubble(msg) {
@@ -1457,7 +1489,13 @@ function sendTextMessage(text) {
                 bubbleEl.id = ack.message.id;
                 bubbleEl.classList.remove('pending');
                 const checks = bubbleEl.querySelector('.bubble-checks');
-                if (checks) checks.textContent = '✓✓';
+                if (checks) {
+                    // Alıcı offline ise tek tik (sunucuya ve veritabanına kaydedildi, açtığında teslim edilecek)
+                    // Alıcı online ise çift tik (hemen iletildi)
+                    const isRecOnline = ack.isRecipientOnline !== false;
+                    checks.textContent = isRecOnline ? '✓✓' : '✓';
+                    checks.title = isRecOnline ? 'Teslim edildi' : 'Sunucuya kaydedildi (Alıcı çevrimdışı, açtığında iletilecek)';
+                }
             }
         }
     });
@@ -1485,6 +1523,8 @@ async function handleFileUpload(file) {
     progressFill.style.width = '0%';
     progressText.textContent = `Yükleniyor: ${file.name}...`;
 
+    const token = localStorage.getItem('msj_token') || sessionStorage.getItem('msj_token');
+
     try {
         const xhr = new XMLHttpRequest();
         xhr.open('POST', '/api/upload', true);
@@ -1504,7 +1544,8 @@ async function handleFileUpload(file) {
                 socket.emit('chat:send_message', {
                     recipient: activeContact.username,
                     text: '',
-                    file: uploadedFile
+                    file: uploadedFile,
+                    token: token
                 });
             } else {
                 alert('Dosya yüklenemedi.');
@@ -1592,6 +1633,33 @@ socket.on('chat:message', (msg) => {
     } else {
         loadChatsList();
     }
+});
+
+// Çevrimdışıyken bize gönderilmiş bekleyen mesajlar sunucudan geldiğinde (Offline Teslim)
+socket.on('chat:offline_messages', (data) => {
+    if (!data || !Array.isArray(data.messages) || data.messages.length === 0) return;
+
+    let hasUnreadForOther = false;
+    data.messages.forEach(msg => {
+        // Eğer o an açık olan sohbetle ilgili bir mesajsa baloncuk olarak ekrana bas
+        const isFromActive = activeContact && normalizeKey(msg.sender) === normalizeKey(activeContact.username);
+        if (isFromActive) {
+            appendMessageBubble(msg);
+            socket.emit('chat:mark_read', { contactUsername: msg.sender });
+        } else {
+            hasUnreadForOther = true;
+        }
+    });
+
+    if (hasUnreadForOther) {
+        playIncomingMessageChime();
+        if (data.messages.length === 1) {
+            showMessageNotificationToast(data.messages[0]);
+        }
+    }
+
+    // Sohbet listesini ve rozetleri güncelle
+    loadChatsList();
 });
 
 // Karşı taraf mesajları okuduğunda mavi çift tik yap
