@@ -370,24 +370,98 @@
     </div>
 
     <!-- ==========================================
-         GELEN WEBRTC ARAMA EKRANI
+         SES MOTORU (BİLDİRİM, TELEFON ÇALMASI VE WEBRTC SESİ)
+         ========================================== -->
+    <audio id="remoteAudio" autoplay playsinline></audio>
+    <audio id="audioRingtone" src="/sounds/ringtone.wav" loop preload="auto"></audio>
+    <audio id="audioRingback" src="/sounds/ringback.wav" loop preload="auto"></audio>
+    <audio id="audioMessage" src="/sounds/message.wav" preload="auto"></audio>
+    <audio id="audioEnded" src="/sounds/ended.wav" preload="auto"></audio>
+
+    <!-- ==========================================
+         GELEN TELEFON ARAMASI EKRANI (RESİMDEKİ GİBİ EVET / HAYIR)
          ========================================== -->
     <div class="call-incoming-overlay" id="incomingCallModal" style="display:none;">
         <div class="incoming-card">
-            <img id="incomingCallerAvatar" class="avatar call-pulse-avatar" src="/avatars/default.svg" alt="Arayan">
-            <h2 id="incomingCallerName">Arayan Kişi</h2>
-            <p id="incomingCallType">Görüntülü Arama Geliyor...</p>
+            <!-- ÜST KISIM: ARAYAN KİŞİNİN ADI (RESİMDEKİ GİBİ BÜYÜK VE NET) -->
+            <div class="call-header-info">
+                <h1 class="incoming-caller-title" id="incomingCallerName">Arayan Kişi</h1>
+                <p class="incoming-caller-subtitle" id="incomingCallType">Gelen Sesli Arama...</p>
+            </div>
+
+            <!-- ORTA KISIM: ARAYAN KİŞİNİN AVATARI VE DALGA EFEKTİ -->
+            <div class="call-avatar-container">
+                <div class="call-ripple-ring ring-1"></div>
+                <div class="call-ripple-ring ring-2"></div>
+                <img id="incomingCallerAvatar" class="avatar incoming-pulse-avatar" src="/avatars/default.svg" alt="Arayan">
+            </div>
+
+            <!-- ARA SEÇENEKLER (RESİMDEKİ GİBİ HATIRLAT / MESAJ) -->
+            <div class="call-secondary-actions">
+                <div class="call-sec-btn" id="btnCallRemindMe" title="Beni Hatırlat">
+                    <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor">
+                        <path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.63-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.64 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2zm-2 1H8v-6c0-2.48 1.51-4.5 4-4.5s4 2.02 4 4.5v6z"/>
+                    </svg>
+                    <span>Hatırlat</span>
+                </div>
+                <div class="call-sec-btn" id="btnCallQuickMsg" title="Mesaj Gönder">
+                    <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor">
+                        <path d="M20 2H4c-1.1 0-1.99.9-1.99 2L2 22l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM6 9h12v2H6V9zm8 5H6v-2h8v2zm4-6H6V6h12v2z"/>
+                    </svg>
+                    <span>Mesaj</span>
+                </div>
+            </div>
+
+            <!-- ALT KISIM: CEVAP VERMEK İÇİN "EVET", REDDETMEK İÇİN "HAYIR" (RESİMDEKİ GİBİ) -->
             <div class="call-action-buttons">
-                <button class="call-btn btn-decline" id="btnRejectCall" title="Reddet">
-                    <svg viewBox="0 0 24 24" width="28" height="28" fill="currentColor">
-                        <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm5 11H7v-2h10v2z"/>
-                    </svg>
-                </button>
-                <button class="call-btn btn-accept" id="btnAcceptCall" title="Cevapla">
-                    <svg viewBox="0 0 24 24" width="28" height="28" fill="currentColor">
-                        <path d="M20.01 15.38c-1.23 0-2.42-.2-3.53-.56a.977.977 0 0 0-1.01.24l-1.57 1.97c-2.83-1.35-5.43-3.9-6.63-6.81l1.97-1.51c.31-.24.4-.67.27-1.04-.37-1.12-.57-2.32-.57-3.57 0-.55-.45-1-1-1H4.51c-.55 0-1 .45-1 1 0 9.39 7.63 17.02 17.02 17.02.55 0 1-.45 1-1v-4.52c0-.55-.45-1-1-1z"/>
-                    </svg>
-                </button>
+                <!-- HAYIR (REDDET - KIRMIZI) -->
+                <div class="call-btn-wrapper">
+                    <button type="button" class="call-btn btn-decline" id="btnRejectCall" title="Hayır (Reddet)">
+                        <svg viewBox="0 0 24 24" width="34" height="34" fill="currentColor" class="phone-icon-hangup">
+                            <path d="M12 9c-1.6 0-3.15.25-4.6.72v3.1c0 .39-.23.74-.56.9-.98.49-1.87 1.12-2.66 1.85-.18.18-.43.28-.7.28-.28 0-.53-.11-.71-.29L.29 13.08a.996.996 0 0 1 0-1.41C3.34 8.78 7.46 7 12 7s8.66 1.78 11.71 4.67c.39.39.39 1.02 0 1.41l-2.48 2.48c-.18.18-.43.29-.71.29s-.52-.1-.7-.28c-.79-.74-1.69-1.36-2.67-1.85-.33-.16-.56-.5-.56-.9v-3.1C15.15 9.25 13.6 9 12 9z"/>
+                        </svg>
+                    </button>
+                    <span class="call-btn-text">Hayır</span>
+                </div>
+
+                <!-- EVET (CEVAPLA - YEŞİL) -->
+                <div class="call-btn-wrapper">
+                    <button type="button" class="call-btn btn-accept" id="btnAcceptCall" title="Evet (Cevapla)">
+                        <svg viewBox="0 0 24 24" width="32" height="32" fill="currentColor">
+                            <path d="M20.01 15.38c-1.23 0-2.42-.2-3.53-.56a.977.977 0 0 0-1.01.24l-1.57 1.97c-2.83-1.35-5.43-3.9-6.63-6.81l1.97-1.51c.31-.24.4-.67.27-1.04-.37-1.12-.57-2.32-.57-3.57 0-.55-.45-1-1-1H4.51c-.55 0-1 .45-1 1 0 9.39 7.63 17.02 17.02 17.02.55 0 1-.45 1-1v-4.52c0-.55-.45-1-1-1z"/>
+                        </svg>
+                    </button>
+                    <span class="call-btn-text">Evet</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ==========================================
+         GİDEN ARAMA EKRANI (ARANIYOR / ÇALIYOR...)
+         ========================================== -->
+    <div class="call-incoming-overlay call-outgoing-overlay" id="outgoingCallModal" style="display:none;">
+        <div class="incoming-card">
+            <div class="call-header-info">
+                <h1 class="incoming-caller-title" id="outgoingTargetName">Kişi</h1>
+                <p class="incoming-caller-subtitle" id="outgoingCallStatus">Çalıyor...</p>
+            </div>
+
+            <div class="call-avatar-container">
+                <div class="call-ripple-ring ring-1"></div>
+                <div class="call-ripple-ring ring-2"></div>
+                <img id="outgoingTargetAvatar" class="avatar incoming-pulse-avatar" src="/avatars/default.svg" alt="Aranan">
+            </div>
+
+            <div class="call-action-buttons" style="justify-content: center;">
+                <div class="call-btn-wrapper">
+                    <button type="button" class="call-btn btn-decline" id="btnCancelOutgoingCall" title="Aramayı Kapat">
+                        <svg viewBox="0 0 24 24" width="34" height="34" fill="currentColor" class="phone-icon-hangup">
+                            <path d="M12 9c-1.6 0-3.15.25-4.6.72v3.1c0 .39-.23.74-.56.9-.98.49-1.87 1.12-2.66 1.85-.18.18-.43.28-.7.28-.28 0-.53-.11-.71-.29L.29 13.08a.996.996 0 0 1 0-1.41C3.34 8.78 7.46 7 12 7s8.66 1.78 11.71 4.67c.39.39.39 1.02 0 1.41l-2.48 2.48c-.18.18-.43.29-.71.29s-.52-.1-.7-.28c-.79-.74-1.69-1.36-2.67-1.85-.33-.16-.56-.5-.56-.9v-3.1C15.15 9.25 13.6 9 12 9z"/>
+                        </svg>
+                    </button>
+                    <span class="call-btn-text">Kapat</span>
+                </div>
             </div>
         </div>
     </div>

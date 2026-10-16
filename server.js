@@ -636,6 +636,33 @@ app.get('/api/info', async (req, res) => {
 });
 
 // ==========================================
+// ARKA PLAN VE SİSTEM BİLDİRİM SUNUCUSU (WINDOWS TRAY & PWA)
+// Program kapalı veya arka plandayken bildirim almayı sağlar
+// ==========================================
+let notificationSeq = 0;
+const systemNotificationsQueue = []; // { id, timestamp, type, sender, recipient, text, callType }
+
+function addSystemNotification(item) {
+    notificationSeq++;
+    const entry = { id: notificationSeq, timestamp: Date.now(), ...item };
+    systemNotificationsQueue.push(entry);
+    if (systemNotificationsQueue.length > 200) {
+        systemNotificationsQueue.shift();
+    }
+    return entry;
+}
+
+app.get('/api/system/notifications/poll', (req, res) => {
+    const since = parseInt(req.query.since || '0', 10);
+    const newItems = systemNotificationsQueue.filter(n => n.id > since);
+    res.json({
+        success: true,
+        lastId: notificationSeq,
+        notifications: newItems
+    });
+});
+
+// ==========================================
 // SSL SERTİFİKASI TEMİNİ
 // ==========================================
 const keyPath = path.join(certsDir, 'key.pem');
@@ -820,6 +847,14 @@ async function startServer() {
                 io.to('user:' + recipientKey).emit('chat:message', savedMsg);
             }
 
+            // Sistem bildirim kuyruğuna ekle (Masaüstü Tray ve Arka Plan için)
+            addSystemNotification({
+                type: 'message',
+                sender: sender.username,
+                recipient: recipient,
+                text: msg.text || (msg.file ? '📎 Dosya / Fotoğraf paylaştı' : 'Yeni bir mesaj gönderdi')
+            });
+
             if (ack) ack({ success: true, message: savedMsg, isRecipientOnline });
         });
 
@@ -955,12 +990,66 @@ async function startServer() {
                 return;
             }
 
+            // Sistem bildirim kuyruğuna arama uyarısı ekle
+            addSystemNotification({
+                type: 'call',
+                sender: sender.username,
+                recipient: recipient,
+                callType: data.callType || 'voice'
+            });
+
             io.to('user:' + recipientKey).emit('call:incoming', {
                 callerUsername: sender.username,
                 callerAvatar: sender.avatar,
-                callType: data.callType || 'video',
+                callType: data.callType || 'voice',
                 callerSocketId: socket.id
             });
+        });
+
+        // Arayan Kişi Açılmadan Aramayı İptal Ettiğinde
+        socket.on('call:cancel', (data) => {
+            const sender = socketToUserMap.get(socket.id);
+            if (!sender) return;
+
+            if (data.targetSocketId) {
+                io.to(data.targetSocketId).emit('call:cancelled', {
+                    callerUsername: sender.username,
+                    reason: 'Arama iptal edildi'
+                });
+            } else if (data.recipient) {
+                const recipientKey = normalizeKey(data.recipient);
+                io.to('user:' + recipientKey).emit('call:cancelled', {
+                    callerUsername: sender.username,
+                    reason: 'Arama iptal edildi'
+                });
+            }
+        });
+
+        // Cevapsız Arama Kaydı (Zaman Aşımında veya Reddedildiğinde Veritabanına Yazar)
+        socket.on('call:missed', async (data) => {
+            const sender = socketToUserMap.get(socket.id);
+            if (!sender || !data.recipient) return;
+
+            try {
+                const missedMsg = await db.saveMessage({
+                    id: 'msg_call_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6),
+                    sender: sender.username,
+                    recipient: data.recipient,
+                    text: '📞 Cevapsız Arama',
+                    file: null,
+                    timestamp: new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }),
+                    date: 'Bugün',
+                    createdAt: new Date().toISOString(),
+                    read: false
+                });
+
+                const senderKey = normalizeKey(sender.username);
+                const recKey = normalizeKey(data.recipient);
+                io.to('user:' + senderKey).emit('chat:message', missedMsg);
+                io.to('user:' + recKey).emit('chat:message', missedMsg);
+            } catch (e) {
+                console.error('Cevapsız arama kaydetme hatası:', e.message);
+            }
         });
 
         socket.on('call:accept', (data) => {

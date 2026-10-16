@@ -1,5 +1,5 @@
 // MSJ Service Worker - PWA Kurulabilirlik, Çevrimdışı Önbellek ve Bildirimler
-const CACHE_NAME = 'msj-cache-v7';
+const CACHE_NAME = 'msj-cache-v8';
 const ASSETS = [
     '/',
     '/index.html',
@@ -9,7 +9,11 @@ const ASSETS = [
     '/icon.svg',
     '/icon-192.png',
     '/icon-512.png',
-    '/apple-touch-icon.png'
+    '/apple-touch-icon.png',
+    '/sounds/message.wav',
+    '/sounds/ringtone.wav',
+    '/sounds/ringback.wav',
+    '/sounds/ended.wav'
 ];
 
 self.addEventListener('install', (event) => {
@@ -56,5 +60,22 @@ self.addEventListener('fetch', (event) => {
                 return response;
             })
             .catch(() => caches.match(event.request).then(cached => cached || caches.match('/index.html')))
+    );
+});
+
+// Bildirime dokunulduğunda / tıklandığında uygulamayı ön plana getir
+self.addEventListener('notificationclick', (event) => {
+    event.notification.close();
+    event.waitUntil(
+        self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
+            for (const client of clientList) {
+                if ('focus' in client) {
+                    return client.focus();
+                }
+            }
+            if (self.clients.openWindow) {
+                return self.clients.openWindow('/');
+            }
+        })
     );
 });

@@ -39,8 +39,16 @@ let isRecordingAudio = false;
 let peerConnection = null;
 let localStream = null;
 let currentCallTarget = null;
-let currentCallType = 'video';
+let currentCallType = 'voice';
 let currentCallerSocketId = null;
+let currentTargetSocketId = null;
+let iceCandidateQueue = [];
+let localIceCandidateQueue = [];
+let isRemoteDescriptionSet = false;
+let outgoingCallTimeoutTimer = null;
+let ringtoneVibrateInterval = null;
+let ringtoneOscInterval = null;
+let isAudioUnlocked = false;
 let callTimerInterval = null;
 let callStartTime = null;
 let isAudioMuted = false;
@@ -50,8 +58,10 @@ const rtcConfig = {
     iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
         { urls: 'stun:stun1.l.google.com:19302' },
-        { urls: 'stun:stun2.l.google.com:19302' }
-    ]
+        { urls: 'stun:stun2.l.google.com:19302' },
+        { urls: 'stun:stun.cloudflare.com:3478' }
+    ],
+    iceCandidatePoolSize: 10
 };
 
 // DOM Referansları
@@ -168,13 +178,29 @@ const btnProfileSwitchUser = document.getElementById('btnProfileSwitchUser');
 const btnProfileChangePass = document.getElementById('btnProfileChangePass');
 const btnProfileLogout = document.getElementById('btnProfileLogout');
 
-// Arama & Önizleme Modalları
+// Ses Motoru (Bildirim, Çalma ve Arama Sesi)
+const remoteAudio = document.getElementById('remoteAudio');
+const audioRingtone = document.getElementById('audioRingtone');
+const audioRingback = document.getElementById('audioRingback');
+const audioMessage = document.getElementById('audioMessage');
+const audioEnded = document.getElementById('audioEnded');
+
+// Gelen Arama Modalı (Resimdeki gibi Evet / Hayır)
 const incomingCallModal = document.getElementById('incomingCallModal');
 const incomingCallerAvatar = document.getElementById('incomingCallerAvatar');
 const incomingCallerName = document.getElementById('incomingCallerName');
 const incomingCallType = document.getElementById('incomingCallType');
 const btnAcceptCall = document.getElementById('btnAcceptCall');
 const btnRejectCall = document.getElementById('btnRejectCall');
+const btnCallRemindMe = document.getElementById('btnCallRemindMe');
+const btnCallQuickMsg = document.getElementById('btnCallQuickMsg');
+
+// Giden Arama Modalı (Aranıyor / Çalıyor...)
+const outgoingCallModal = document.getElementById('outgoingCallModal');
+const outgoingTargetName = document.getElementById('outgoingTargetName');
+const outgoingCallStatus = document.getElementById('outgoingCallStatus');
+const outgoingTargetAvatar = document.getElementById('outgoingTargetAvatar');
+const btnCancelOutgoingCall = document.getElementById('btnCancelOutgoingCall');
 
 const activeCallScreen = document.getElementById('activeCallScreen');
 const remoteVideo = document.getElementById('remoteVideo');
@@ -277,9 +303,86 @@ function showStatusToast(username, isOnline) {
 }
 
 // ==========================================================
-// YENİ GELEN MESAJ SES VE AÇILIR BİLDİRİM MOTORU
+// SES VE TELEFON ÇALMA MOTORU (BİLDİRİM, ÇALMA, DİALTONE)
 // ==========================================================
 
+// Tarayıcı ve mobil ses kilidini (Autoplay Policy) ilk tıklamada kaldır
+function unlockAudio() {
+    if (isAudioUnlocked) return;
+    isAudioUnlocked = true;
+
+    try {
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+        if (AudioContext) {
+            const ctx = new AudioContext();
+            if (ctx.state === 'suspended') ctx.resume();
+        }
+    } catch(e) {}
+
+    [audioMessage, audioRingtone, audioRingback, audioEnded, remoteAudio].forEach(el => {
+        if (el) {
+            try {
+                const p = el.play();
+                if (p !== undefined) {
+                    p.then(() => {
+                        el.pause();
+                        el.currentTime = 0;
+                    }).catch(() => {});
+                }
+            } catch(e) {}
+        }
+    });
+
+    requestNotificationPermission();
+}
+
+document.addEventListener('click', unlockAudio, { passive: true });
+document.addEventListener('touchstart', unlockAudio, { passive: true });
+
+function requestNotificationPermission() {
+    if ('Notification' in window && Notification.permission === 'default') {
+        Notification.requestPermission().catch(() => {});
+    }
+}
+
+// Sistem ve PWA bildirimleri (Program arka plandayken veya kilitliyken çalışır)
+function triggerSystemNotification(title, options) {
+    if (!('Notification' in window) || Notification.permission !== 'granted') return;
+    try {
+        if (navigator.serviceWorker && navigator.serviceWorker.controller) {
+            navigator.serviceWorker.ready.then(reg => {
+                reg.showNotification(title, options);
+            }).catch(() => {
+                new Notification(title, options);
+            });
+        } else {
+            new Notification(title, options);
+        }
+    } catch(e) {}
+}
+
+// 1. Yeni Mesaj Geldiğinde Bildirim Sesi Çalma
+function playIncomingMessageSound() {
+    try {
+        if (audioMessage) {
+            audioMessage.currentTime = 0;
+            const p = audioMessage.play();
+            if (p !== undefined) {
+                p.catch(() => playIncomingMessageChime());
+            }
+        } else {
+            playIncomingMessageChime();
+        }
+    } catch(e) {
+        playIncomingMessageChime();
+    }
+
+    if (navigator.vibrate) {
+        try { navigator.vibrate([180, 80, 180]); } catch(e) {}
+    }
+}
+
+// Web Audio Fallback: Sentezlenmiş mesaj sesi
 function playIncomingMessageChime() {
     try {
         const AudioContext = window.AudioContext || window.webkitAudioContext;
@@ -298,11 +401,129 @@ function playIncomingMessageChime() {
         osc.frequency.setValueAtTime(698.46, now);
         osc.frequency.exponentialRampToValueAtTime(880.00, now + 0.1);
         gain.gain.setValueAtTime(0.001, now);
-        gain.gain.linearRampToValueAtTime(0.25, now + 0.04);
-        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.38);
+        gain.gain.linearRampToValueAtTime(0.35, now + 0.04);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.45);
 
         osc.start(now);
-        osc.stop(now + 0.4);
+        osc.stop(now + 0.46);
+    } catch(e) {}
+}
+
+// 2. Telefon Çalma Sesi (Gelen Arama Ringtonu)
+function playRingtone() {
+    unlockAudio();
+    try {
+        if (audioRingtone) {
+            audioRingtone.currentTime = 0;
+            const p = audioRingtone.play();
+            if (p !== undefined) {
+                p.catch(() => startSynthRingtoneFallback());
+            }
+        } else {
+            startSynthRingtoneFallback();
+        }
+    } catch(e) {
+        startSynthRingtoneFallback();
+    }
+
+    // Telefon titreşim ritmi (1 sn çal, 0.5 sn dur)
+    if (navigator.vibrate) {
+        try { navigator.vibrate([1000, 500, 1000, 500, 1000, 500]); } catch(e) {}
+        if (ringtoneVibrateInterval) clearInterval(ringtoneVibrateInterval);
+        ringtoneVibrateInterval = setInterval(() => {
+            try { navigator.vibrate([1000, 500, 1000, 500, 1000, 500]); } catch(e) {}
+        }, 4500);
+    }
+}
+
+function stopRingtone() {
+    try {
+        if (audioRingtone) {
+            audioRingtone.pause();
+            audioRingtone.currentTime = 0;
+        }
+    } catch(e) {}
+
+    stopSynthRingtoneFallback();
+
+    if (ringtoneVibrateInterval) {
+        clearInterval(ringtoneVibrateInterval);
+        ringtoneVibrateInterval = null;
+    }
+    if (navigator.vibrate) {
+        try { navigator.vibrate(0); } catch(e) {}
+    }
+}
+
+// Ringtone Web Audio Yedek Döngüsü (Audio dosyası engellenirse devreye girer)
+let synthCtx = null;
+function startSynthRingtoneFallback() {
+    if (ringtoneOscInterval) return;
+    try {
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContext) return;
+        synthCtx = new AudioContext();
+
+        const playBeep = () => {
+            if (!synthCtx) return;
+            if (synthCtx.state === 'suspended') synthCtx.resume();
+            const now = synthCtx.currentTime;
+            const osc = synthCtx.createOscillator();
+            const gain = synthCtx.createGain();
+            osc.connect(gain);
+            gain.connect(synthCtx.destination);
+            osc.type = 'triangle';
+            osc.frequency.setValueAtTime(800, now);
+            osc.frequency.setValueAtTime(1000, now + 0.2);
+            gain.gain.setValueAtTime(0.3, now);
+            gain.gain.exponentialRampToValueAtTime(0.001, now + 1.2);
+            osc.start(now);
+            osc.stop(now + 1.25);
+        };
+
+        playBeep();
+        ringtoneOscInterval = setInterval(playBeep, 2400);
+    } catch(e) {}
+}
+
+function stopSynthRingtoneFallback() {
+    if (ringtoneOscInterval) {
+        clearInterval(ringtoneOscInterval);
+        ringtoneOscInterval = null;
+    }
+    if (synthCtx) {
+        try { synthCtx.close(); } catch(e) {}
+        synthCtx = null;
+    }
+}
+
+// 3. Giden Arama Çalma Sesi (Dial / Ringback Tone "Düt... Düt...")
+function playRingback() {
+    unlockAudio();
+    try {
+        if (audioRingback) {
+            audioRingback.currentTime = 0;
+            audioRingback.play().catch(() => {});
+        }
+    } catch(e) {}
+}
+
+function stopRingback() {
+    try {
+        if (audioRingback) {
+            audioRingback.pause();
+            audioRingback.currentTime = 0;
+        }
+    } catch(e) {}
+}
+
+// 4. Arama Kapatıldı / Meşgul Sesi
+function playCallEndedSound() {
+    try {
+        if (audioEnded) {
+            audioEnded.currentTime = 0;
+            audioEnded.play().catch(() => {});
+        }
     } catch(e) {}
 }
 
@@ -1595,17 +1816,21 @@ socket.on('chat:message', (msg) => {
         }
     }
 
-    // 2. Eğer mesaj bize geldiyse ve o kişinin penceresi açık DEĞİLSE:
-    if (isIncoming && !isFromActive) {
-        // A) Bildirim sesi çal
-        playIncomingMessageChime();
+    // 2. Eğer mesaj bize geldiyse:
+    if (isIncoming) {
+        // A) Bildirim sesi çal (WhatsApp tarzı net ve tatlı ses)
+        playIncomingMessageSound();
 
-        // B) Ekranın tepesinde zengin açılır bildirim kutusu göster (Küçük ikon ile)
-        showMessageNotificationToast(msg);
-
-        // C) Mobil titreşim
-        if (navigator.vibrate) {
-            try { navigator.vibrate([120, 50, 120]); } catch(e) {}
+        // B) Sohbet o an açık değilse veya sekme/pencere arka plandaysa:
+        if (!isFromActive || document.hidden) {
+            showMessageNotificationToast(msg);
+            triggerSystemNotification(`💬 ${msg.sender}`, {
+                body: msg.text || (msg.file ? '📎 [Dosya / Fotoğraf paylaştı]' : 'Yeni bir mesajınız var'),
+                icon: '/icon-192.png',
+                badge: '/icon-192.png',
+                tag: 'msg-' + msg.sender,
+                vibrate: [180, 80, 180]
+            });
         }
     }
 
@@ -1652,7 +1877,7 @@ socket.on('chat:offline_messages', (data) => {
     });
 
     if (hasUnreadForOther) {
-        playIncomingMessageChime();
+        playIncomingMessageSound();
         if (data.messages.length === 1) {
             showMessageNotificationToast(data.messages[0]);
         }
@@ -1746,7 +1971,7 @@ socket.on('user:new_registered', (data) => {
 });
 
 // ==========================================================
-// 6. WEBRTC SESLİ VE GÖRÜNTÜLÜ ARAMA MOTORU
+// 6. WEBRTC SESLİ VE GÖRÜNTÜLÜ ARAMA MOTORU (BİREBİR & KESİNTİSİZ SES)
 // ==========================================================
 
 btnVideoCall.addEventListener('click', () => initiateCall('video'));
@@ -1755,11 +1980,25 @@ btnVoiceCall.addEventListener('click', () => initiateCall('voice'));
 async function initiateCall(callType) {
     if (!activeContact) return;
 
+    unlockAudio();
     currentCallTarget = activeContact.username;
     currentCallType = callType;
+    currentTargetSocketId = null;
+
+    // GİDEN ARAMA EKRANINI AÇ (RESİMDEKİ GİBİ ARANIYOR / ÇALIYOR...)
+    if (outgoingTargetName) outgoingTargetName.textContent = activeContact.username;
+    if (outgoingCallStatus) outgoingCallStatus.textContent = callType === 'video' ? 'Görüntülü Arama Yapılıyor...' : 'Sesli Arama Yapılıyor...';
+    if (outgoingTargetAvatar) outgoingTargetAvatar.src = activeContact.avatar || '/avatars/default.svg';
+    if (outgoingCallModal) outgoingCallModal.style.display = 'flex';
+
+    // Arayan kişinin kulağında telefon çalma sinyali (düt... düt...) başlar
+    playRingback();
 
     const stream = await initLocalMedia(callType === 'video');
-    if (!stream) return;
+    if (!stream) {
+        hideOutgoingCall();
+        return;
+    }
 
     setupPeerConnection();
 
@@ -1768,19 +2007,74 @@ async function initiateCall(callType) {
         callType: callType
     });
 
-    openActiveCallScreen(activeContact.username, activeContact.avatar);
+    // 35 saniye boyunca cevap verilmezse zaman aşımı ile sonlandır
+    if (outgoingCallTimeoutTimer) clearTimeout(outgoingCallTimeoutTimer);
+    outgoingCallTimeoutTimer = setTimeout(() => {
+        if (outgoingCallModal && outgoingCallModal.style.display !== 'none') {
+            socket.emit('call:cancel', { recipient: currentCallTarget, reason: 'Zaman aşımı' });
+            socket.emit('call:missed', { recipient: currentCallTarget });
+            hideOutgoingCall();
+            showStatusToast(currentCallTarget + ' cevap vermiyor', false);
+            playCallEndedSound();
+            if (localStream) {
+                localStream.getTracks().forEach(t => t.stop());
+                localStream = null;
+            }
+            if (peerConnection) {
+                peerConnection.close();
+                peerConnection = null;
+            }
+        }
+    }, 35000);
 }
 
+function hideOutgoingCall() {
+    if (outgoingCallTimeoutTimer) {
+        clearTimeout(outgoingCallTimeoutTimer);
+        outgoingCallTimeoutTimer = null;
+    }
+    stopRingback();
+    if (outgoingCallModal) outgoingCallModal.style.display = 'none';
+}
+
+if (btnCancelOutgoingCall) {
+    btnCancelOutgoingCall.addEventListener('click', () => {
+        if (currentCallTarget) {
+            socket.emit('call:cancel', {
+                targetSocketId: currentTargetSocketId,
+                recipient: currentCallTarget,
+                reason: 'Arama iptal edildi'
+            });
+            socket.emit('call:missed', { recipient: currentCallTarget });
+        }
+        hideOutgoingCall();
+        if (localStream) {
+            localStream.getTracks().forEach(t => t.stop());
+            localStream = null;
+        }
+        if (peerConnection) {
+            peerConnection.close();
+            peerConnection = null;
+        }
+        playCallEndedSound();
+    });
+}
+
+// Mikrofon ve Kamera İzinleri (Yankı ve Gürültü Engelleme ile Kristal Netliğinde Ses)
 async function initLocalMedia(video = true) {
     try {
         localStream = await navigator.mediaDevices.getUserMedia({
-            audio: true,
+            audio: {
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true
+            },
             video: video ? { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } } : false
         });
-        localVideo.srcObject = localStream;
+        if (localVideo) localVideo.srcObject = localStream;
         return localStream;
     } catch (err) {
-        alert('Kamera veya mikrofon erişim izni alınamadı: ' + err.message);
+        alert('Mikrofon veya kamera erişim izni alınamadı: ' + err.message);
         return null;
     }
 }
@@ -1791,6 +2085,10 @@ function setupPeerConnection() {
         peerConnection = null;
     }
 
+    iceCandidateQueue = [];
+    localIceCandidateQueue = [];
+    isRemoteDescriptionSet = false;
+
     peerConnection = new RTCPeerConnection(rtcConfig);
 
     if (localStream) {
@@ -1800,81 +2098,192 @@ function setupPeerConnection() {
     }
 
     peerConnection.onicecandidate = (event) => {
-        if (event.candidate && currentCallerSocketId) {
-            socket.emit('call:signal', {
-                targetSocketId: currentCallerSocketId,
-                signal: { candidate: event.candidate }
-            });
+        if (event.candidate) {
+            if (currentTargetSocketId) {
+                socket.emit('call:signal', {
+                    targetSocketId: currentTargetSocketId,
+                    signal: { candidate: event.candidate }
+                });
+            } else {
+                localIceCandidateQueue.push(event.candidate);
+            }
         }
     };
 
+    peerConnection.oniceconnectionstatechange = () => {
+        console.log('[WebRTC ICE State]:', peerConnection.iceConnectionState);
+        if (peerConnection.iceConnectionState === 'connected' || peerConnection.iceConnectionState === 'completed') {
+            if (remoteAudio) {
+                remoteAudio.muted = false;
+                remoteAudio.play().catch(e => console.warn('remoteAudio play error:', e));
+            }
+        } else if (peerConnection.iceConnectionState === 'failed') {
+            if (peerConnection.restartIce) peerConnection.restartIce();
+        }
+    };
+
+    // GELEN SES VE GÖRÜNTÜ AKIŞI (SES GİTMEME/GELMEME SORUNUNUN ÇÖZÜMÜ)
     peerConnection.ontrack = (event) => {
-        remoteVideo.srcObject = event.streams[0];
+        console.log('[WebRTC ontrack]:', event.track.kind, event.streams);
+
+        // 1. SES İÇİN ÖZEL DEDICATED <audio id="remoteAudio"> ELEMENTİNE BAĞLA
+        if (remoteAudio) {
+            if (event.streams && event.streams[0]) {
+                remoteAudio.srcObject = event.streams[0];
+            } else {
+                let inboundStream = remoteAudio.srcObject || new MediaStream();
+                inboundStream.addTrack(event.track);
+                remoteAudio.srcObject = inboundStream;
+            }
+            remoteAudio.muted = false;
+            remoteAudio.play().catch(e => console.warn('remoteAudio oynatma hatası:', e));
+        }
+
+        // 2. GÖRÜNTÜ VARSA <video id="remoteVideo"> ELEMENTİNE BAĞLA
+        if (event.track.kind === 'video' && remoteVideo) {
+            if (event.streams && event.streams[0]) {
+                remoteVideo.srcObject = event.streams[0];
+            }
+            remoteVideo.play().catch(() => {});
+        }
+
         if (currentCallType === 'voice') {
-            remoteVideo.style.display = 'none';
-            remoteAudioPlaceholder.style.display = 'flex';
+            if (remoteVideo) remoteVideo.style.display = 'none';
+            if (remoteAudioPlaceholder) remoteAudioPlaceholder.style.display = 'flex';
         } else {
-            remoteVideo.style.display = 'block';
-            remoteAudioPlaceholder.style.display = 'none';
+            if (remoteVideo) remoteVideo.style.display = 'block';
+            if (remoteAudioPlaceholder) remoteAudioPlaceholder.style.display = 'none';
         }
     };
 }
 
-// Gelen Arama
-socket.on('call:incoming', (data) => {
-    currentCallerSocketId = data.callerSocketId;
-    currentCallTarget = data.callerUsername;
-    currentCallType = data.callType;
+function flushLocalCandidates() {
+    if (!currentTargetSocketId || !peerConnection) return;
+    while (localIceCandidateQueue.length > 0) {
+        const c = localIceCandidateQueue.shift();
+        socket.emit('call:signal', {
+            targetSocketId: currentTargetSocketId,
+            signal: { candidate: c }
+        });
+    }
+}
 
-    incomingCallerName.textContent = data.callerUsername;
-    incomingCallerAvatar.src = data.callerAvatar || '/avatars/default.svg';
-    incomingCallType.textContent = data.callType === 'video' ? 'Görüntülü Arama Geliyor...' : 'Sesli Arama Geliyor...';
-    incomingCallModal.style.display = 'flex';
+// GELEN ARAMA (RESİMDEKİ GİBİ ARAYANIN ADI, EVET VE HAYIR BUTONLARI)
+socket.on('call:incoming', (data) => {
+    currentTargetSocketId = data.callerSocketId;
+    currentCallTarget = data.callerUsername;
+    currentCallType = data.callType || 'voice';
+
+    // 1. Arayan kişinin adını büyük ve belirgin göster (Resimdeki Mike Smith gibi)
+    if (incomingCallerName) incomingCallerName.textContent = data.callerUsername;
+    if (incomingCallerAvatar) incomingCallerAvatar.src = data.callerAvatar || '/avatars/default.svg';
+    if (incomingCallType) {
+        incomingCallType.textContent = data.callType === 'video' ? 'Gelen Görüntülü Arama...' : 'Gelen Sesli Arama...';
+    }
+
+    // 2. Arama ekranını tam ekran göster
+    if (incomingCallModal) incomingCallModal.style.display = 'flex';
+
+    // 3. Telefon Çalma Sesini (Zil Sesi) ve Titreşimi Başlat
+    playRingtone();
+
+    // 4. Program arka planda veya ekran kilitliyken Sistem Bildirimi Çıkar
+    triggerSystemNotification(`📞 GELEN ARAMA: ${data.callerUsername}`, {
+        body: `${data.callerUsername} sizi arıyor... Cevaplamak için dokunun.`,
+        icon: data.callerAvatar || '/icon-192.png',
+        badge: '/icon-192.png',
+        tag: 'incoming-call',
+        renotify: true,
+        requireInteraction: true,
+        vibrate: [1000, 500, 1000, 500, 1000, 500]
+    });
 });
 
+// ARAMAYI CEVAPLA (EVET - YEŞİL BUTON)
 btnAcceptCall.addEventListener('click', async () => {
-    incomingCallModal.style.display = 'none';
+    stopRingtone();
+    if (incomingCallModal) incomingCallModal.style.display = 'none';
+
     const stream = await initLocalMedia(currentCallType === 'video');
     if (!stream) {
-        socket.emit('call:reject', { callerSocketId: currentCallerSocketId, reason: 'İzin reddedildi' });
+        socket.emit('call:reject', { callerSocketId: currentTargetSocketId, reason: 'Mikrofon izni verilmedi' });
         return;
     }
 
     setupPeerConnection();
-    socket.emit('call:accept', { callerSocketId: currentCallerSocketId });
+    socket.emit('call:accept', { callerSocketId: currentTargetSocketId });
 
     const contact = contactsList.find(c => normalizeKey(c.username) === normalizeKey(currentCallTarget));
     openActiveCallScreen(currentCallTarget, contact ? contact.avatar : '/avatars/default.svg');
 });
 
+// ARAMAYI REDDET (HAYIR - KIRMIZI BUTON)
 btnRejectCall.addEventListener('click', () => {
-    incomingCallModal.style.display = 'none';
-    socket.emit('call:reject', { callerSocketId: currentCallerSocketId });
-    currentCallerSocketId = null;
+    stopRingtone();
+    if (incomingCallModal) incomingCallModal.style.display = 'none';
+    if (currentTargetSocketId) {
+        socket.emit('call:reject', { callerSocketId: currentTargetSocketId, reason: 'Arama reddedildi' });
+    }
+    if (currentUser) {
+        socket.emit('call:missed', { recipient: currentUser.username });
+    }
+    playCallEndedSound();
+    currentTargetSocketId = null;
 });
 
+// Arayan Kişi Aramayı Açılmadan Kapatırsa
+socket.on('call:cancelled', () => {
+    stopRingtone();
+    if (incomingCallModal) incomingCallModal.style.display = 'none';
+    playCallEndedSound();
+    showStatusToast('Arama kapatıldı', false);
+    currentTargetSocketId = null;
+});
+
+// Karşı Taraf Aramayı Kabul Ettiğinde (Arayan Taraf İçin)
 socket.on('call:accepted', async (data) => {
-    currentCallerSocketId = data.responderSocketId;
+    currentTargetSocketId = data.responderSocketId;
+    hideOutgoingCall();
+
+    const contact = contactsList.find(c => normalizeKey(c.username) === normalizeKey(currentCallTarget));
+    openActiveCallScreen(currentCallTarget, contact ? contact.avatar : '/avatars/default.svg');
+
+    flushLocalCandidates();
+
     if (!peerConnection) return;
-    const offer = await peerConnection.createOffer();
-    await peerConnection.setLocalDescription(offer);
-    socket.emit('call:signal', {
-        targetSocketId: currentCallerSocketId,
-        signal: { sdp: peerConnection.localDescription }
-    });
-    startCallTimer();
+    try {
+        const offer = await peerConnection.createOffer({
+            offerToReceiveAudio: true,
+            offerToReceiveVideo: (currentCallType === 'video')
+        });
+        await peerConnection.setLocalDescription(offer);
+        socket.emit('call:signal', {
+            targetSocketId: currentTargetSocketId,
+            signal: { sdp: peerConnection.localDescription }
+        });
+        startCallTimer();
+    } catch (err) {
+        console.error('Teklif oluşturma hatası:', err);
+    }
 });
 
+// Arama Reddedildiğinde
 socket.on('call:rejected', (data) => {
-    alert(data.reason || 'Arama reddedildi.');
+    hideOutgoingCall();
+    playCallEndedSound();
+    showStatusToast(data.reason || 'Arama meşgule atıldı / reddedildi', false);
     endCall();
 });
 
+// Arama Hatası (Kullanıcı Offline vb.)
 socket.on('call:error', (data) => {
+    hideOutgoingCall();
+    playCallEndedSound();
     alert(data.message || 'Arama başlatılamadı.');
     endCall();
 });
 
+// WebRTC SDP ve ICE Candidate Sinyalleşmesi (Kayıpsız Sıralı Eşleşme)
 socket.on('call:signal', async (data) => {
     if (!peerConnection) return;
     const signal = data.signal;
@@ -1882,37 +2291,60 @@ socket.on('call:signal', async (data) => {
     if (signal.sdp) {
         if (signal.sdp.type === 'offer') {
             await peerConnection.setRemoteDescription(new RTCSessionDescription(signal.sdp));
+            isRemoteDescriptionSet = true;
+
+            // Bekleyen ICE candidate'leri uygula
+            while (iceCandidateQueue.length > 0) {
+                try {
+                    await peerConnection.addIceCandidate(new RTCIceCandidate(iceCandidateQueue.shift()));
+                } catch(e) {}
+            }
+
             const answer = await peerConnection.createAnswer();
             await peerConnection.setLocalDescription(answer);
             socket.emit('call:signal', {
-                targetSocketId: currentCallerSocketId,
+                targetSocketId: currentTargetSocketId,
                 signal: { sdp: peerConnection.localDescription }
             });
+            flushLocalCandidates();
             startCallTimer();
         } else if (signal.sdp.type === 'answer') {
             await peerConnection.setRemoteDescription(new RTCSessionDescription(signal.sdp));
+            isRemoteDescriptionSet = true;
+
+            while (iceCandidateQueue.length > 0) {
+                try {
+                    await peerConnection.addIceCandidate(new RTCIceCandidate(iceCandidateQueue.shift()));
+                } catch(e) {}
+            }
         }
     } else if (signal.candidate) {
-        try {
-            await peerConnection.addIceCandidate(new RTCIceCandidate(signal.candidate));
-        } catch (e) {}
+        if (!isRemoteDescriptionSet) {
+            iceCandidateQueue.push(signal.candidate);
+        } else {
+            try {
+                await peerConnection.addIceCandidate(new RTCIceCandidate(signal.candidate));
+            } catch (e) {
+                console.warn('ICE candidate ekleme hatası:', e);
+            }
+        }
     }
 });
 
 function openActiveCallScreen(name, avatar) {
-    activeCallTargetTitle.textContent = name;
-    activeCallName.textContent = name;
-    activeCallAvatar.src = avatar;
+    if (activeCallTargetTitle) activeCallTargetTitle.textContent = name;
+    if (activeCallName) activeCallName.textContent = name;
+    if (activeCallAvatar) activeCallAvatar.src = avatar || '/avatars/default.svg';
 
     if (currentCallType === 'voice') {
-        remoteVideo.style.display = 'none';
-        remoteAudioPlaceholder.style.display = 'flex';
+        if (remoteVideo) remoteVideo.style.display = 'none';
+        if (remoteAudioPlaceholder) remoteAudioPlaceholder.style.display = 'flex';
     } else {
-        remoteVideo.style.display = 'block';
-        remoteAudioPlaceholder.style.display = 'none';
+        if (remoteVideo) remoteVideo.style.display = 'block';
+        if (remoteAudioPlaceholder) remoteAudioPlaceholder.style.display = 'none';
     }
 
-    activeCallScreen.style.display = 'flex';
+    if (activeCallScreen) activeCallScreen.style.display = 'flex';
 }
 
 btnToggleMic.addEventListener('click', () => {
@@ -1935,6 +2367,8 @@ socket.on('call:ended', () => endCall());
 socket.on('call:peer_disconnected', () => endCall());
 
 function endCall() {
+    hideOutgoingCall();
+    stopRingtone();
     if (callTimerInterval) clearInterval(callTimerInterval);
     if (peerConnection) {
         peerConnection.close();
@@ -1945,16 +2379,43 @@ function endCall() {
         localStream = null;
     }
 
-    remoteVideo.srcObject = null;
-    localVideo.srcObject = null;
-    activeCallScreen.style.display = 'none';
-    incomingCallModal.style.display = 'none';
-
-    if (currentCallerSocketId) {
-        socket.emit('call:end', { targetSocketId: currentCallerSocketId });
-        currentCallerSocketId = null;
+    if (remoteVideo) remoteVideo.srcObject = null;
+    if (localVideo) localVideo.srcObject = null;
+    if (remoteAudio) {
+        remoteAudio.srcObject = null;
+        remoteAudio.pause();
     }
+    if (activeCallScreen) activeCallScreen.style.display = 'none';
+    if (incomingCallModal) incomingCallModal.style.display = 'none';
+
+    if (currentTargetSocketId) {
+        socket.emit('call:end', { targetSocketId: currentTargetSocketId });
+        currentTargetSocketId = null;
+    }
+    playCallEndedSound();
 }
+
+// Hatırlat ve Mesaj Gönder Butonları (Resimdeki gibi)
+if (btnCallRemindMe) {
+    btnCallRemindMe.addEventListener('click', () => {
+        showStatusToast('Hatırlatma kuruldu', true);
+        if (btnRejectCall) btnRejectCall.click();
+    });
+}
+if (btnCallQuickMsg) {
+    btnCallQuickMsg.addEventListener('click', () => {
+        const caller = currentCallTarget;
+        if (btnRejectCall) btnRejectCall.click();
+        if (caller) {
+            openChatForSender(caller);
+            if (messageInput) {
+                messageInput.value = 'Şu anda müsait değilim, birazdan görüşelim.';
+                messageInput.focus();
+            }
+        }
+    });
+}
+
 
 function startCallTimer() {
     callStartTime = Date.now();
