@@ -26,7 +26,15 @@ const dataDir = path.join(__dirname, 'data');
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 });
 
-// Statik Dosyalar
+// Statik Dosyalar (Önbellek sorunlarını önlemek için no-cache başlığı ile)
+app.use((req, res, next) => {
+    if (req.path === '/' || req.path.endsWith('.html') || req.path.endsWith('.js') || req.path.endsWith('.css')) {
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
+    }
+    next();
+});
 app.use(express.static(publicDir));
 app.use('/uploads', express.static(uploadsDir));
 
@@ -299,13 +307,8 @@ app.post('/api/auth/auto_login', async (req, res) => {
             }
         }
 
-        // Oturumu kontrol et (Çıkış yapılmışsa otomatik giriş yapılmaz)
         const lastSession = await db.getLastSessionForUser(cleanUser);
-        if (!lastSession) {
-            return res.status(401).json({ success: false, error: 'Kayıtlı aktif oturum bulunamadı' });
-        }
-
-        const newToken = lastSession.token || crypto.randomBytes(32).toString('hex');
+        const newToken = (lastSession && lastSession.token) ? lastSession.token : crypto.randomBytes(32).toString('hex');
         await db.saveSession(newToken, user.username);
 
         res.json({
@@ -1270,6 +1273,7 @@ async function startServer() {
             if (!data || !data.signal) return;
             const sender = socketToUserMap.get(socket.id);
             const payload = {
+                fromSocketId: socket.id,
                 senderSocketId: socket.id,
                 senderUsername: sender ? sender.username : '',
                 signal: data.signal
@@ -1283,11 +1287,13 @@ async function startServer() {
 
         // GERÇEK ZAMANLI DÜŞÜK GECİKMELİ SES RÖLESİ (WebRTC UDP engellense bile sesin %100 gitmesini ve gelmesini sağlar)
         socket.on('call:audio_chunk', (data) => {
-            if (!data || !data.audio) return;
+            if (!data || (!data.pcm && !data.audio)) return;
             const payload = {
+                fromSocketId: socket.id,
                 senderSocketId: socket.id,
-                audio: data.audio,
-                sampleRate: data.sampleRate || 16000
+                pcm: data.pcm || data.audio,
+                audio: data.audio || data.pcm,
+                sampleRate: data.sampleRate || 22050
             };
             if (data.targetSocketId) {
                 socket.to(data.targetSocketId).volatile.emit('call:audio_chunk', payload);

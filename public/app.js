@@ -55,23 +55,35 @@ let callStartTime = null;
 let isAudioMuted = false;
 let isVideoMuted = false;
 let isSpeakerBoostEnabled = true;
+let isSpeakerphoneOn = true;
 
 // Seçili Ses Cihazları (Dahili / Harici / Kablolu / Bluetooth)
-let selectedMicDeviceId = localStorage.getItem('msj_mic_device_id') || '';
-let selectedSpeakerDeviceId = localStorage.getItem('msj_speaker_device_id') || '';
-let audioBoostPercent = parseInt(localStorage.getItem('msj_audio_boost') || '160', 10);
+let selectedMicDeviceId = localStorage.getItem('msj_mic_id') || localStorage.getItem('msj_mic_device_id') || 'default';
+let selectedSpeakerDeviceId = localStorage.getItem('msj_speaker_id') || localStorage.getItem('msj_speaker_device_id') || 'default';
+let audioBoostPercent = parseInt(localStorage.getItem('msj_audio_boost') || '150', 10);
+let micGainBoost = parseFloat(localStorage.getItem('msj_mic_gain') || '1.4');
+let speakerGainBoost = parseFloat(localStorage.getItem('msj_speaker_gain') || String((audioBoostPercent || 150) / 100));
 let availableMics = [];
 let availableSpeakers = [];
+let availableMicDevices = [];
+let availableSpeakerDevices = [];
 
 // Web Audio API İşleme ve Gerçek Zamanlı Ses Rölesi Değişkenleri
 let callAudioCtx = null;
+let callAudioContext = null;
+let micGainNode = null;
 let remoteGainNode = null;
 let localAnalyser = null;
+let micAnalyser = null;
 let remoteAnalyser = null;
 let levelMeterInterval = null;
+let audioMeterInterval = null;
 let micProcessorNode = null;
 let micSourceNode = null;
 let nextRelayPlayTime = 0;
+let nextRemoteAudioPlayTime = 0;
+let micTestInterval = null;
+let micTestStream = null;
 let webrtcReceivingAudio = false;
 let lastWebrtcBytesReceived = 0;
 let webrtcStatsInterval = null;
@@ -279,6 +291,7 @@ const activeCallTimer = document.getElementById('activeCallTimer');
 const callMicLevelFill = document.getElementById('callMicLevelFill');
 const callRemoteLevelFill = document.getElementById('callRemoteLevelFill');
 const activeAudioDeviceBadge = document.getElementById('activeAudioDeviceBadge');
+const activeDeviceLabelText = activeAudioDeviceBadge;
 const btnToggleMic = document.getElementById('btnToggleMic');
 const btnToggleSpeaker = document.getElementById('btnToggleSpeaker');
 const btnOpenCallAudioSettings = document.getElementById('btnOpenCallAudioSettings');
@@ -916,6 +929,14 @@ async function loadRegisteredUsersDropdown() {
                     quickUsersContainer.style.display = data.users.length > 0 ? 'block' : 'none';
                 }
 
+                if (contactsList.length === 0) {
+                    const filteredUsers = currentUser
+                        ? data.users.filter(u => normalizeKey(u.username) !== normalizeKey(currentUser.username))
+                        : data.users;
+                    contactsList = filteredUsers;
+                    renderChatsList(contactsList);
+                }
+
                 return data.users.length;
             }
         } catch (e) {
@@ -924,6 +945,9 @@ async function loadRegisteredUsersDropdown() {
                 await new Promise(r => setTimeout(r, 600));
             }
         }
+    }
+    if (contactsList.length === 0) {
+        renderChatsList([]);
     }
     return 0;
 }
@@ -1218,22 +1242,43 @@ function checkUrlDeepLinkActions() {
 // ==========================================================
 
 async function loadChatsList() {
-    const token = localStorage.getItem('msj_token') || sessionStorage.getItem('msj_token');
-    if (!token) return;
+    let token = localStorage.getItem('msj_token') || sessionStorage.getItem('msj_token');
 
+    if (token) {
+        try {
+            const res = await fetch('/api/chats', {
+                headers: { 'x-auth-token': token }
+            });
+            const data = await res.json();
+
+            if (data.success && data.chats) {
+                contactsList = data.chats;
+                localStorage.setItem('msj_cached_contacts', JSON.stringify(contactsList));
+                renderChatsList(contactsList);
+                return;
+            }
+        } catch (err) {
+            console.error('Sohbetler yüklenemedi:', err);
+        }
+    }
+
+    // Eğer token süresi dolmuşsa veya oturum yedekten açılmışsa kullanıcı listesini doğrudan çek
     try {
-        const res = await fetch('/api/chats', {
-            headers: { 'x-auth-token': token }
-        });
-        const data = await res.json();
-
-        if (data.success && data.chats) {
-            contactsList = data.chats;
+        const regRes = await fetch('/api/users/registered');
+        const regData = await regRes.json();
+        if (regData && regData.success && Array.isArray(regData.users)) {
+            const filtered = currentUser
+                ? regData.users.filter(u => normalizeKey(u.username) !== normalizeKey(currentUser.username))
+                : regData.users;
+            contactsList = filtered;
             localStorage.setItem('msj_cached_contacts', JSON.stringify(contactsList));
             renderChatsList(contactsList);
+            return;
         }
-    } catch (err) {
-        console.error('Sohbetler yüklenemedi:', err);
+    } catch (e) {}
+
+    if (contactsList.length > 0) {
+        renderChatsList(contactsList);
     }
 }
 
@@ -2650,6 +2695,18 @@ socket.on('call:audio_chunk', (data) => {
 // ==========================================================
 // SES VE MİKROFON / HOPARLÖR AYARLARI MODAL KONTROLLERİ
 // ==========================================================
+function getAudioCtx() {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return null;
+    if (!callAudioContext || callAudioContext.state === 'closed') {
+        callAudioContext = new AudioCtx();
+    }
+    if (callAudioContext.state === 'suspended') {
+        callAudioContext.resume().catch(() => {});
+    }
+    return callAudioContext;
+}
+
 async function openAudioSettingsModal() {
     if (!audioSettingsModal) return;
     audioSettingsModal.style.display = 'flex';
@@ -2669,9 +2726,10 @@ async function startSettingsMicTestMeter() {
             ? { audio: { deviceId: { ideal: selectedMicDeviceId } } }
             : { audio: true };
         micTestStream = await navigator.mediaDevices.getUserMedia(constraints);
-        const AudioCtx = window.AudioContext || window.webkitAudioContext;
         const ctx = getAudioCtx();
         if (!ctx) return;
+
+        if (micTestStatusText) micTestStatusText.textContent = 'Canlı Dinleniyor (Konuşun)...';
 
         const src = ctx.createMediaStreamSource(micTestStream);
         const analyser = ctx.createAnalyser();
@@ -2686,7 +2744,9 @@ async function startSettingsMicTestMeter() {
             const pct = Math.min(100, Math.round((sum / dataArr.length) * 2.0));
             if (micTestMeterFill) micTestMeterFill.style.width = pct + '%';
         }, 80);
-    } catch (e) {}
+    } catch (e) {
+        if (micTestStatusText) micTestStatusText.textContent = 'Mikrofon erişimi bekleniyor';
+    }
 }
 
 function stopSettingsMicTestMeter() {
@@ -2702,10 +2762,21 @@ function stopSettingsMicTestMeter() {
 }
 
 if (btnHeaderAudioSettings) btnHeaderAudioSettings.addEventListener('click', openAudioSettingsModal);
-if (btnChatAudioSettings) btnChatAudioSettings.addEventListener('click', openAudioSettingsModal);
-if (btnMenuAudioSettings) {
-    btnMenuAudioSettings.addEventListener('click', () => {
+if (menuItemAudioSettings) {
+    menuItemAudioSettings.addEventListener('click', () => {
         if (headerDropdown) headerDropdown.style.display = 'none';
+        openAudioSettingsModal();
+    });
+}
+if (menuItemChatAudioSettings) {
+    menuItemChatAudioSettings.addEventListener('click', () => {
+        if (chatDropdownMenu) chatDropdownMenu.style.display = 'none';
+        openAudioSettingsModal();
+    });
+}
+if (btnProfileAudioSettings) {
+    btnProfileAudioSettings.addEventListener('click', () => {
+        closeProfileModal();
         openAudioSettingsModal();
     });
 }
@@ -2736,25 +2807,20 @@ if (selectSpeakerDevice) {
         await applySpeakerOutputDevice(selectSpeakerDevice.value);
     });
 }
-if (rangeMicGain) {
-    rangeMicGain.value = Math.round(micGainBoost * 100);
-    if (micGainValueLabel) micGainValueLabel.textContent = `%${Math.round(micGainBoost * 100)}`;
-    rangeMicGain.addEventListener('input', () => {
-        const val = parseInt(rangeMicGain.value, 10) || 140;
-        micGainBoost = val / 100;
-        localStorage.setItem('msj_mic_gain', String(micGainBoost));
-        if (micGainValueLabel) micGainValueLabel.textContent = `%${val}`;
-        if (micGainNode) micGainNode.gain.value = micGainBoost;
-    });
-}
-if (rangeSpeakerGain) {
-    rangeSpeakerGain.value = Math.round(speakerGainBoost * 100);
-    if (speakerGainValueLabel) speakerGainValueLabel.textContent = `%${Math.round(speakerGainBoost * 100)}`;
-    rangeSpeakerGain.addEventListener('input', () => {
-        const val = parseInt(rangeSpeakerGain.value, 10) || 150;
+if (rangeAudioBoost) {
+    const initialBoostPct = Math.round(speakerGainBoost * 100) || 150;
+    rangeAudioBoost.value = String(initialBoostPct);
+    if (lblAudioBoostValue) lblAudioBoostValue.textContent = `%${initialBoostPct}`;
+    rangeAudioBoost.addEventListener('input', () => {
+        const val = parseInt(rangeAudioBoost.value, 10) || 150;
+        audioBoostPercent = val;
         speakerGainBoost = val / 100;
+        micGainBoost = Math.max(1.2, val / 100);
+        localStorage.setItem('msj_audio_boost', String(val));
         localStorage.setItem('msj_speaker_gain', String(speakerGainBoost));
-        if (speakerGainValueLabel) speakerGainValueLabel.textContent = `%${val}`;
+        localStorage.setItem('msj_mic_gain', String(micGainBoost));
+        if (lblAudioBoostValue) lblAudioBoostValue.textContent = `%${val}`;
+        if (micGainNode) micGainNode.gain.value = micGainBoost;
         if (remoteGainNode) remoteGainNode.gain.value = isSpeakerphoneOn ? (speakerGainBoost * 1.25) : speakerGainBoost;
     });
 }
@@ -3114,8 +3180,8 @@ socket.on('call:error', (data) => {
 
 // WebRTC SDP ve ICE Candidate Sinyalleşmesi (Kayıpsız Sıralı Eşleşme)
 socket.on('call:signal', async (data) => {
-    if (data.fromSocketId) {
-        currentTargetSocketId = data.fromSocketId;
+    if (data.fromSocketId || data.senderSocketId) {
+        currentTargetSocketId = data.fromSocketId || data.senderSocketId;
     }
     if (!peerConnection) {
         setupPeerConnection();

@@ -1,5 +1,5 @@
 // MSJ Service Worker - PWA Kurulabilirlik, Çevrimdışı Önbellek, Arka Plan Mesaj ve Arama Bildirimleri
-const CACHE_NAME = 'msj-cache-v9';
+const CACHE_NAME = 'msj-cache-v10';
 const ASSETS = [
     '/',
     '/index.html',
