@@ -16,6 +16,7 @@ const dataDir = path.join(__dirname, 'data');
 const usersFile = path.join(dataDir, 'users.json');
 const sessionsFile = path.join(dataDir, 'sessions.json');
 const messagesFile = path.join(dataDir, 'messages.json');
+const deletedUsersFile = path.join(dataDir, 'deleted_users.json');
 
 function ensureDataDir() {
     if (!fs.existsSync(dataDir)) {
@@ -23,11 +24,52 @@ function ensureDataDir() {
     }
 }
 
+function getDeletedUsersMap() {
+    try {
+        if (fs.existsSync(deletedUsersFile)) {
+            return JSON.parse(fs.readFileSync(deletedUsersFile, 'utf8') || '{}');
+        }
+    } catch (e) {}
+    return {};
+}
+
+function markUserDeletedInFile(userKey) {
+    if (!userKey) return;
+    try {
+        ensureDataDir();
+        const map = getDeletedUsersMap();
+        map[userKey] = new Date().toISOString();
+        fs.writeFileSync(deletedUsersFile, JSON.stringify(map, null, 2), 'utf8');
+    } catch (e) {}
+}
+
+function unmarkUserDeletedInFile(userKey) {
+    if (!userKey) return;
+    try {
+        if (fs.existsSync(deletedUsersFile)) {
+            const map = getDeletedUsersMap();
+            if (map[userKey]) {
+                delete map[userKey];
+                fs.writeFileSync(deletedUsersFile, JSON.stringify(map, null, 2), 'utf8');
+            }
+        }
+    } catch (e) {}
+}
+
 class DatabaseManager {
     constructor() {
         this.type = config.type || 'sqlite';
         this.sqliteDb = null;
         this.mysqlPool = null;
+    }
+
+    checkpointSqlite() {
+        if (this.type !== 'sqlite' || !this.sqliteDb) return;
+        try {
+            this.sqliteDb.exec('PRAGMA wal_checkpoint(TRUNCATE);');
+        } catch (e) {
+            try { this.sqliteDb.exec('PRAGMA wal_checkpoint(FULL);'); } catch (e2) {}
+        }
     }
 
     async init() {
@@ -59,9 +101,9 @@ class DatabaseManager {
 
         this.sqliteDb = new DatabaseSync(dbPath);
 
-        // WAL modu ile hızlı ve güvenli çalışma
+        // WAL modu + FULL senkronizasyon ile program aniden kapatılsa bile sıfır veri kaybı
         this.sqliteDb.exec('PRAGMA journal_mode = WAL;');
-        this.sqliteDb.exec('PRAGMA synchronous = NORMAL;');
+        this.sqliteDb.exec('PRAGMA synchronous = FULL;');
         this.sqliteDb.exec('PRAGMA foreign_keys = ON;');
 
         // Tabloları oluştur (Büyük/Küçük harf duyarsızlığı için COLLATE NOCASE)
@@ -106,7 +148,7 @@ class DatabaseManager {
         `);
 
         // Başlangıçta WAL kontrol noktasını çalıştırarak veritabanı dosyasını tam olarak diske yaz
-        try { this.sqliteDb.exec('PRAGMA wal_checkpoint(TRUNCATE);'); } catch (e) {}
+        this.checkpointSqlite();
 
         console.log(`[Lite SQL] SQLite veritabanı aktif: ${dbPath}`);
     }
@@ -167,9 +209,49 @@ class DatabaseManager {
     // ========================================================
     // 3. ÇİFT YÖNLÜ JSON <-> VERİTABANI TAM SENKRONİZASYONU
     // ========================================================
+    isUserDeleted(usernameOrKey) {
+        const key = normalizeKey(usernameOrKey);
+        if (!key) return false;
+        const map = getDeletedUsersMap();
+        return Boolean(map[key]);
+    }
+
+    getDeletedUserKeys() {
+        return Object.keys(getDeletedUsersMap());
+    }
+
     async syncAllWithJson() {
         try {
             ensureDataDir();
+            const crypto = require('crypto');
+            const deletedMap = getDeletedUsersMap();
+
+            // 0. Kalıcı temel kullanıcıların (Serhad, S1, Ser1, cözücem) kullanıcı kendisi silmediği sürece her zaman var olmasını garanti et
+            const permanentDefaults = ['Serhad', 'S1', 'Ser1', 'cözücem'];
+            let rawUsersInit = {};
+            if (fs.existsSync(usersFile)) {
+                try { rawUsersInit = JSON.parse(fs.readFileSync(usersFile, 'utf8') || '{}'); } catch (e) { rawUsersInit = {}; }
+            }
+            let usersFileModified = false;
+            for (const defName of permanentDefaults) {
+                const defKey = normalizeKey(defName);
+                if (!deletedMap[defKey] && !rawUsersInit[defKey]) {
+                    const salt = crypto.randomBytes(16).toString('hex');
+                    const hash = crypto.pbkdf2Sync('123456', salt, 1000, 64, 'sha512').toString('hex');
+                    rawUsersInit[defKey] = {
+                        username: defName,
+                        salt,
+                        hash,
+                        avatar: '/avatars/default.svg',
+                        lastSeen: 'Offline',
+                        createdAt: new Date().toISOString()
+                    };
+                    usersFileModified = true;
+                }
+            }
+            if (usersFileModified) {
+                try { fs.writeFileSync(usersFile, JSON.stringify(rawUsersInit, null, 2), 'utf8'); } catch (e) {}
+            }
 
             // A) JSON'dan veritabanına aktar (Eksik kullanıcı veya mesajları geri yükle)
             // 1. Kullanıcılar
@@ -179,6 +261,8 @@ class DatabaseManager {
                     for (const key of Object.keys(rawUsers)) {
                         const u = rawUsers[key];
                         if (!u || !u.username) continue;
+                        const uKey = normalizeKey(u.username);
+                        if (deletedMap[uKey] || uKey.startsWith('test_logout_user_') || uKey.startsWith('testuser_')) continue;
                         const existing = await this.getUser(u.username);
                         if (!existing) {
                             await this.insertUserToDb({
@@ -199,7 +283,6 @@ class DatabaseManager {
             // 2. Mesajlar (Mesajlarda geçen gönderici/alıcı kullanıcılar veritabanında yoksa otomatik geri yükle)
             if (fs.existsSync(messagesFile)) {
                 try {
-                    const crypto = require('crypto');
                     const rawMessages = JSON.parse(fs.readFileSync(messagesFile, 'utf8') || '{}');
                     for (const convoKey of Object.keys(rawMessages)) {
                         const list = rawMessages[convoKey] || [];
@@ -207,6 +290,8 @@ class DatabaseManager {
                             if (!msg || !msg.id) continue;
                             for (const uName of [msg.sender, msg.recipient]) {
                                 if (uName && uName.trim().length >= 2) {
+                                    const uKey = normalizeKey(uName);
+                                    if (deletedMap[uKey] || uKey.startsWith('test_logout_user_') || uKey.startsWith('testuser_')) continue;
                                     const ex = await this.getUser(uName.trim());
                                     if (!ex) {
                                         const salt = crypto.randomBytes(16).toString('hex');
@@ -243,11 +328,12 @@ class DatabaseManager {
             // 3. Oturumlar (Oturumu olan kullanıcılar veritabanında yoksa otomatik geri yükle)
             if (fs.existsSync(sessionsFile)) {
                 try {
-                    const crypto = require('crypto');
                     const rawSessions = JSON.parse(fs.readFileSync(sessionsFile, 'utf8') || '{}');
                     for (const token of Object.keys(rawSessions)) {
                         const s = rawSessions[token];
                         if (!s || !s.username) continue;
+                        const uKey = normalizeKey(s.username);
+                        if (deletedMap[uKey] || uKey.startsWith('test_logout_user_') || uKey.startsWith('testuser_')) continue;
                         const exUser = await this.getUser(s.username);
                         if (!exUser) {
                             const salt = crypto.randomBytes(16).toString('hex');
@@ -273,6 +359,7 @@ class DatabaseManager {
 
             // B) Veritabanından JSON dosyalarına tam yansıtma (Her zaman güncel yedek)
             await this.exportDbToJson();
+            this.checkpointSqlite();
             console.log('[Veritabanı] Çift yönlü kalıcı veri senkronizasyonu tamamlandı.');
         } catch (err) {
             console.error('[Veritabanı] Senkronizasyon genel hatası:', err.message);
@@ -282,13 +369,20 @@ class DatabaseManager {
     async exportDbToJson() {
         try {
             ensureDataDir();
+            const deletedMap = getDeletedUsersMap();
             // 1. Tüm kullanıcıları mevcut users.json ile birleştirerek yaz (hiçbir kayıtlı kullanıcı silinmesin)
             let usersMap = {};
             if (fs.existsSync(usersFile)) {
                 try { usersMap = JSON.parse(fs.readFileSync(usersFile, 'utf8') || '{}'); } catch (e) { usersMap = {}; }
             }
+            for (const k of Object.keys(usersMap)) {
+                if (deletedMap[k] || k.startsWith('test_logout_user_') || k.startsWith('testuser_')) {
+                    delete usersMap[k];
+                }
+            }
             const allUsers = await this.getAllUsers();
             for (const u of allUsers) {
+                if (deletedMap[u.userKey] || u.userKey.startsWith('test_logout_user_') || u.userKey.startsWith('testuser_')) continue;
                 usersMap[u.userKey] = {
                     username: u.username,
                     salt: u.salt,
@@ -390,34 +484,32 @@ class DatabaseManager {
                     avatar = excluded.avatar
             `);
             stmt.run(userKey, userData.username, userData.salt, userData.hash, avatar, lastSeen, createdAt);
-            try { this.sqliteDb.exec('PRAGMA wal_checkpoint(PASSIVE);'); } catch (e) {}
+            this.checkpointSqlite();
         }
-    }
 
-    async createUser(userData) {
-        await this.insertUserToDb(userData);
-
-        // users.json dosyasına anında kaydet
+        // users.json dosyasına da anında yansıt (SQLite ve JSON her zaman %100 aynı olsun)
         try {
             ensureDataDir();
             let rawUsers = {};
             if (fs.existsSync(usersFile)) {
                 try { rawUsers = JSON.parse(fs.readFileSync(usersFile, 'utf8') || '{}'); } catch (e) {}
             }
-            const userKey = normalizeKey(userData.username);
             rawUsers[userKey] = {
                 username: userData.username,
                 salt: userData.salt,
                 hash: userData.hash,
-                avatar: userData.avatar || '/avatars/default.svg',
-                lastSeen: userData.lastSeen || 'Offline',
-                createdAt: userData.createdAt || new Date().toISOString()
+                avatar,
+                lastSeen,
+                createdAt
             };
             fs.writeFileSync(usersFile, JSON.stringify(rawUsers, null, 2), 'utf8');
-        } catch (e) {
-            console.error('users.json kayıt hatası:', e.message);
-        }
+        } catch (e) {}
+    }
 
+    async createUser(userData) {
+        const userKey = normalizeKey(userData.username);
+        unmarkUserDeletedInFile(userKey);
+        await this.insertUserToDb(userData);
         return await this.getUser(userData.username);
     }
 
@@ -448,7 +540,7 @@ class DatabaseManager {
             await this.mysqlPool.query('UPDATE users SET salt = ?, hash = ? WHERE user_key = ?', [salt, hash, userKey]);
         } else {
             this.sqliteDb.prepare('UPDATE users SET salt = ?, hash = ? WHERE user_key = ?').run(salt, hash, userKey);
-            try { this.sqliteDb.exec('PRAGMA wal_checkpoint(PASSIVE);'); } catch (e) {}
+            this.checkpointSqlite();
         }
 
         // users.json senkronize et
@@ -466,23 +558,42 @@ class DatabaseManager {
         return await this.getUser(userKey);
     }
 
-    async ensureUserExists(username, avatar = '/avatars/default.svg') {
+    async ensureUserExists(username, avatar = '/avatars/default.svg', extraData = null) {
         if (!username || username.trim().length < 2) return null;
         const clean = username.trim();
-        let existing = await this.getUser(clean);
-        if (existing) return existing;
+        const userKey = normalizeKey(clean);
+
+        // Eğer senkronizasyondan geliyorsa ve kullanıcı daha önce özellikle silinmişse tekrar ekleme
+        if (extraData && extraData.fromSync && this.isUserDeleted(userKey)) {
+            return null;
+        }
 
         const crypto = require('crypto');
-        const salt = crypto.randomBytes(16).toString('hex');
-        const hash = crypto.pbkdf2Sync('123456', salt, 1000, 64, 'sha512').toString('hex');
-        return await this.createUser({
+        let existing = await this.getUser(clean);
+        if (existing) {
+            // Eğer senkronizasyonla gerçek şifre hash/salt bilgisi geldiyse ve mevcut kayıt varsayılan '123456' ise güncelle
+            if (extraData && extraData.salt && extraData.hash && existing.salt) {
+                const defaultHash = crypto.pbkdf2Sync('123456', existing.salt, 1000, 64, 'sha512').toString('hex');
+                if (existing.hash === defaultHash && extraData.hash !== defaultHash) {
+                    await this.updateUserPassword(clean, extraData.salt, extraData.hash);
+                    existing = await this.getUser(clean);
+                }
+            }
+            return existing;
+        }
+
+        const salt = (extraData && extraData.salt) ? extraData.salt : crypto.randomBytes(16).toString('hex');
+        const hash = (extraData && extraData.hash) ? extraData.hash : crypto.pbkdf2Sync('123456', salt, 1000, 64, 'sha512').toString('hex');
+        const created = await this.createUser({
             username: clean,
             salt,
             hash,
             avatar: avatar || '/avatars/default.svg',
             lastSeen: 'Offline',
-            createdAt: new Date().toISOString()
+            createdAt: (extraData && extraData.createdAt) ? extraData.createdAt : new Date().toISOString()
         });
+        if (created) created._wasCreated = true;
+        return created;
     }
 
     // KULLANICIYI SADECE KENDİSİ İSTERSE SİLME (Otomatik silme asla yapılmaz)
@@ -490,10 +601,10 @@ class DatabaseManager {
         const userKey = normalizeKey(usernameOrKey);
         if (!userKey) return { success: false, error: 'Kullanıcı adı geçersiz' };
 
+        markUserDeletedInFile(userKey);
+
         const existing = await this.getUser(userKey);
-        if (!existing) {
-            return { success: false, error: 'Kullanıcı bulunamadı' };
-        }
+        const deletedUsername = existing ? existing.username : usernameOrKey.trim();
 
         if (this.type === 'mysql') {
             await this.mysqlPool.query('DELETE FROM users WHERE user_key = ?', [userKey]);
@@ -501,7 +612,7 @@ class DatabaseManager {
         } else {
             this.sqliteDb.prepare('DELETE FROM users WHERE user_key = ?').run(userKey);
             this.sqliteDb.prepare('DELETE FROM sessions WHERE user_key = ?').run(userKey);
-            try { this.sqliteDb.exec('PRAGMA wal_checkpoint(PASSIVE);'); } catch (e) {}
+            this.checkpointSqlite();
         }
 
         // users.json içinden sil
@@ -526,7 +637,7 @@ class DatabaseManager {
             }
         } catch (e) {}
 
-        return { success: true, username: existing.username, userKey };
+        return { success: true, username: deletedUsername, userKey };
     }
 
     formatUserRow(row) {
@@ -742,7 +853,7 @@ class DatabaseManager {
                 INSERT INTO messages (id, convo_key, sender, recipient, text, file_json, timestamp, date_str, created_at, is_read)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `).run(id, convoKey, msg.sender, msg.recipient, msg.text || '', fileJson, timestamp, dateStr, createdAt, isRead);
-            try { this.sqliteDb.exec('PRAGMA wal_checkpoint(PASSIVE);'); } catch (e) {}
+            this.checkpointSqlite();
         }
 
         const savedResult = {

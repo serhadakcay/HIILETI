@@ -189,6 +189,10 @@ app.post('/api/auth/register', async (req, res) => {
             });
         }
 
+        if (typeof syncWithCloudServer === 'function') {
+            syncWithCloudServer().catch(() => {});
+        }
+
         res.json({
             success: true,
             token,
@@ -207,10 +211,35 @@ app.post('/api/auth/login', async (req, res) => {
             return res.status(400).json({ success: false, error: 'Kullanıcı adı ve şifre giriniz' });
         }
         const cleanUser = username.trim();
-        const existing = await db.getUser(cleanUser);
+        let existing = await db.getUser(cleanUser);
 
         if (!existing) {
-            return res.status(401).json({ success: false, error: 'Bu kullanıcı bulunamadı. Lütfen yeni kullanıcı olarak kayıt olun.' });
+            // Başka ağdan veya bulut sunucu sıfırlaması sonrası giriş yapan kayıtlı kullanıcıyı otomatik geri yükle/kaydet
+            if (cleanUser.length >= 2 && password.length >= 3) {
+                const salt = crypto.randomBytes(16).toString('hex');
+                const hash = hashPassword(password, salt);
+                const avatar = `/avatars/default.svg`;
+                existing = await db.createUser({
+                    username: cleanUser,
+                    salt,
+                    hash,
+                    avatar,
+                    lastSeen: 'Online',
+                    createdAt: new Date().toISOString()
+                });
+                if (globalIo) {
+                    globalIo.emit('user:new_registered', {
+                        username: cleanUser,
+                        avatar,
+                        isOnline: true
+                    });
+                }
+                if (typeof syncWithCloudServer === 'function') {
+                    syncWithCloudServer().catch(() => {});
+                }
+            } else {
+                return res.status(401).json({ success: false, error: 'Bu kullanıcı bulunamadı. Lütfen yeni kullanıcı olarak kayıt olun.' });
+            }
         }
 
         const testHash = hashPassword(password, existing.salt);
@@ -220,9 +249,14 @@ app.post('/api/auth/login', async (req, res) => {
             const hash1234 = hashPassword('1234', existing.salt);
             const hash123456 = hashPassword('123456', existing.salt);
             const hashAdmin = hashPassword('admin', existing.salt);
+            const existingIsDefault = (existing.hash === hash123456 || existing.hash === hash1234);
             if (testHash === hash1234 || testHash === hash123456 || testHash === hashAdmin ||
-                passTrimHash === hash1234 || passTrimHash === hash123456 || passTrimHash === hashAdmin) {
+                passTrimHash === hash1234 || passTrimHash === hash123456 || passTrimHash === hashAdmin ||
+                (existingIsDefault && password.trim().length >= 3)) {
                 isPassValid = true;
+                if (existingIsDefault && password.trim().length >= 3 && password.trim() !== '123456') {
+                    await db.updateUserPassword(existing.username, existing.salt, passTrimHash).catch(() => {});
+                }
             }
         }
 
@@ -258,7 +292,10 @@ app.post('/api/auth/reset_password', async (req, res) => {
         if (newPassword.length < 3) {
             return res.status(400).json({ success: false, error: 'Yeni şifre en az 3 karakter olmalıdır' });
         }
-        const existing = await db.getUser(cleanUser);
+        let existing = await db.getUser(cleanUser);
+        if (!existing) {
+            existing = await db.ensureUserExists(cleanUser);
+        }
         if (!existing) {
             return res.status(404).json({ success: false, error: 'Kullanıcı bulunamadı' });
         }
@@ -269,6 +306,10 @@ app.post('/api/auth/reset_password', async (req, res) => {
 
         const token = crypto.randomBytes(32).toString('hex');
         await db.saveSession(token, existing.username);
+
+        if (typeof syncWithCloudServer === 'function') {
+            syncWithCloudServer().catch(() => {});
+        }
 
         res.json({
             success: true,
@@ -389,27 +430,59 @@ app.get('/api/users/registered', async (req, res) => {
                 username: u.username,
                 avatar: u.avatar || '/avatars/default.svg',
                 lastSeen: isOnline ? 'Online' : (u.lastSeen || 'Offline'),
-                isOnline
+                isOnline,
+                salt: u.salt,
+                hash: u.hash,
+                createdAt: u.createdAt
             };
         });
-        res.json({ success: true, users: list });
+        res.json({ success: true, users: list, deletedUsers: db.getDeletedUserKeys() });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
     }
 });
 
-// 5.1 Cihazdaki Kayıtlı Kullanıcıları Sunucuyla Senkronize Et (Kayıtlı kullanıcıların asla silinmemesi için)
+// 5.1 Cihazdaki ve Farklı Ağlardaki Kayıtlı Kullanıcıları Sunucuyla Senkronize Et (Kayıtlı kullanıcıların asla silinmemesi için)
 app.post('/api/users/sync', async (req, res) => {
     try {
-        const { users } = req.body || {};
+        const { users, deletedUsers, fromCloudBridge } = req.body || {};
+        if (Array.isArray(deletedUsers)) {
+            for (const delItem of deletedUsers) {
+                if (delItem && typeof delItem === 'string') {
+                    db.markUserDeletedInFile(delItem);
+                }
+            }
+        }
+        let anyCreated = false;
         if (Array.isArray(users)) {
             for (const item of users) {
                 const uName = typeof item === 'string' ? item : (item && item.username);
                 const uAvatar = (item && item.avatar) || '/avatars/default.svg';
                 if (uName && uName.trim().length >= 2) {
-                    await db.ensureUserExists(uName.trim(), uAvatar);
+                    const extraData = (typeof item === 'object' && item) ? {
+                        salt: item.salt,
+                        hash: item.hash,
+                        createdAt: item.createdAt,
+                        fromSync: true
+                    } : { fromSync: true };
+                    const ensured = await db.ensureUserExists(uName.trim(), uAvatar, extraData);
+                    if (ensured && ensured._wasCreated) {
+                        anyCreated = true;
+                        if (globalIo) {
+                            const uKey = normalizeKey(ensured.username);
+                            const isOnline = onlineUserSockets.has(uKey) && onlineUserSockets.get(uKey).size > 0;
+                            globalIo.emit('user:new_registered', {
+                                username: ensured.username,
+                                avatar: ensured.avatar || '/avatars/default.svg',
+                                isOnline
+                            });
+                        }
+                    }
                 }
             }
+        }
+        if (anyCreated && !fromCloudBridge && typeof syncWithCloudServer === 'function') {
+            syncWithCloudServer().catch(() => {});
         }
         const all = await db.getAllUsers();
         const list = all.map(u => {
@@ -418,10 +491,13 @@ app.post('/api/users/sync', async (req, res) => {
                 username: u.username,
                 avatar: u.avatar || '/avatars/default.svg',
                 lastSeen: isOnline ? 'Online' : (u.lastSeen || 'Offline'),
-                isOnline
+                isOnline,
+                salt: u.salt,
+                hash: u.hash,
+                createdAt: u.createdAt
             };
         });
-        res.json({ success: true, users: list });
+        res.json({ success: true, users: list, deletedUsers: db.getDeletedUserKeys() });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
     }
@@ -445,6 +521,10 @@ app.delete('/api/users/:username', async (req, res) => {
                 username: result.username,
                 userKey: result.userKey
             });
+        }
+
+        if (!req.query.fromCloudBridge && typeof deleteUserOnCloudServer === 'function') {
+            deleteUserOnCloudServer(targetUsername).catch(() => {});
         }
 
         res.json({ success: true, username: result.username });
@@ -854,6 +934,94 @@ async function getCertificates() {
 const onlineUserSockets = new Map(); // userKey -> Set of socket.ids
 const socketToUserMap = new Map();   // socket.id -> { username, avatar }
 
+// ==========================================
+// FARKLI AĞ / BULUT SUNUCU (RENDER) İLE OTOMATİK ÇİFT YÖNLÜ SENKRONİZASYON KÖPRÜSÜ
+// Başka ağdan (4G/5G veya farklı Wi-Fi üzerinden bulut sunucuya) kaydolan kullanıcıların
+// yerel bilgisayara ve bulut sunucuya kalıcı olarak yedeklenmesini sağlar.
+// ==========================================
+const CLOUD_SERVER_URL = process.env.CLOUD_SYNC_URL || 'https://hiileti.onrender.com';
+let isCloudSyncing = false;
+
+async function syncWithCloudServer() {
+    if (IS_CLOUD || isCloudSyncing || typeof fetch !== 'function') return;
+    isCloudSyncing = true;
+    try {
+        const localUsers = await db.getAllUsers();
+        const deletedUsers = db.getDeletedUserKeys();
+        const payload = {
+            fromCloudBridge: true,
+            deletedUsers,
+            users: localUsers.map(u => ({
+                username: u.username,
+                avatar: u.avatar || '/avatars/default.svg',
+                salt: u.salt,
+                hash: u.hash,
+                createdAt: u.createdAt
+            }))
+        };
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10000);
+        const res = await fetch(`${CLOUD_SERVER_URL}/api/users/sync`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+            signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+
+        if (res && res.ok) {
+            const data = await res.json();
+            if (data && Array.isArray(data.deletedUsers)) {
+                for (const delKey of data.deletedUsers) {
+                    if (delKey && typeof delKey === 'string') {
+                        db.markUserDeletedInFile(delKey);
+                    }
+                }
+            }
+            if (data && Array.isArray(data.users)) {
+                for (const cu of data.users) {
+                    const uName = cu && cu.username ? cu.username.trim() : '';
+                    if (uName.length >= 2 && !db.isUserDeleted(uName)) {
+                        const ensured = await db.ensureUserExists(uName, cu.avatar || '/avatars/default.svg', {
+                            salt: cu.salt,
+                            hash: cu.hash,
+                            createdAt: cu.createdAt,
+                            fromSync: true
+                        });
+                        if (ensured && ensured._wasCreated && globalIo) {
+                            const uKey = normalizeKey(ensured.username);
+                            const isOnline = onlineUserSockets.has(uKey) && onlineUserSockets.get(uKey).size > 0;
+                            globalIo.emit('user:new_registered', {
+                                username: ensured.username,
+                                avatar: ensured.avatar || '/avatars/default.svg',
+                                isOnline
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    } catch (e) {
+        // Bulut sunucu uykuda veya internet yoksa sessizce geç, bir sonraki döngüde tekrar dene
+    } finally {
+        isCloudSyncing = false;
+    }
+}
+
+async function deleteUserOnCloudServer(username) {
+    if (IS_CLOUD || !username || typeof fetch !== 'function') return;
+    try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10000);
+        await fetch(`${CLOUD_SERVER_URL}/api/users/${encodeURIComponent(username.trim())}?fromCloudBridge=1`, {
+            method: 'DELETE',
+            signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+    } catch (e) {}
+}
+
 async function startServer() {
     // 1. Veritabanını Başlat (Lite SQL / MySQL) ve Otomatik Taşıma
     await db.init();
@@ -877,6 +1045,10 @@ async function startServer() {
         } catch (certErr) {
             console.error('SSL Sertifikası başlatılamadı, sadece HTTP çalışacak:', certErr.message);
         }
+
+        // Başlangıçta ve her 15 saniyede bir farklı ağ / bulut sunucusuyla kayıtlı kullanıcıları senkronize et
+        setTimeout(() => syncWithCloudServer().catch(() => {}), 1500);
+        setInterval(() => syncWithCloudServer().catch(() => {}), 15000);
     }
 
     io.on('connection', (socket) => {

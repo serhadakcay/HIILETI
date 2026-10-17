@@ -1,5 +1,5 @@
 // MSJ Service Worker - Arka Plan Mesaj ve Arama Bildirimleri (Önbellek Kilitlenmesini Önlemek İçin Ağ-Öncelikli)
-const CACHE_NAME = 'msj-cache-v12';
+const CACHE_NAME = 'msj-cache-v13';
 
 let swLastNotificationId = 0;
 let swCurrentUser = '';

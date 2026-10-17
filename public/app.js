@@ -744,9 +744,9 @@ function updateUnreadBadges() {
 // (Kayıtlı kullanıcılar asla otomatik silinmez; yalnızca kullanıcı kendi isterse silinir)
 // ==========================================================
 
-function getPermanentLocalUsers() {
+function getDeletedLocalUserKeys() {
     try {
-        const raw = localStorage.getItem('msj_permanent_users');
+        const raw = localStorage.getItem('msj_deleted_users');
         if (raw) {
             const parsed = JSON.parse(raw);
             if (Array.isArray(parsed)) return parsed;
@@ -755,15 +755,75 @@ function getPermanentLocalUsers() {
     return [];
 }
 
-function savePermanentLocalUsers(usersArray) {
+function addDeletedLocalUserKey(usernameOrKey) {
+    const key = normalizeKey(usernameOrKey);
+    if (!key) return;
+    try {
+        const list = new Set(getDeletedLocalUserKeys());
+        list.add(key);
+        localStorage.setItem('msj_deleted_users', JSON.stringify(Array.from(list)));
+    } catch (e) {}
+}
+
+function removeDeletedLocalUserKey(usernameOrKey) {
+    const key = normalizeKey(usernameOrKey);
+    if (!key) return;
+    try {
+        const list = getDeletedLocalUserKeys().filter(k => k !== key);
+        localStorage.setItem('msj_deleted_users', JSON.stringify(list));
+    } catch (e) {}
+}
+
+function getPermanentLocalUsers() {
+    try {
+        const deletedSet = new Set(getDeletedLocalUserKeys());
+        const raw = localStorage.getItem('msj_permanent_users');
+        if (raw) {
+            const parsed = JSON.parse(raw);
+            if (Array.isArray(parsed)) {
+                return parsed.filter(u => u && u.username && !deletedSet.has(normalizeKey(u.username)));
+            }
+        }
+    } catch (e) {}
+    return [];
+}
+
+function savePermanentLocalUsers(usersArray, deletedKeysFromServer) {
+    if (Array.isArray(deletedKeysFromServer)) {
+        deletedKeysFromServer.forEach(k => addDeletedLocalUserKey(k));
+    }
     if (!Array.isArray(usersArray)) return;
+    const deletedSet = new Set(getDeletedLocalUserKeys());
     const existing = getPermanentLocalUsers();
     const map = new Map();
     existing.forEach(u => {
-        if (u && u.username) map.set(normalizeKey(u.username), { username: u.username, avatar: u.avatar || '/avatars/default.svg' });
+        if (u && u.username) {
+            const k = normalizeKey(u.username);
+            if (!deletedSet.has(k)) {
+                map.set(k, {
+                    username: u.username,
+                    avatar: u.avatar || '/avatars/default.svg',
+                    salt: u.salt || undefined,
+                    hash: u.hash || undefined,
+                    createdAt: u.createdAt || undefined
+                });
+            }
+        }
     });
     usersArray.forEach(u => {
-        if (u && u.username) map.set(normalizeKey(u.username), { username: u.username, avatar: u.avatar || '/avatars/default.svg' });
+        if (u && u.username) {
+            const k = normalizeKey(u.username);
+            if (!deletedSet.has(k)) {
+                const prev = map.get(k) || {};
+                map.set(k, {
+                    username: u.username || prev.username,
+                    avatar: u.avatar || prev.avatar || '/avatars/default.svg',
+                    salt: u.salt || prev.salt || undefined,
+                    hash: u.hash || prev.hash || undefined,
+                    createdAt: u.createdAt || prev.createdAt || undefined
+                });
+            }
+        }
     });
     const merged = Array.from(map.values());
     try {
@@ -772,9 +832,72 @@ function savePermanentLocalUsers(usersArray) {
     return merged;
 }
 
+function mergeContactsWithPermanentUsers(serverChats) {
+    const deletedSet = new Set(getDeletedLocalUserKeys());
+    const myKey = currentUser ? normalizeKey(currentUser.username) : '';
+    const map = new Map();
+
+    // 1. Önce sunucudan gelen güncel sohbet/kullanıcı verilerini ekle
+    if (Array.isArray(serverChats)) {
+        serverChats.forEach(c => {
+            if (!c || !c.username) return;
+            const k = normalizeKey(c.username);
+            if (k && k !== myKey && !deletedSet.has(k)) {
+                map.set(k, c);
+            }
+        });
+    }
+
+    // 2. Önbellekteki (msj_cached_contacts) kullanıcıları koru (sunucuda anlık eksik olsa bile silinmesin)
+    try {
+        const cachedRaw = localStorage.getItem('msj_cached_contacts');
+        if (cachedRaw) {
+            const cached = JSON.parse(cachedRaw);
+            if (Array.isArray(cached)) {
+                cached.forEach(c => {
+                    if (!c || !c.username) return;
+                    const k = normalizeKey(c.username);
+                    if (k && k !== myKey && !deletedSet.has(k) && !map.has(k)) {
+                        map.set(k, {
+                            username: c.username,
+                            avatar: c.avatar || '/avatars/default.svg',
+                            isOnline: false,
+                            statusText: 'Offline',
+                            lastSeen: c.lastSeen || 'Offline',
+                            lastMessage: c.lastMessage || null,
+                            unreadCount: c.unreadCount || 0
+                        });
+                    }
+                });
+            }
+        }
+    } catch (e) {}
+
+    // 3. Kalıcı kullanıcı listesindeki (msj_permanent_users) kullanıcıları da koru
+    const permUsers = getPermanentLocalUsers();
+    permUsers.forEach(u => {
+        if (!u || !u.username) return;
+        const k = normalizeKey(u.username);
+        if (k && k !== myKey && !deletedSet.has(k) && !map.has(k)) {
+            map.set(k, {
+                username: u.username,
+                avatar: u.avatar || '/avatars/default.svg',
+                isOnline: false,
+                statusText: 'Offline',
+                lastSeen: 'Offline',
+                lastMessage: null,
+                unreadCount: 0
+            });
+        }
+    });
+
+    return Array.from(map.values());
+}
+
 function removePermanentLocalUser(usernameToRemove) {
     const key = normalizeKey(usernameToRemove);
     if (!key) return;
+    addDeletedLocalUserKey(key);
     try {
         const existing = getPermanentLocalUsers().filter(u => normalizeKey(u.username) !== key);
         localStorage.setItem('msj_permanent_users', JSON.stringify(existing));
@@ -796,9 +919,10 @@ function removePermanentLocalUser(usernameToRemove) {
 
 async function syncPermanentUsersWithServer() {
     try {
+        const deletedSet = new Set(getDeletedLocalUserKeys());
         const localUsers = getPermanentLocalUsers();
         const savedUsername = localStorage.getItem('msj_saved_username');
-        if (savedUsername) {
+        if (savedUsername && !deletedSet.has(normalizeKey(savedUsername))) {
             localUsers.push({ username: savedUsername, avatar: '/avatars/default.svg' });
         }
         const cachedRaw = localStorage.getItem('msj_cached_contacts');
@@ -807,22 +931,31 @@ async function syncPermanentUsersWithServer() {
                 const cached = JSON.parse(cachedRaw);
                 if (Array.isArray(cached)) {
                     cached.forEach(c => {
-                        if (c && c.username) localUsers.push({ username: c.username, avatar: c.avatar });
+                        if (c && c.username && !deletedSet.has(normalizeKey(c.username))) {
+                            localUsers.push({
+                                username: c.username,
+                                avatar: c.avatar,
+                                salt: c.salt,
+                                hash: c.hash,
+                                createdAt: c.createdAt
+                            });
+                        }
                     });
                 }
             } catch (e) {}
         }
-        if (localUsers.length > 0) {
-            const res = await fetch('/api/users/sync', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ users: localUsers })
-            });
-            const data = await res.json();
-            if (data && data.success && Array.isArray(data.users)) {
-                savePermanentLocalUsers(data.users);
-                return data.users;
-            }
+        const res = await fetch('/api/users/sync', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                users: localUsers,
+                deletedUsers: Array.from(deletedSet)
+            })
+        });
+        const data = await res.json();
+        if (data && data.success && Array.isArray(data.users)) {
+            savePermanentLocalUsers(data.users, data.deletedUsers);
+            return data.users;
         }
     } catch (e) {}
     return null;
@@ -868,6 +1001,7 @@ window.requestDeleteUser = async function(usernameToDelete) {
 async function quickLoginAsRegisteredUser(username) {
     if (!username) return false;
     try {
+        removeDeletedLocalUserKey(username);
         const token = localStorage.getItem('msj_token') || sessionStorage.getItem('msj_token') || '';
         const autoRes = await fetch('/api/auth/auto_login', {
             method: 'POST',
@@ -898,14 +1032,14 @@ async function initAuth() {
         try {
             const parsed = JSON.parse(cachedContacts);
             if (Array.isArray(parsed) && parsed.length > 0) {
-                contactsList = parsed;
+                contactsList = mergeContactsWithPermanentUsers(parsed);
                 renderChatsList(contactsList);
             }
         } catch (e) {}
     }
 
-    // Kalıcı kullanıcıları sunucuyla senkronize et (hiçbir kayıtlı kullanıcı kaybolmasın)
-    syncPermanentUsersWithServer().catch(() => {});
+    // Kalıcı kullanıcıları sunucuyla senkronize et (hiçbir kayıtlı kullanıcı kaybolmasın - AWAIT ile yarış durumunu önle)
+    await syncPermanentUsersWithServer();
 
     const urlParams = new URLSearchParams(window.location.search);
     const autoUserParam = urlParams.get('autoUser') || '';
@@ -1048,7 +1182,7 @@ async function loadRegisteredUsersDropdown() {
             const res = await fetch('/api/users/registered');
             const data = await res.json();
             if (data.success && Array.isArray(data.users)) {
-                savePermanentLocalUsers(data.users);
+                savePermanentLocalUsers(data.users, data.deletedUsers);
                 selectRegisteredUser.innerHTML = '<option value="">-- Kayıtlı Kullanıcı Seçin --</option>';
                 if (quickUsersList) quickUsersList.innerHTML = '';
 
@@ -1369,6 +1503,7 @@ document.getElementById('authForm').addEventListener('submit', async (e) => {
 function onUserAuthenticated(user, token) {
     currentUser = user;
     menuUsernameDisplay.textContent = user.username;
+    removeDeletedLocalUserKey(user.username);
     savePermanentLocalUsers([user]);
     localStorage.setItem('msj_saved_username', user.username);
     localStorage.setItem('msj_auto_login', 'true');
@@ -1449,8 +1584,8 @@ async function loadChatsList() {
             const data = await res.json();
 
             if (data.success && data.chats) {
-                contactsList = data.chats;
-                savePermanentLocalUsers(contactsList);
+                savePermanentLocalUsers(data.chats);
+                contactsList = mergeContactsWithPermanentUsers(data.chats);
                 localStorage.setItem('msj_cached_contacts', JSON.stringify(contactsList));
                 renderChatsList(contactsList);
                 return;
@@ -1465,17 +1600,18 @@ async function loadChatsList() {
         const regRes = await fetch('/api/users/registered');
         const regData = await regRes.json();
         if (regData && regData.success && Array.isArray(regData.users)) {
-            savePermanentLocalUsers(regData.users);
+            savePermanentLocalUsers(regData.users, regData.deletedUsers);
             const filtered = currentUser
                 ? regData.users.filter(u => normalizeKey(u.username) !== normalizeKey(currentUser.username))
                 : regData.users;
-            contactsList = filtered;
+            contactsList = mergeContactsWithPermanentUsers(filtered);
             localStorage.setItem('msj_cached_contacts', JSON.stringify(contactsList));
             renderChatsList(contactsList);
             return;
         }
     } catch (e) {}
 
+    contactsList = mergeContactsWithPermanentUsers(contactsList);
     if (contactsList.length > 0) {
         renderChatsList(contactsList);
     }
@@ -2259,6 +2395,12 @@ btnEmoji.addEventListener('click', () => {
 
 // Yeni Mesaj Geldiğinde
 socket.on('chat:message', (msg) => {
+    if (msg && msg.sender) {
+        savePermanentLocalUsers([{ username: msg.sender, avatar: '/avatars/default.svg' }]);
+    }
+    if (msg && msg.recipient) {
+        savePermanentLocalUsers([{ username: msg.recipient, avatar: '/avatars/default.svg' }]);
+    }
     const isIncoming = currentUser && normalizeKey(msg.recipient) === normalizeKey(currentUser.username);
     const isFromActive = activeContact && normalizeKey(msg.sender) === normalizeKey(activeContact.username);
     const isToActive = activeContact && normalizeKey(msg.recipient) === normalizeKey(activeContact.username);
@@ -2386,6 +2528,9 @@ socket.on('chat:typing', (data) => {
 
 // Kullanıcı Çevrimiçi/Çevrimdışı Durum Değişimi (Online / Offline Bildirimi)
 socket.on('user:status_change', (data) => {
+    if (data && data.username) {
+        savePermanentLocalUsers([{ username: data.username, avatar: data.avatar || '/avatars/default.svg' }]);
+    }
     // Kendi durum değişimimiz değilse ekranda sesli ve görsel uyarı ver
     if (currentUser && normalizeKey(data.username) !== normalizeKey(currentUser.username)) {
         showStatusToast(data.username, data.isOnline);
@@ -2426,11 +2571,13 @@ socket.on('user:new_registered', (data) => {
     if (data && data.username) {
         savePermanentLocalUsers([{ username: data.username, avatar: data.avatar || '/avatars/default.svg' }]);
     }
+    loadRegisteredUsersDropdown();
     if (currentUser && normalizeKey(data.username) !== normalizeKey(currentUser.username)) {
         showStatusToast(data.username, true);
         playStatusChime(true);
         loadChatsList();
-        loadRegisteredUsersDropdown();
+    } else if (!currentUser) {
+        loadChatsList();
     }
 });
 
