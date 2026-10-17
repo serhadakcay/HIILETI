@@ -35,9 +35,10 @@ let mediaRecorder = null;
 let audioChunks = [];
 let isRecordingAudio = false;
 
-// WebRTC Değişkenleri
+// WebRTC ve Gelişmiş Ses Motoru Değişkenleri (Kablolu / Kablosuz Mikrofon & Hoparlör Desteği)
 let peerConnection = null;
 let localStream = null;
+let rawMicStream = null;
 let currentCallTarget = null;
 let currentCallType = 'voice';
 let currentCallerSocketId = null;
@@ -53,25 +54,86 @@ let callTimerInterval = null;
 let callStartTime = null;
 let isAudioMuted = false;
 let isVideoMuted = false;
+let isSpeakerBoostEnabled = true;
 
+// Seçili Ses Cihazları (Dahili / Harici / Kablolu / Bluetooth)
+let selectedMicDeviceId = localStorage.getItem('msj_mic_device_id') || '';
+let selectedSpeakerDeviceId = localStorage.getItem('msj_speaker_device_id') || '';
+let audioBoostPercent = parseInt(localStorage.getItem('msj_audio_boost') || '160', 10);
+let availableMics = [];
+let availableSpeakers = [];
+
+// Web Audio API İşleme ve Gerçek Zamanlı Ses Rölesi Değişkenleri
+let callAudioCtx = null;
+let remoteGainNode = null;
+let localAnalyser = null;
+let remoteAnalyser = null;
+let levelMeterInterval = null;
+let micProcessorNode = null;
+let micSourceNode = null;
+let nextRelayPlayTime = 0;
+let webrtcReceivingAudio = false;
+let lastWebrtcBytesReceived = 0;
+let webrtcStatsInterval = null;
+
+// Mesaj Mükerrer Gönderim Koruması
+let lastSentMessageText = '';
+let lastSentMessageTime = 0;
+let isSendingTextLock = false;
+
+// STUN + ÜCRETSİZ TURN RÖLE SUNUCULARI (Farklı ağlarda ve güvenlik duvarı arkasında sesin %100 gitmesi için)
 const rtcConfig = {
     iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
         { urls: 'stun:stun1.l.google.com:19302' },
         { urls: 'stun:stun2.l.google.com:19302' },
-        { urls: 'stun:stun.cloudflare.com:3478' }
+        { urls: 'stun:stun.cloudflare.com:3478' },
+        {
+            urls: [
+                'turn:openrelay.metered.ca:80',
+                'turn:openrelay.metered.ca:443',
+                'turn:openrelay.metered.ca:443?transport=tcp'
+            ],
+            username: 'openrelayproject',
+            credential: 'openrelayproject'
+        }
     ],
     iceCandidatePoolSize: 10
 };
+
+// PWA Service Worker Kaydı (Arka Planda Bildirim ve Arama Yakalama)
+if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/sw.js').then((reg) => {
+            if (currentUser && reg.active) {
+                reg.active.postMessage({ type: 'INIT_USER', username: currentUser.username });
+            }
+        }).catch(() => {});
+    });
+
+    navigator.serviceWorker.addEventListener('message', (event) => {
+        if (event.data && event.data.type === 'NOTIFICATION_CLICK' && event.data.url) {
+            try {
+                const u = new URL(event.data.url, window.location.origin);
+                const openChatUser = u.searchParams.get('openChat');
+                if (openChatUser) {
+                    openChatForSender(openChatUser);
+                }
+            } catch (e) {}
+        }
+    });
+}
 
 // DOM Referansları
 const appRoot = document.getElementById('appRoot');
 
 // 1. Ekran (Sohbetler Listesi)
 const chatsScreen = document.getElementById('chatsScreen');
+const btnHeaderAudioSettings = document.getElementById('btnHeaderAudioSettings');
 const btnHeaderCamera = document.getElementById('btnHeaderCamera');
 const btnHeaderMenu = document.getElementById('btnHeaderMenu');
 const headerDropdown = document.getElementById('headerDropdown');
+const menuItemAudioSettings = document.getElementById('menuItemAudioSettings');
 const menuItemQr = document.getElementById('menuItemQr');
 const menuItemCloudGuide = document.getElementById('menuItemCloudGuide');
 const menuItemNewChat = document.getElementById('menuItemNewChat');
@@ -97,6 +159,7 @@ const btnVideoCall = document.getElementById('btnVideoCall');
 const btnVoiceCall = document.getElementById('btnVoiceCall');
 const btnChatMenu = document.getElementById('btnChatMenu');
 const chatDropdownMenu = document.getElementById('chatDropdownMenu');
+const menuItemChatAudioSettings = document.getElementById('menuItemChatAudioSettings');
 const menuItemClearChat = document.getElementById('menuItemClearChat');
 const menuItemContactInfo = document.getElementById('menuItemContactInfo');
 const menuItemCloseChat = document.getElementById('menuItemCloseChat');
@@ -173,6 +236,7 @@ const profileModal = document.getElementById('profileModal');
 const btnCloseProfileModal = document.getElementById('btnCloseProfileModal');
 const profileUserAvatar = document.getElementById('profileUserAvatar');
 const profileUsernameDisplay = document.getElementById('profileUsernameDisplay');
+const btnProfileAudioSettings = document.getElementById('btnProfileAudioSettings');
 const btnProfileNewUser = document.getElementById('btnProfileNewUser');
 const btnProfileSwitchUser = document.getElementById('btnProfileSwitchUser');
 const btnProfileChangePass = document.getElementById('btnProfileChangePass');
@@ -192,6 +256,7 @@ const incomingCallerName = document.getElementById('incomingCallerName');
 const incomingCallType = document.getElementById('incomingCallType');
 const btnAcceptCall = document.getElementById('btnAcceptCall');
 const btnRejectCall = document.getElementById('btnRejectCall');
+const btnIncomingAudioDevices = document.getElementById('btnIncomingAudioDevices');
 const btnCallRemindMe = document.getElementById('btnCallRemindMe');
 const btnCallQuickMsg = document.getElementById('btnCallQuickMsg');
 
@@ -200,6 +265,7 @@ const outgoingCallModal = document.getElementById('outgoingCallModal');
 const outgoingTargetName = document.getElementById('outgoingTargetName');
 const outgoingCallStatus = document.getElementById('outgoingCallStatus');
 const outgoingTargetAvatar = document.getElementById('outgoingTargetAvatar');
+const btnOutgoingAudioDevices = document.getElementById('btnOutgoingAudioDevices');
 const btnCancelOutgoingCall = document.getElementById('btnCancelOutgoingCall');
 
 const activeCallScreen = document.getElementById('activeCallScreen');
@@ -210,9 +276,27 @@ const activeCallAvatar = document.getElementById('activeCallAvatar');
 const activeCallName = document.getElementById('activeCallName');
 const activeCallTargetTitle = document.getElementById('activeCallTargetTitle');
 const activeCallTimer = document.getElementById('activeCallTimer');
+const callMicLevelFill = document.getElementById('callMicLevelFill');
+const callRemoteLevelFill = document.getElementById('callRemoteLevelFill');
+const activeAudioDeviceBadge = document.getElementById('activeAudioDeviceBadge');
 const btnToggleMic = document.getElementById('btnToggleMic');
+const btnToggleSpeaker = document.getElementById('btnToggleSpeaker');
+const btnOpenCallAudioSettings = document.getElementById('btnOpenCallAudioSettings');
 const btnToggleCam = document.getElementById('btnToggleCam');
 const btnEndCall = document.getElementById('btnEndCall');
+
+// Mikrofon ve Hoparlör Seçim Modalı
+const audioSettingsModal = document.getElementById('audioSettingsModal');
+const btnCloseAudioSettings = document.getElementById('btnCloseAudioSettings');
+const selectMicDevice = document.getElementById('selectMicDevice');
+const selectSpeakerDevice = document.getElementById('selectSpeakerDevice');
+const rangeAudioBoost = document.getElementById('rangeAudioBoost');
+const lblAudioBoostValue = document.getElementById('lblAudioBoostValue');
+const micTestMeterFill = document.getElementById('micTestMeterFill');
+const micTestStatusText = document.getElementById('micTestStatusText');
+const btnRefreshAudioDevices = document.getElementById('btnRefreshAudioDevices');
+const btnTestSpeakerSound = document.getElementById('btnTestSpeakerSound');
+const btnSaveAudioSettings = document.getElementById('btnSaveAudioSettings');
 
 const qrModal = document.getElementById('qrModal');
 const btnCloseQr = document.getElementById('btnCloseQr');
@@ -1079,8 +1163,54 @@ function onUserAuthenticated(user, token) {
     // Soket sunucusuna kendi oturumunu bildir
     socket.emit('user:join', { token, username: user.username });
 
-    // Sohbet listesini getir
-    loadChatsList();
+    // Service Worker'a aktif kullanıcıyı bildir (Arka planda bildirim sorgulaması için)
+    if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.ready.then(reg => {
+            if (reg.active) {
+                reg.active.postMessage({ type: 'INIT_USER', username: user.username });
+            }
+        }).catch(() => {});
+    }
+
+    // Eğer bu cihaz yerel bilgisayar (Host PC) ise sistem tepsisi bildirimleri için kullanıcıyı kaydet
+    if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+        fetch('/api/system/register_pc_user', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username: user.username })
+        }).catch(() => {});
+    }
+
+    // Ses cihazlarını (Mikrofon & Hoparlör/Kulaklık) başlangıçta listele
+    refreshAudioDeviceList().catch(() => {});
+
+    // Sohbet listesini getir ve URL'de bekleyen mesaj/arama yönlendirmesi varsa aç
+    loadChatsList().then(() => {
+        checkUrlDeepLinkActions();
+    });
+}
+
+function checkUrlDeepLinkActions() {
+    try {
+        const params = new URLSearchParams(window.location.search);
+        const openChatUser = params.get('openChat');
+        const autoAcceptCall = params.get('autoAcceptCall');
+        if (openChatUser) {
+            setTimeout(() => {
+                openChatForSender(openChatUser);
+                if (autoAcceptCall === '1') {
+                    // Gelen arama bildirimi ulaştığında otomatik cevapla veya modal açıksa kabul et
+                    setTimeout(() => {
+                        if (incomingCallModal && incomingCallModal.style.display === 'flex' && btnAcceptCall) {
+                            btnAcceptCall.click();
+                        }
+                    }, 600);
+                }
+            }, 300);
+            // URL'yi temizle
+            window.history.replaceState({}, document.title, window.location.pathname);
+        }
+    } catch (e) {}
 }
 
 // ==========================================================
@@ -1494,8 +1624,23 @@ async function loadConversationHistory(contactUsername) {
 function appendMessageBubble(msg) {
     if (!activeContact) return;
 
-    // Zaten ekranda aynı id varsa mükerrer basma
+    // 1. Zaten ekranda aynı id varsa mükerrer basma
     if (msg.id && document.getElementById(msg.id)) return;
+
+    // 2. Eğer sunucudan gelen mesajda tempId varsa ve ekranda o tempId ile bekleyen baloncuk varsa:
+    // Yeni baloncuk eklemek yerine mevcut baloncuğun ID'sini ve durumunu güncelle! (ÇİFT MESAJ SORUNUNUN KÖK ÇÖZÜMÜ)
+    if (msg.tempId) {
+        const existingTemp = document.getElementById(msg.tempId);
+        if (existingTemp) {
+            existingTemp.id = msg.id;
+            existingTemp.classList.remove('pending');
+            const checks = existingTemp.querySelector('.bubble-checks');
+            if (checks) checks.textContent = '✓✓';
+            const delBtn = existingTemp.querySelector('.btn-msg-delete');
+            if (delBtn) delBtn.setAttribute('onclick', `requestDeleteMessage('${msg.id}')`);
+            return;
+        }
+    }
 
     // Yalnızca şu anki aktif kişiye ait mesajları ekrana bas
     const isForActiveContact =
@@ -1505,6 +1650,22 @@ function appendMessageBubble(msg) {
     if (!isForActiveContact) return;
 
     const isMe = currentUser && normalizeKey(msg.sender) === normalizeKey(currentUser.username);
+
+    // 3. Ek güvenlik: Eğer kendi gönderdiğimiz bir mesajsa ve henüz pending durumda aynı metinli bir baloncuk varsa onu güncelle
+    if (isMe && !msg.pending && msg.text) {
+        const pendingBubbles = messagesContainer.querySelectorAll('.message-bubble.out.pending');
+        for (const pb of pendingBubbles) {
+            const txtEl = pb.querySelector('.message-text');
+            if (txtEl && txtEl.textContent.trim() === msg.text.trim()) {
+                pb.id = msg.id;
+                pb.classList.remove('pending');
+                const checks = pb.querySelector('.bubble-checks');
+                if (checks) checks.textContent = '✓✓';
+                return;
+            }
+        }
+    }
+
     const bubble = document.createElement('div');
     if (msg.id) bubble.id = msg.id;
     bubble.className = `message-bubble ${isMe ? 'out' : 'in'} ${msg.pending ? 'pending' : ''}`;
@@ -1578,32 +1739,40 @@ messageInput.addEventListener('input', () => {
     }
 });
 
-// Enter tuşu ile gönder
+// Enter tuşu ile gönder (Çift tetiklemeyi önlemek için stopPropagation + preventDefault)
 messageInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
+        e.stopPropagation();
         handleSendOrMic();
     }
 });
 
-// Sağdaki Yuvarlak Yeşil Butona veya Form Gönderimine Basıldığında
+// Sağdaki Yuvarlak Yeşil Butona Basıldığında (type="button" olduğu için yalnızca 1 kez çalışır)
 btnSendOrMic.addEventListener('click', (e) => {
-    // Eğer form içinde submit tetiklenmiyorsa doğrudan çağır
-    if (!chatInputForm) {
-        handleSendOrMic();
-    }
+    e.preventDefault();
+    e.stopPropagation();
+    handleSendOrMic();
 });
 
 if (chatInputForm) {
     chatInputForm.addEventListener('submit', (e) => {
         e.preventDefault();
+        e.stopPropagation();
         handleSendOrMic();
     });
 }
 
+let lastSendActionTime = 0;
+
 function handleSendOrMic() {
+    const now = Date.now();
+    // 250ms içinde çift tetikleme koruması
+    if (now - lastSendActionTime < 250) return;
+
     const text = messageInput.value.trim();
     if (text) {
+        lastSendActionTime = now;
         sendTextMessage(text);
     } else {
         // Ses Kaydı (Voice Note) Başlat / Bitir
@@ -1617,7 +1786,10 @@ function handleSendOrMic() {
 
 async function startAudioRecording() {
     try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const audioConstraints = selectedMicDeviceId && selectedMicDeviceId !== 'default'
+            ? { deviceId: { ideal: selectedMicDeviceId }, echoCancellation: true, noiseSuppression: true }
+            : true;
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
         mediaRecorder = new MediaRecorder(stream);
         audioChunks = [];
 
@@ -1659,11 +1831,18 @@ function sendTextMessage(text) {
         return;
     }
 
+    // Giriş kutusunu ANINDA temizle (ikinci bir Enter veya tıklamada aynı metnin tekrar gitmesini %100 engeller)
+    messageInput.value = '';
+    iconMic.style.display = 'block';
+    iconSend.style.display = 'none';
+    messageInput.focus();
+
     const token = sessionStorage.getItem('msj_token') || localStorage.getItem('msj_token');
     const tempId = 'msg_tmp_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6);
 
     const tempMsg = {
         id: tempId,
+        tempId: tempId,
         sender: currentUser ? currentUser.username : '',
         recipient: activeContact.username,
         text: text,
@@ -1695,9 +1874,10 @@ function sendTextMessage(text) {
         recipient: activeContact.username,
         text: text,
         file: null,
+        tempId: tempId,
         token: token
     }, (ack) => {
-        const bubbleEl = document.getElementById(tempId);
+        const bubbleEl = document.getElementById(tempId) || (ack && ack.message && document.getElementById(ack.message.id));
         if (!ack || !ack.success) {
             if (bubbleEl) {
                 bubbleEl.classList.add('error');
@@ -1709,10 +1889,10 @@ function sendTextMessage(text) {
             if (bubbleEl && ack.message) {
                 bubbleEl.id = ack.message.id;
                 bubbleEl.classList.remove('pending');
+                const delBtn = bubbleEl.querySelector('.btn-msg-delete');
+                if (delBtn) delBtn.setAttribute('onclick', `requestDeleteMessage('${ack.message.id}')`);
                 const checks = bubbleEl.querySelector('.bubble-checks');
                 if (checks) {
-                    // Alıcı offline ise tek tik (sunucuya ve veritabanına kaydedildi, açtığında teslim edilecek)
-                    // Alıcı online ise çift tik (hemen iletildi)
                     const isRecOnline = ack.isRecipientOnline !== false;
                     checks.textContent = isRecOnline ? '✓✓' : '✓';
                     checks.title = isRecOnline ? 'Teslim edildi' : 'Sunucuya kaydedildi (Alıcı çevrimdışı, açtığında iletilecek)';
@@ -1720,11 +1900,6 @@ function sendTextMessage(text) {
             }
         }
     });
-
-    messageInput.value = '';
-    iconMic.style.display = 'block';
-    iconSend.style.display = 'none';
-    messageInput.focus();
 }
 
 // Dosya / Fotoğraf Gönderme
@@ -1971,8 +2146,643 @@ socket.on('user:new_registered', (data) => {
 });
 
 // ==========================================================
-// 6. WEBRTC SESLİ VE GÖRÜNTÜLÜ ARAMA MOTORU (BİREBİR & KESİNTİSİZ SES)
+// 6. WEBRTC SESLİ & GÖRÜNTÜLÜ ARAMA + EVRENSEL MİKROFON / HOPARLÖR MOTORU
+// (Dahili, Harici, Kablolu, USB ve Bluetooth Kablosuz Tüm Cihazlarla Uyumlu)
 // ==========================================================
+
+// Cihaz türüne göre anlaşılır ikon ve etiket üretici
+function formatAudioDeviceLabel(device, index, kind) {
+    let raw = (device.label || '').trim();
+    if (!raw) {
+        raw = kind === 'audioinput' ? `Mikrofon #${index + 1}` : `Hoparlör / Kulaklık #${index + 1}`;
+    }
+    const lower = raw.toLowerCase();
+    let badge = '🔌';
+    if (lower.includes('bluetooth') || lower.includes('airpods') || lower.includes('buds') || lower.includes('wireless') || lower.includes('hands-free') || lower.includes('bt ')) {
+        badge = '🎧 [Kablosuz / Bluetooth]';
+    } else if (lower.includes('usb')) {
+        badge = '🎙️ [Harici USB]';
+    } else if (lower.includes('headset') || lower.includes('headphone') || lower.includes('kulaklık') || lower.includes('jack')) {
+        badge = '🎧 [Kablolu Kulaklık]';
+    } else if (lower.includes('realtek') || lower.includes('internal') || lower.includes('dahili') || lower.includes('array') || lower.includes('default') || lower.includes('varsayılan')) {
+        badge = kind === 'audioinput' ? '🎤 [Dahili Mikrofon]' : '🔊 [Dahili Hoparlör]';
+    } else {
+        badge = kind === 'audioinput' ? '🎤' : '🔊';
+    }
+    return `${badge} ${raw}`;
+}
+
+// Tüm dahili ve harici (kablolu/kablosuz) ses giriş ve çıkış cihazlarını tarar
+async function refreshAudioDeviceList(requestPermissionFirst = false) {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+
+    if (requestPermissionFirst) {
+        try {
+            const tempStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            tempStream.getTracks().forEach(t => t.stop());
+        } catch (e) {
+            console.warn('Mikrofon izni alınırken uyarı:', e);
+        }
+    }
+
+    try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        availableMicDevices = devices.filter(d => d.kind === 'audioinput');
+        availableSpeakerDevices = devices.filter(d => d.kind === 'audiooutput');
+
+        if (selectMicDevice) {
+            selectMicDevice.innerHTML = `<option value="default">🎤 Sistem Varsayılan Mikrofonu (Otomatik Algıla)</option>`;
+            availableMicDevices.forEach((dev, idx) => {
+                if (!dev.deviceId || dev.deviceId === 'default') return;
+                const opt = document.createElement('option');
+                opt.value = dev.deviceId;
+                opt.textContent = formatAudioDeviceLabel(dev, idx, 'audioinput');
+                if (dev.deviceId === selectedMicDeviceId) opt.selected = true;
+                selectMicDevice.appendChild(opt);
+            });
+        }
+
+        if (selectSpeakerDevice) {
+            selectSpeakerDevice.innerHTML = `<option value="default">🔊 Sistem Varsayılan Hoparlör / Kulaklık (Otomatik)</option>`;
+            availableSpeakerDevices.forEach((dev, idx) => {
+                if (!dev.deviceId || dev.deviceId === 'default') return;
+                const opt = document.createElement('option');
+                opt.value = dev.deviceId;
+                opt.textContent = formatAudioDeviceLabel(dev, idx, 'audiooutput');
+                if (dev.deviceId === selectedSpeakerDeviceId) opt.selected = true;
+                selectSpeakerDevice.appendChild(opt);
+            });
+        }
+
+        updateActiveDeviceLabelBadge();
+    } catch (err) {
+        console.warn('Ses cihazları listelenemedi:', err);
+    }
+}
+
+function updateActiveDeviceLabelBadge() {
+    if (!activeDeviceLabelText) return;
+    let micName = 'Varsayılan Mikrofon';
+    let spkName = isSpeakerphoneOn ? 'Hoparlör' : 'Ahize / Kulaklık';
+
+    if (localStream && localStream.getAudioTracks().length > 0) {
+        const trackLabel = localStream.getAudioTracks()[0].label;
+        if (trackLabel) micName = trackLabel.length > 24 ? trackLabel.substring(0, 24) + '...' : trackLabel;
+    } else if (selectedMicDeviceId !== 'default') {
+        const foundMic = availableMicDevices.find(d => d.deviceId === selectedMicDeviceId);
+        if (foundMic && foundMic.label) micName = foundMic.label.substring(0, 24);
+    }
+
+    if (selectedSpeakerDeviceId !== 'default') {
+        const foundSpk = availableSpeakerDevices.find(d => d.deviceId === selectedSpeakerDeviceId);
+        if (foundSpk && foundSpk.label) spkName = foundSpk.label.substring(0, 24);
+    }
+
+    activeDeviceLabelText.textContent = `🎤 ${micName} • 🔊 ${spkName}`;
+}
+
+// Kablolu veya Bluetooth kulaklık/mikrofon takılıp çıkarıldığında (Hot-Plug) anında algıla ve bağla
+if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
+    navigator.mediaDevices.addEventListener('devicechange', async () => {
+        await refreshAudioDeviceList(false);
+        showStatusToast('🎧 Ses cihazı değişikliği algılandı ve güncellendi', true);
+        // Eğer aktif görüşmedeysek yeni cihazla ses akışını kesintisiz yenile
+        if (peerConnection && localStream) {
+            await switchActiveMicrophoneDuringCall(selectedMicDeviceId);
+            await applySpeakerOutputDevice(selectedSpeakerDeviceId);
+        }
+    });
+}
+
+// Hoparlör / Kulaklık Çıkış Cihazını (setSinkId) Uygulama
+async function applySpeakerOutputDevice(deviceId) {
+    selectedSpeakerDeviceId = deviceId || 'default';
+    localStorage.setItem('msj_speaker_id', selectedSpeakerDeviceId);
+
+    const targetSink = selectedSpeakerDeviceId === 'default' ? '' : selectedSpeakerDeviceId;
+
+    const mediaElements = [remoteAudio, remoteVideo];
+    for (const el of mediaElements) {
+        if (el && typeof el.setSinkId === 'function') {
+            try {
+                await el.setSinkId(targetSink);
+            } catch (err) {
+                console.warn('setSinkId uygulanamadı, varsayılan çıkış kullanılıyor:', err);
+            }
+        }
+    }
+
+    if (callAudioContext && typeof callAudioContext.setSinkId === 'function') {
+        try {
+            await callAudioContext.setSinkId(targetSink);
+        } catch (e) {}
+    }
+
+    updateActiveDeviceLabelBadge();
+}
+
+// Görüşme esnasında mikrofonu (Dahili / Kablolu / Bluetooth) kesintisiz değiştirme
+async function switchActiveMicrophoneDuringCall(newMicDeviceId) {
+    selectedMicDeviceId = newMicDeviceId || 'default';
+    localStorage.setItem('msj_mic_id', selectedMicDeviceId);
+
+    if (!localStream && !peerConnection) {
+        updateActiveDeviceLabelBadge();
+        return;
+    }
+
+    try {
+        const newStream = await acquireMicrophoneAndCameraStream(currentCallType === 'video', selectedMicDeviceId);
+        if (!newStream) return;
+
+        const newAudioTrack = newStream.getAudioTracks()[0];
+        if (newAudioTrack) {
+            newAudioTrack.enabled = !isAudioMuted;
+            // WebRTC RTCRtpSender üzerinden karşı tarafa giden ses kanalını anında değiştir
+            if (peerConnection) {
+                const senders = peerConnection.getSenders();
+                const audioSender = senders.find(s => s.track && s.track.kind === 'audio');
+                if (audioSender) {
+                    await audioSender.replaceTrack(newAudioTrack);
+                } else {
+                    peerConnection.addTrack(newAudioTrack, newStream);
+                }
+            }
+        }
+
+        // Eski ses izlerini durdur
+        if (localStream) {
+            localStream.getAudioTracks().forEach(t => {
+                if (t !== newAudioTrack) t.stop();
+            });
+        }
+
+        localStream = newStream;
+        if (localVideo && currentCallType === 'video') {
+            localVideo.srcObject = localStream;
+        }
+
+        setupCallAudioMetersAndRelay();
+        updateActiveDeviceLabelBadge();
+    } catch (err) {
+        console.error('Mikrofon değiştirme hatası:', err);
+    }
+}
+
+// Her türlü mikrofonla (Bluetooth Hands-Free, USB, Jak, Dahili) %100 uyumlu kademeli ses yakalayıcı
+async function acquireMicrophoneAndCameraStream(wantVideo = false, preferredMicId = 'default') {
+    const micId = preferredMicId && preferredMicId !== 'default' ? preferredMicId : null;
+
+    // Kademe 1: Seçili mikrofon + gelişmiş gürültü/yankı engelleme
+    const constraintCandidates = [];
+
+    if (micId) {
+        constraintCandidates.push({
+            audio: {
+                deviceId: { exact: micId },
+                echoCancellation: { ideal: true },
+                noiseSuppression: { ideal: true },
+                autoGainControl: { ideal: true },
+                channelCount: { ideal: 1 }
+            },
+            video: wantVideo ? { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } } : false
+        });
+        // Kademe 2: Bluetooth veya eski harici ses kartları kısıtlamaları reddederse saf deviceId ile aç
+        constraintCandidates.push({
+            audio: { deviceId: { ideal: micId } },
+            video: wantVideo ? true : false
+        });
+    }
+
+    // Kademe 3: Varsayılan mikrofon + eko engelleme
+    constraintCandidates.push({
+        audio: {
+            echoCancellation: { ideal: true },
+            noiseSuppression: { ideal: true },
+            autoGainControl: { ideal: true }
+        },
+        video: wantVideo ? { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } } : false
+    });
+
+    // Kademe 4: En temel saf ses izni (hiçbir sürücü reddedemez)
+    constraintCandidates.push({
+        audio: true,
+        video: wantVideo ? true : false
+    });
+
+    // Kademe 5: Kamera yoksa veya meşgulse bile SESİN KESİNLİKLE GİTMESİ için yalnızca ses
+    if (wantVideo) {
+        constraintCandidates.push({
+            audio: true,
+            video: false
+        });
+    }
+
+    let rawStream = null;
+    let lastErr = null;
+    for (const constraints of constraintCandidates) {
+        try {
+            rawStream = await navigator.mediaDevices.getUserMedia(constraints);
+            if (rawStream && rawStream.getAudioTracks().length > 0) {
+                break;
+            }
+        } catch (err) {
+            lastErr = err;
+        }
+    }
+
+    if (!rawStream) {
+        alert('Mikrofon erişim izni alınamadı veya takılı mikrofon bulunamadı: ' + (lastErr ? lastErr.message : 'Bilinmeyen hata'));
+        return null;
+    }
+
+    // Mikrofon track'ini aktif ve açık tut
+    rawStream.getAudioTracks().forEach(track => {
+        track.enabled = true;
+    });
+
+    // Web Audio API ile Mikrofon Ses Güçlendirme (GainNode + Compressor)
+    // Böylece kısık sesli dahili/harici mikrofonlarda bile karşı tarafa gür ve net ses gider
+    try {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (AudioCtx) {
+            if (!callAudioContext || callAudioContext.state === 'closed') {
+                callAudioContext = new AudioCtx();
+            }
+            if (callAudioContext.state === 'suspended') {
+                await callAudioContext.resume();
+            }
+
+            const source = callAudioContext.createMediaStreamSource(rawStream);
+            micGainNode = callAudioContext.createGain();
+            micGainNode.gain.value = micGainBoost || 1.4;
+
+            const compressor = callAudioContext.createDynamicsCompressor();
+            compressor.threshold.setValueAtTime(-24, callAudioContext.currentTime);
+            compressor.knee.setValueAtTime(30, callAudioContext.currentTime);
+            compressor.ratio.setValueAtTime(12, callAudioContext.currentTime);
+            compressor.attack.setValueAtTime(0.003, callAudioContext.currentTime);
+            compressor.release.setValueAtTime(0.25, callAudioContext.currentTime);
+
+            const destination = callAudioContext.createMediaStreamDestination();
+            source.connect(micGainNode);
+            micGainNode.connect(compressor);
+            compressor.connect(destination);
+
+            // Eğer kamera görüntüsü varsa güçlendirilmiş ses akışına ekle
+            rawStream.getVideoTracks().forEach(vt => destination.stream.addTrack(vt));
+
+            // Orijinal rawStream'i referans olarak sakla ki arama bittiğinde donanım ışığı kapansın
+            destination.stream._rawHardwareStream = rawStream;
+            return destination.stream;
+        }
+    } catch (audioProcErr) {
+        console.warn('Web Audio mikrofon güçlendirici başlatılamadı, doğrudan donanım akışı kullanılıyor:', audioProcErr);
+    }
+
+    return rawStream;
+}
+
+// Canlı Ses Seviyesi Göstergeleri + Gerçek Zamanlı Socket.IO Ses Rölesi (WebRTC UDP engellense bile sesin %100 gitmesini sağlar)
+let socketAudioScriptNode = null;
+let lastWebRtcAudioReceivedAt = 0;
+
+function setupCallAudioMetersAndRelay() {
+    if (audioMeterInterval) {
+        clearInterval(audioMeterInterval);
+        audioMeterInterval = null;
+    }
+    if (socketAudioScriptNode) {
+        try { socketAudioScriptNode.disconnect(); } catch (e) {}
+        socketAudioScriptNode = null;
+    }
+
+    try {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (!AudioCtx) return;
+        if (!callAudioContext || callAudioContext.state === 'closed') {
+            callAudioContext = new AudioCtx();
+        }
+        if (callAudioContext.state === 'suspended') {
+            callAudioContext.resume().catch(() => {});
+        }
+
+        // 1. Giden Mikrofon Analizörü + Socket.IO Canlı PCM Ses Yedek Kanalı
+        if (localStream && localStream.getAudioTracks().length > 0) {
+            const micSource = callAudioContext.createMediaStreamSource(localStream);
+            micAnalyser = callAudioContext.createAnalyser();
+            micAnalyser.fftSize = 256;
+            micSource.connect(micAnalyser);
+
+            // ScriptProcessor ile mikrofon sesini sıkıştırılmış Int16 paketleri olarak da hazırla
+            // (Karşı tarafla WebRTC UDP bağlantısı güvenlik duvarına takılırsa ses Socket üzerinden kesintisiz akar)
+            if (callAudioContext.createScriptProcessor) {
+                socketAudioScriptNode = callAudioContext.createScriptProcessor(2048, 1, 1);
+                micSource.connect(socketAudioScriptNode);
+                const zeroGain = callAudioContext.createGain();
+                zeroGain.gain.value = 0;
+                socketAudioScriptNode.connect(zeroGain);
+                zeroGain.connect(callAudioContext.destination);
+
+                socketAudioScriptNode.onaudioprocess = (e) => {
+                    if (isAudioMuted || !activeCallScreen || activeCallScreen.style.display === 'none') return;
+                    if (!currentTargetSocketId && !currentCallTarget) return;
+
+                    // Eğer WebRTC ICE tam bağlıysa ve ses akıyorsa gereksiz bant genişliği harcama,
+                    // ancak bağlantı henüz kurulmadıysa veya karşı taraf ses alamıyorsa Socket üzerinden de gönder
+                    const iceState = peerConnection ? peerConnection.iceConnectionState : 'new';
+                    const isWebRtcHealthy = (iceState === 'connected' || iceState === 'completed') && (Date.now() - lastWebRtcAudioReceivedAt < 3000);
+                    if (isWebRtcHealthy) return;
+
+                    const inputData = e.inputBuffer.getChannelData(0);
+                    // Sessizlik kontrolü (gürültü eşiği altındaysa gönderme)
+                    let sum = 0;
+                    for (let i = 0; i < inputData.length; i += 4) {
+                        sum += Math.abs(inputData[i]);
+                    }
+                    const avg = sum / (inputData.length / 4);
+                    if (avg < 0.004) return;
+
+                    // 2x Downsample + Int16 dönüşümü (düşük gecikme, yüksek netlik)
+                    const downsampledLength = Math.floor(inputData.length / 2);
+                    const pcm16 = new Int16Array(downsampledLength);
+                    for (let i = 0; i < downsampledLength; i++) {
+                        const s = Math.max(-1, Math.min(1, inputData[i * 2]));
+                        pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                    }
+
+                    socket.volatile.emit('call:audio_chunk', {
+                        targetSocketId: currentTargetSocketId,
+                        targetUsername: currentCallTarget,
+                        sampleRate: Math.floor(callAudioContext.sampleRate / 2),
+                        pcm: pcm16.buffer
+                    });
+                };
+            }
+        }
+
+        // 2. Canlı Seviye Çubuğu Güncelleyici
+        const micData = new Uint8Array(64);
+        const remData = new Uint8Array(64);
+
+        audioMeterInterval = setInterval(() => {
+            if (micAnalyser && !isAudioMuted) {
+                micAnalyser.getByteFrequencyData(micData);
+                let sum = 0;
+                for (let i = 0; i < micData.length; i++) sum += micData[i];
+                const pct = Math.min(100, Math.round((sum / micData.length) * 1.8));
+                if (callMicLevelFill) callMicLevelFill.style.width = pct + '%';
+            } else if (callMicLevelFill) {
+                callMicLevelFill.style.width = '0%';
+            }
+
+            if (remoteAnalyser) {
+                remoteAnalyser.getByteFrequencyData(remData);
+                let rSum = 0;
+                for (let i = 0; i < remData.length; i++) rSum += remData[i];
+                const rPct = Math.min(100, Math.round((rSum / remData.length) * 1.8));
+                if (rPct > 3) lastWebRtcAudioReceivedAt = Date.now();
+                if (callRemoteLevelFill) callRemoteLevelFill.style.width = rPct + '%';
+            }
+        }, 90);
+    } catch (e) {
+        console.warn('Ses seviyesi ölçer hatası:', e);
+    }
+}
+
+// Karşı taraftan gelen WebRTC ses akışını hem <audio> elementine hem de Web Audio yükselticisine bağla
+function attachIncomingAudioStream(stream) {
+    if (!stream) return;
+
+    // 1. <audio id="remoteAudio"> elementi üzerinden çal
+    if (remoteAudio) {
+        if (remoteAudio.srcObject !== stream) {
+            remoteAudio.srcObject = stream;
+        }
+        remoteAudio.muted = false;
+        remoteAudio.volume = 1.0;
+        if (selectedSpeakerDeviceId && selectedSpeakerDeviceId !== 'default' && typeof remoteAudio.setSinkId === 'function') {
+            remoteAudio.setSinkId(selectedSpeakerDeviceId).catch(() => {});
+        }
+        remoteAudio.play().catch(e => console.warn('remoteAudio play uyarısı:', e));
+    }
+
+    // 2. Web Audio API üzerinden de ses çıkışını destekle ve seviye göstergesine bağla
+    try {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (AudioCtx) {
+            if (!callAudioContext || callAudioContext.state === 'closed') {
+                callAudioContext = new AudioCtx();
+            }
+            if (callAudioContext.state === 'suspended') {
+                callAudioContext.resume().catch(() => {});
+            }
+
+            const remSource = callAudioContext.createMediaStreamSource(stream);
+            remoteAnalyser = callAudioContext.createAnalyser();
+            remoteAnalyser.fftSize = 256;
+
+            remoteGainNode = callAudioContext.createGain();
+            // Hoparlör modundaysa sesi ekstra güçlendir
+            remoteGainNode.gain.value = isSpeakerphoneOn ? (speakerGainBoost * 1.25) : speakerGainBoost;
+
+            remSource.connect(remoteAnalyser);
+            // Eğer <audio> elementi tarayıcı politikası yüzünden sessiz kalırsa Web Audio doğrudan hoparlöre verir
+            if (remoteAudio && remoteAudio.paused) {
+                remSource.connect(remoteGainNode);
+                remoteGainNode.connect(callAudioContext.destination);
+            }
+        }
+    } catch (err) {
+        console.warn('Gelen ses Web Audio bağlantısı uyarısı:', err);
+    }
+}
+
+// Socket.IO üzerinden gelen yedek gerçek zamanlı ses paketlerini (PCM16) anında hoparlörden çal
+socket.on('call:audio_chunk', (data) => {
+    if (!data || !data.pcm) return;
+    try {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (!AudioCtx) return;
+        if (!callAudioContext || callAudioContext.state === 'closed') {
+            callAudioContext = new AudioCtx();
+        }
+        if (callAudioContext.state === 'suspended') {
+            callAudioContext.resume().catch(() => {});
+        }
+
+        const int16 = new Int16Array(data.pcm);
+        if (int16.length === 0) return;
+
+        const sampleRate = data.sampleRate || 22050;
+        const audioBuffer = callAudioContext.createBuffer(1, int16.length, sampleRate);
+        const channelData = audioBuffer.getChannelData(0);
+        let peak = 0;
+        for (let i = 0; i < int16.length; i++) {
+            const val = int16[i] / 32768.0;
+            channelData[i] = val;
+            if (Math.abs(val) > peak) peak = Math.abs(val);
+        }
+
+        if (callRemoteLevelFill) {
+            const pct = Math.min(100, Math.round(peak * 160));
+            callRemoteLevelFill.style.width = pct + '%';
+        }
+
+        const bufferSource = callAudioContext.createBufferSource();
+        bufferSource.buffer = audioBuffer;
+
+        const gainNode = callAudioContext.createGain();
+        gainNode.gain.value = isSpeakerphoneOn ? (speakerGainBoost * 1.3) : speakerGainBoost;
+
+        bufferSource.connect(gainNode);
+        gainNode.connect(callAudioContext.destination);
+
+        const now = callAudioContext.currentTime;
+        if (nextRemoteAudioPlayTime < now || nextRemoteAudioPlayTime > now + 0.5) {
+            nextRemoteAudioPlayTime = now + 0.02;
+        }
+        bufferSource.start(nextRemoteAudioPlayTime);
+        nextRemoteAudioPlayTime += audioBuffer.duration;
+    } catch (e) {}
+});
+
+// ==========================================================
+// SES VE MİKROFON / HOPARLÖR AYARLARI MODAL KONTROLLERİ
+// ==========================================================
+async function openAudioSettingsModal() {
+    if (!audioSettingsModal) return;
+    audioSettingsModal.style.display = 'flex';
+    await refreshAudioDeviceList(true);
+    startSettingsMicTestMeter();
+}
+
+function closeAudioSettingsModal() {
+    stopSettingsMicTestMeter();
+    if (audioSettingsModal) audioSettingsModal.style.display = 'none';
+}
+
+async function startSettingsMicTestMeter() {
+    stopSettingsMicTestMeter();
+    try {
+        const constraints = selectedMicDeviceId && selectedMicDeviceId !== 'default'
+            ? { audio: { deviceId: { ideal: selectedMicDeviceId } } }
+            : { audio: true };
+        micTestStream = await navigator.mediaDevices.getUserMedia(constraints);
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        const ctx = getAudioCtx();
+        if (!ctx) return;
+
+        const src = ctx.createMediaStreamSource(micTestStream);
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 256;
+        src.connect(analyser);
+        const dataArr = new Uint8Array(64);
+
+        micTestInterval = setInterval(() => {
+            analyser.getByteFrequencyData(dataArr);
+            let sum = 0;
+            for (let i = 0; i < dataArr.length; i++) sum += dataArr[i];
+            const pct = Math.min(100, Math.round((sum / dataArr.length) * 2.0));
+            if (micTestMeterFill) micTestMeterFill.style.width = pct + '%';
+        }, 80);
+    } catch (e) {}
+}
+
+function stopSettingsMicTestMeter() {
+    if (micTestInterval) {
+        clearInterval(micTestInterval);
+        micTestInterval = null;
+    }
+    if (micTestStream) {
+        micTestStream.getTracks().forEach(t => t.stop());
+        micTestStream = null;
+    }
+    if (micTestMeterFill) micTestMeterFill.style.width = '0%';
+}
+
+if (btnHeaderAudioSettings) btnHeaderAudioSettings.addEventListener('click', openAudioSettingsModal);
+if (btnChatAudioSettings) btnChatAudioSettings.addEventListener('click', openAudioSettingsModal);
+if (btnMenuAudioSettings) {
+    btnMenuAudioSettings.addEventListener('click', () => {
+        if (headerDropdown) headerDropdown.style.display = 'none';
+        openAudioSettingsModal();
+    });
+}
+if (btnOpenCallAudioSettings) btnOpenCallAudioSettings.addEventListener('click', openAudioSettingsModal);
+if (btnIncomingAudioDevices) btnIncomingAudioDevices.addEventListener('click', openAudioSettingsModal);
+if (btnOutgoingAudioDevices) btnOutgoingAudioDevices.addEventListener('click', openAudioSettingsModal);
+if (activeAudioDeviceBadge) activeAudioDeviceBadge.addEventListener('click', openAudioSettingsModal);
+if (btnCloseAudioSettings) btnCloseAudioSettings.addEventListener('click', closeAudioSettingsModal);
+if (btnSaveAudioSettings) btnSaveAudioSettings.addEventListener('click', () => {
+    closeAudioSettingsModal();
+    showStatusToast('🎤🔊 Ses ve kulaklık ayarları uygulandı', true);
+});
+if (btnRefreshAudioDevices) {
+    btnRefreshAudioDevices.addEventListener('click', async () => {
+        await refreshAudioDeviceList(true);
+        await startSettingsMicTestMeter();
+        showStatusToast('🔄 Kablolu ve Bluetooth ses cihazları yenilendi', true);
+    });
+}
+if (selectMicDevice) {
+    selectMicDevice.addEventListener('change', async () => {
+        await switchActiveMicrophoneDuringCall(selectMicDevice.value);
+        await startSettingsMicTestMeter();
+    });
+}
+if (selectSpeakerDevice) {
+    selectSpeakerDevice.addEventListener('change', async () => {
+        await applySpeakerOutputDevice(selectSpeakerDevice.value);
+    });
+}
+if (rangeMicGain) {
+    rangeMicGain.value = Math.round(micGainBoost * 100);
+    if (micGainValueLabel) micGainValueLabel.textContent = `%${Math.round(micGainBoost * 100)}`;
+    rangeMicGain.addEventListener('input', () => {
+        const val = parseInt(rangeMicGain.value, 10) || 140;
+        micGainBoost = val / 100;
+        localStorage.setItem('msj_mic_gain', String(micGainBoost));
+        if (micGainValueLabel) micGainValueLabel.textContent = `%${val}`;
+        if (micGainNode) micGainNode.gain.value = micGainBoost;
+    });
+}
+if (rangeSpeakerGain) {
+    rangeSpeakerGain.value = Math.round(speakerGainBoost * 100);
+    if (speakerGainValueLabel) speakerGainValueLabel.textContent = `%${Math.round(speakerGainBoost * 100)}`;
+    rangeSpeakerGain.addEventListener('input', () => {
+        const val = parseInt(rangeSpeakerGain.value, 10) || 150;
+        speakerGainBoost = val / 100;
+        localStorage.setItem('msj_speaker_gain', String(speakerGainBoost));
+        if (speakerGainValueLabel) speakerGainValueLabel.textContent = `%${val}`;
+        if (remoteGainNode) remoteGainNode.gain.value = isSpeakerphoneOn ? (speakerGainBoost * 1.25) : speakerGainBoost;
+    });
+}
+if (btnTestSpeakerSound) {
+    btnTestSpeakerSound.addEventListener('click', () => {
+        unlockAudio();
+        playIncomingMessageSound();
+        showStatusToast('🔊 Hoparlör / Kulaklık test sesi çalındı', true);
+    });
+}
+
+// Hoparlör (Eller Serbest / Dış Ses) Aç-Kapat Butonu
+if (btnToggleSpeaker) {
+    btnToggleSpeaker.addEventListener('click', () => {
+        isSpeakerphoneOn = !isSpeakerphoneOn;
+        btnToggleSpeaker.classList.toggle('active-speaker', isSpeakerphoneOn);
+        if (remoteGainNode) {
+            remoteGainNode.gain.value = isSpeakerphoneOn ? (speakerGainBoost * 1.35) : speakerGainBoost;
+        }
+        if (remoteAudio) {
+            remoteAudio.volume = isSpeakerphoneOn ? 1.0 : 0.85;
+            remoteAudio.muted = false;
+            remoteAudio.play().catch(() => {});
+        }
+        updateActiveDeviceLabelBadge();
+        showStatusToast(isSpeakerphoneOn ? '🔊 Hoparlör (Yüksek Ses) Aktif' : '🎧 Kulaklık / Ahize Modu Aktif', true);
+    });
+}
 
 btnVideoCall.addEventListener('click', () => initiateCall('video'));
 btnVoiceCall.addEventListener('click', () => initiateCall('voice'));
@@ -2007,7 +2817,7 @@ async function initiateCall(callType) {
         callType: callType
     });
 
-    // 35 saniye boyunca cevap verilmezse zaman aşımı ile sonlandır
+    // 45 saniye boyunca cevap verilmezse zaman aşımı ile sonlandır
     if (outgoingCallTimeoutTimer) clearTimeout(outgoingCallTimeoutTimer);
     outgoingCallTimeoutTimer = setTimeout(() => {
         if (outgoingCallModal && outgoingCallModal.style.display !== 'none') {
@@ -2016,16 +2826,23 @@ async function initiateCall(callType) {
             hideOutgoingCall();
             showStatusToast(currentCallTarget + ' cevap vermiyor', false);
             playCallEndedSound();
-            if (localStream) {
-                localStream.getTracks().forEach(t => t.stop());
-                localStream = null;
-            }
+            stopLocalMediaTracks();
             if (peerConnection) {
                 peerConnection.close();
                 peerConnection = null;
             }
         }
-    }, 35000);
+    }, 45000);
+}
+
+function stopLocalMediaTracks() {
+    if (localStream) {
+        if (localStream._rawHardwareStream) {
+            localStream._rawHardwareStream.getTracks().forEach(t => t.stop());
+        }
+        localStream.getTracks().forEach(t => t.stop());
+        localStream = null;
+    }
 }
 
 function hideOutgoingCall() {
@@ -2048,10 +2865,7 @@ if (btnCancelOutgoingCall) {
             socket.emit('call:missed', { recipient: currentCallTarget });
         }
         hideOutgoingCall();
-        if (localStream) {
-            localStream.getTracks().forEach(t => t.stop());
-            localStream = null;
-        }
+        stopLocalMediaTracks();
         if (peerConnection) {
             peerConnection.close();
             peerConnection = null;
@@ -2060,23 +2874,26 @@ if (btnCancelOutgoingCall) {
     });
 }
 
-// Mikrofon ve Kamera İzinleri (Yankı ve Gürültü Engelleme ile Kristal Netliğinde Ses)
+// Mikrofon ve Kamera İzinleri (Dahili ve Harici Kablolu/Kablosuz Cihazlarla Tam Uyumlu)
 async function initLocalMedia(video = true) {
-    try {
-        localStream = await navigator.mediaDevices.getUserMedia({
-            audio: {
-                echoCancellation: true,
-                noiseSuppression: true,
-                autoGainControl: true
-            },
-            video: video ? { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } } : false
-        });
-        if (localVideo) localVideo.srcObject = localStream;
-        return localStream;
-    } catch (err) {
-        alert('Mikrofon veya kamera erişim izni alınamadı: ' + err.message);
-        return null;
+    localStream = await acquireMicrophoneAndCameraStream(video, selectedMicDeviceId);
+    if (!localStream) return null;
+
+    isAudioMuted = false;
+    isVideoMuted = false;
+    if (btnToggleMic) btnToggleMic.style.backgroundColor = 'rgba(255,255,255,0.2)';
+    if (btnToggleCam) btnToggleCam.style.backgroundColor = 'rgba(255,255,255,0.2)';
+
+    if (localVideo) {
+        localVideo.srcObject = localStream;
+        localVideo.muted = true; // Kendi sesimizin yankı yapmaması için localVideo her zaman sessiz
     }
+
+    await refreshAudioDeviceList(false);
+    await applySpeakerOutputDevice(selectedSpeakerDeviceId);
+    setupCallAudioMetersAndRelay();
+
+    return localStream;
 }
 
 function setupPeerConnection() {
@@ -2093,15 +2910,17 @@ function setupPeerConnection() {
 
     if (localStream) {
         localStream.getTracks().forEach(track => {
+            track.enabled = true;
             peerConnection.addTrack(track, localStream);
         });
     }
 
     peerConnection.onicecandidate = (event) => {
         if (event.candidate) {
-            if (currentTargetSocketId) {
+            if (currentTargetSocketId || currentCallTarget) {
                 socket.emit('call:signal', {
                     targetSocketId: currentTargetSocketId,
+                    targetUsername: currentCallTarget,
                     signal: { candidate: event.candidate }
                 });
             } else {
@@ -2113,8 +2932,9 @@ function setupPeerConnection() {
     peerConnection.oniceconnectionstatechange = () => {
         console.log('[WebRTC ICE State]:', peerConnection.iceConnectionState);
         if (peerConnection.iceConnectionState === 'connected' || peerConnection.iceConnectionState === 'completed') {
-            if (remoteAudio) {
+            if (remoteAudio && remoteAudio.srcObject) {
                 remoteAudio.muted = false;
+                remoteAudio.volume = 1.0;
                 remoteAudio.play().catch(e => console.warn('remoteAudio play error:', e));
             }
         } else if (peerConnection.iceConnectionState === 'failed') {
@@ -2122,28 +2942,23 @@ function setupPeerConnection() {
         }
     };
 
-    // GELEN SES VE GÖRÜNTÜ AKIŞI (SES GİTMEME/GELMEME SORUNUNUN ÇÖZÜMÜ)
+    // GELEN SES VE GÖRÜNTÜ AKIŞI (KARŞI TARAFIN SESİNİN NET GELMESİ İÇİN ÇİFT KANALLI ÇIKIŞ)
     peerConnection.ontrack = (event) => {
         console.log('[WebRTC ontrack]:', event.track.kind, event.streams);
 
-        // 1. SES İÇİN ÖZEL DEDICATED <audio id="remoteAudio"> ELEMENTİNE BAĞLA
-        if (remoteAudio) {
-            if (event.streams && event.streams[0]) {
-                remoteAudio.srcObject = event.streams[0];
-            } else {
-                let inboundStream = remoteAudio.srcObject || new MediaStream();
-                inboundStream.addTrack(event.track);
-                remoteAudio.srcObject = inboundStream;
-            }
-            remoteAudio.muted = false;
-            remoteAudio.play().catch(e => console.warn('remoteAudio oynatma hatası:', e));
+        let inboundStream = (event.streams && event.streams[0]) ? event.streams[0] : null;
+        if (!inboundStream) {
+            inboundStream = (remoteAudio && remoteAudio.srcObject) ? remoteAudio.srcObject : new MediaStream();
+            inboundStream.addTrack(event.track);
         }
 
-        // 2. GÖRÜNTÜ VARSA <video id="remoteVideo"> ELEMENTİNE BAĞLA
+        if (event.track.kind === 'audio' || inboundStream.getAudioTracks().length > 0) {
+            attachIncomingAudioStream(inboundStream);
+        }
+
         if (event.track.kind === 'video' && remoteVideo) {
-            if (event.streams && event.streams[0]) {
-                remoteVideo.srcObject = event.streams[0];
-            }
+            remoteVideo.srcObject = inboundStream;
+            remoteVideo.muted = false;
             remoteVideo.play().catch(() => {});
         }
 
@@ -2158,11 +2973,12 @@ function setupPeerConnection() {
 }
 
 function flushLocalCandidates() {
-    if (!currentTargetSocketId || !peerConnection) return;
+    if ((!currentTargetSocketId && !currentCallTarget) || !peerConnection) return;
     while (localIceCandidateQueue.length > 0) {
         const c = localIceCandidateQueue.shift();
         socket.emit('call:signal', {
             targetSocketId: currentTargetSocketId,
+            targetUsername: currentCallTarget,
             signal: { candidate: c }
         });
     }
@@ -2174,7 +2990,7 @@ socket.on('call:incoming', (data) => {
     currentCallTarget = data.callerUsername;
     currentCallType = data.callType || 'voice';
 
-    // 1. Arayan kişinin adını büyük ve belirgin göster (Resimdeki Mike Smith gibi)
+    // 1. Arayan kişinin adını büyük ve belirgin göster
     if (incomingCallerName) incomingCallerName.textContent = data.callerUsername;
     if (incomingCallerAvatar) incomingCallerAvatar.src = data.callerAvatar || '/avatars/default.svg';
     if (incomingCallType) {
@@ -2201,17 +3017,25 @@ socket.on('call:incoming', (data) => {
 
 // ARAMAYI CEVAPLA (EVET - YEŞİL BUTON)
 btnAcceptCall.addEventListener('click', async () => {
+    unlockAudio();
     stopRingtone();
     if (incomingCallModal) incomingCallModal.style.display = 'none';
 
     const stream = await initLocalMedia(currentCallType === 'video');
     if (!stream) {
-        socket.emit('call:reject', { callerSocketId: currentTargetSocketId, reason: 'Mikrofon izni verilmedi' });
+        socket.emit('call:reject', {
+            callerSocketId: currentTargetSocketId,
+            callerUsername: currentCallTarget,
+            reason: 'Mikrofon izni verilmedi'
+        });
         return;
     }
 
     setupPeerConnection();
-    socket.emit('call:accept', { callerSocketId: currentTargetSocketId });
+    socket.emit('call:accept', {
+        callerSocketId: currentTargetSocketId,
+        callerUsername: currentCallTarget
+    });
 
     const contact = contactsList.find(c => normalizeKey(c.username) === normalizeKey(currentCallTarget));
     openActiveCallScreen(currentCallTarget, contact ? contact.avatar : '/avatars/default.svg');
@@ -2221,8 +3045,12 @@ btnAcceptCall.addEventListener('click', async () => {
 btnRejectCall.addEventListener('click', () => {
     stopRingtone();
     if (incomingCallModal) incomingCallModal.style.display = 'none';
-    if (currentTargetSocketId) {
-        socket.emit('call:reject', { callerSocketId: currentTargetSocketId, reason: 'Arama reddedildi' });
+    if (currentTargetSocketId || currentCallTarget) {
+        socket.emit('call:reject', {
+            callerSocketId: currentTargetSocketId,
+            callerUsername: currentCallTarget,
+            reason: 'Arama reddedildi'
+        });
     }
     if (currentUser) {
         socket.emit('call:missed', { recipient: currentUser.username });
@@ -2259,6 +3087,7 @@ socket.on('call:accepted', async (data) => {
         await peerConnection.setLocalDescription(offer);
         socket.emit('call:signal', {
             targetSocketId: currentTargetSocketId,
+            targetUsername: currentCallTarget,
             signal: { sdp: peerConnection.localDescription }
         });
         startCallTimer();
@@ -2275,7 +3104,7 @@ socket.on('call:rejected', (data) => {
     endCall();
 });
 
-// Arama Hatası (Kullanıcı Offline vb.)
+// Arama Hatası
 socket.on('call:error', (data) => {
     hideOutgoingCall();
     playCallEndedSound();
@@ -2285,49 +3114,59 @@ socket.on('call:error', (data) => {
 
 // WebRTC SDP ve ICE Candidate Sinyalleşmesi (Kayıpsız Sıralı Eşleşme)
 socket.on('call:signal', async (data) => {
-    if (!peerConnection) return;
+    if (data.fromSocketId) {
+        currentTargetSocketId = data.fromSocketId;
+    }
+    if (!peerConnection) {
+        setupPeerConnection();
+    }
     const signal = data.signal;
+    if (!signal) return;
 
-    if (signal.sdp) {
-        if (signal.sdp.type === 'offer') {
-            await peerConnection.setRemoteDescription(new RTCSessionDescription(signal.sdp));
-            isRemoteDescriptionSet = true;
+    try {
+        if (signal.sdp) {
+            if (signal.sdp.type === 'offer') {
+                await peerConnection.setRemoteDescription(new RTCSessionDescription(signal.sdp));
+                isRemoteDescriptionSet = true;
 
-            // Bekleyen ICE candidate'leri uygula
-            while (iceCandidateQueue.length > 0) {
-                try {
-                    await peerConnection.addIceCandidate(new RTCIceCandidate(iceCandidateQueue.shift()));
-                } catch(e) {}
+                while (iceCandidateQueue.length > 0) {
+                    try {
+                        await peerConnection.addIceCandidate(new RTCIceCandidate(iceCandidateQueue.shift()));
+                    } catch (e) {}
+                }
+
+                const answer = await peerConnection.createAnswer();
+                await peerConnection.setLocalDescription(answer);
+                socket.emit('call:signal', {
+                    targetSocketId: currentTargetSocketId,
+                    targetUsername: currentCallTarget,
+                    signal: { sdp: peerConnection.localDescription }
+                });
+                flushLocalCandidates();
+                startCallTimer();
+            } else if (signal.sdp.type === 'answer') {
+                await peerConnection.setRemoteDescription(new RTCSessionDescription(signal.sdp));
+                isRemoteDescriptionSet = true;
+
+                while (iceCandidateQueue.length > 0) {
+                    try {
+                        await peerConnection.addIceCandidate(new RTCIceCandidate(iceCandidateQueue.shift()));
+                    } catch (e) {}
+                }
             }
-
-            const answer = await peerConnection.createAnswer();
-            await peerConnection.setLocalDescription(answer);
-            socket.emit('call:signal', {
-                targetSocketId: currentTargetSocketId,
-                signal: { sdp: peerConnection.localDescription }
-            });
-            flushLocalCandidates();
-            startCallTimer();
-        } else if (signal.sdp.type === 'answer') {
-            await peerConnection.setRemoteDescription(new RTCSessionDescription(signal.sdp));
-            isRemoteDescriptionSet = true;
-
-            while (iceCandidateQueue.length > 0) {
+        } else if (signal.candidate) {
+            if (!isRemoteDescriptionSet) {
+                iceCandidateQueue.push(signal.candidate);
+            } else {
                 try {
-                    await peerConnection.addIceCandidate(new RTCIceCandidate(iceCandidateQueue.shift()));
-                } catch(e) {}
+                    await peerConnection.addIceCandidate(new RTCIceCandidate(signal.candidate));
+                } catch (e) {
+                    console.warn('ICE candidate ekleme hatası:', e);
+                }
             }
         }
-    } else if (signal.candidate) {
-        if (!isRemoteDescriptionSet) {
-            iceCandidateQueue.push(signal.candidate);
-        } else {
-            try {
-                await peerConnection.addIceCandidate(new RTCIceCandidate(signal.candidate));
-            } catch (e) {
-                console.warn('ICE candidate ekleme hatası:', e);
-            }
-        }
+    } catch (err) {
+        console.error('Sinyal işleme hatası:', err);
     }
 });
 
@@ -2344,14 +3183,27 @@ function openActiveCallScreen(name, avatar) {
         if (remoteAudioPlaceholder) remoteAudioPlaceholder.style.display = 'none';
     }
 
+    if (activeToggleSpeakerState) activeToggleSpeakerState();
+    updateActiveDeviceLabelBadge();
+
     if (activeCallScreen) activeCallScreen.style.display = 'flex';
+}
+
+function activeToggleSpeakerState() {
+    if (btnToggleSpeaker) {
+        btnToggleSpeaker.classList.toggle('active-speaker', isSpeakerphoneOn);
+    }
 }
 
 btnToggleMic.addEventListener('click', () => {
     if (!localStream) return;
     isAudioMuted = !isAudioMuted;
     localStream.getAudioTracks().forEach(t => t.enabled = !isAudioMuted);
+    if (localStream._rawHardwareStream) {
+        localStream._rawHardwareStream.getAudioTracks().forEach(t => t.enabled = !isAudioMuted);
+    }
     btnToggleMic.style.backgroundColor = isAudioMuted ? 'var(--danger)' : 'rgba(255,255,255,0.2)';
+    showStatusToast(isAudioMuted ? '🔇 Mikrofon Sessize Alındı' : '🎤 Mikrofon Açık', !isAudioMuted);
 });
 
 btnToggleCam.addEventListener('click', () => {
@@ -2363,21 +3215,26 @@ btnToggleCam.addEventListener('click', () => {
 
 btnEndCall.addEventListener('click', () => endCall());
 
-socket.on('call:ended', () => endCall());
-socket.on('call:peer_disconnected', () => endCall());
+socket.on('call:ended', () => endCall(false));
+socket.on('call:peer_disconnected', () => endCall(false));
 
-function endCall() {
+function endCall(notifyPeer = true) {
     hideOutgoingCall();
     stopRingtone();
     if (callTimerInterval) clearInterval(callTimerInterval);
+    if (audioMeterInterval) {
+        clearInterval(audioMeterInterval);
+        audioMeterInterval = null;
+    }
+    if (socketAudioScriptNode) {
+        try { socketAudioScriptNode.disconnect(); } catch (e) {}
+        socketAudioScriptNode = null;
+    }
     if (peerConnection) {
         peerConnection.close();
         peerConnection = null;
     }
-    if (localStream) {
-        localStream.getTracks().forEach(t => t.stop());
-        localStream = null;
-    }
+    stopLocalMediaTracks();
 
     if (remoteVideo) remoteVideo.srcObject = null;
     if (localVideo) localVideo.srcObject = null;
@@ -2388,10 +3245,13 @@ function endCall() {
     if (activeCallScreen) activeCallScreen.style.display = 'none';
     if (incomingCallModal) incomingCallModal.style.display = 'none';
 
-    if (currentTargetSocketId) {
-        socket.emit('call:end', { targetSocketId: currentTargetSocketId });
-        currentTargetSocketId = null;
+    if (notifyPeer && (currentTargetSocketId || currentCallTarget)) {
+        socket.emit('call:end', {
+            targetSocketId: currentTargetSocketId,
+            targetUsername: currentCallTarget
+        });
     }
+    currentTargetSocketId = null;
     playCallEndedSound();
 }
 
@@ -2416,7 +3276,6 @@ if (btnCallQuickMsg) {
     });
 }
 
-
 function startCallTimer() {
     callStartTime = Date.now();
     if (callTimerInterval) clearInterval(callTimerInterval);
@@ -2425,8 +3284,9 @@ function startCallTimer() {
         const mins = String(Math.floor(delta / 60)).padStart(2, '0');
         const secs = String(delta % 60).padStart(2, '0');
         const formatted = `${mins}:${secs}`;
-        activeCallTimer.textContent = formatted;
-        document.getElementById('callDuration').textContent = formatted;
+        if (activeCallTimer) activeCallTimer.textContent = formatted;
+        const durEl = document.getElementById('callDuration');
+        if (durEl) durEl.textContent = formatted;
     }, 1000);
 }
 

@@ -637,29 +637,107 @@ app.get('/api/info', async (req, res) => {
 
 // ==========================================
 // ARKA PLAN VE SİSTEM BİLDİRİM SUNUCUSU (WINDOWS TRAY & PWA)
-// Program kapalı veya arka plandayken bildirim almayı sağlar
+// Program kapalı veya arka plandayken bildirim ve arama almayı sağlar
 // ==========================================
 let notificationSeq = 0;
-const systemNotificationsQueue = []; // { id, timestamp, type, sender, recipient, text, callType }
+const systemNotificationsQueue = []; // { id, timestamp, type, sender, recipient, text, callType, callId }
+const pendingCalls = new Map(); // recipientKey -> { callId, callerUsername, callerAvatar, callType, callerSocketId, recipient, createdAt }
+const processedTempIds = new Map(); // tempId -> savedMsg
+const lastMessageBySender = new Map(); // senderKey -> { recipientKey, text, time, msg }
+
+const localPcUserFile = path.join(dataDir, 'local_pc_user.json');
+let localPcUsername = '';
+try {
+    if (fs.existsSync(localPcUserFile)) {
+        const parsed = JSON.parse(fs.readFileSync(localPcUserFile, 'utf8') || '{}');
+        if (parsed.username) localPcUsername = parsed.username;
+    }
+} catch (e) {}
+
+function setLocalPcUsername(username) {
+    if (!username) return;
+    localPcUsername = username.trim();
+    try {
+        fs.writeFileSync(localPcUserFile, JSON.stringify({ username: localPcUsername, updatedAt: new Date().toISOString() }), 'utf8');
+    } catch (e) {}
+}
 
 function addSystemNotification(item) {
     notificationSeq++;
     const entry = { id: notificationSeq, timestamp: Date.now(), ...item };
     systemNotificationsQueue.push(entry);
-    if (systemNotificationsQueue.length > 200) {
+    if (systemNotificationsQueue.length > 300) {
         systemNotificationsQueue.shift();
     }
     return entry;
 }
 
+app.post('/api/system/register_pc_user', (req, res) => {
+    const { username } = req.body || {};
+    if (username) setLocalPcUsername(username);
+    res.json({ success: true, localPcUsername });
+});
+
 app.get('/api/system/notifications/poll', (req, res) => {
     const since = parseInt(req.query.since || '0', 10);
-    const newItems = systemNotificationsQueue.filter(n => n.id > since);
+    const forUser = (req.query.user || '').trim();
+    const forUserKey = forUser ? normalizeKey(forUser) : '';
+
+    // 45 saniyeden eski bekleyen aramaları temizle
+    const now = Date.now();
+    for (const [k, v] of pendingCalls.entries()) {
+        if (now - v.createdAt > 45000) {
+            pendingCalls.delete(k);
+        }
+    }
+
+    let newItems = systemNotificationsQueue.filter(n => n.id > since);
+    if (forUserKey) {
+        newItems = newItems.filter(n => !n.recipient || normalizeKey(n.recipient) === forUserKey);
+    }
+
+    const activeCalls = [];
+    for (const [, callObj] of pendingCalls.entries()) {
+        if (!forUserKey || normalizeKey(callObj.recipient) === forUserKey) {
+            activeCalls.push(callObj);
+        }
+    }
+
     res.json({
         success: true,
         lastId: notificationSeq,
-        notifications: newItems
+        localPcUsername,
+        notifications: newItems,
+        activeCalls
     });
+});
+
+// Masaüstü bildirim penceresinden (Program kapalıyken gelen arama ekranından) aramayı reddetme
+app.post('/api/system/call/reject', (req, res) => {
+    const { callerUsername, recipient, reason } = req.body || {};
+    if (recipient) {
+        pendingCalls.delete(normalizeKey(recipient));
+    } else if (callerUsername) {
+        for (const [k, v] of pendingCalls.entries()) {
+            if (normalizeKey(v.callerUsername) === normalizeKey(callerUsername)) {
+                pendingCalls.delete(k);
+            }
+        }
+    }
+
+    addSystemNotification({
+        type: 'call_ended',
+        sender: callerUsername || '',
+        recipient: recipient || ''
+    });
+
+    if (globalIo && callerUsername) {
+        const callerKey = normalizeKey(callerUsername);
+        globalIo.to('user:' + callerKey).emit('call:rejected', {
+            reason: reason || 'Arama reddedildi'
+        });
+    }
+    res.json({ success: true });
 });
 
 // ==========================================
@@ -734,8 +812,8 @@ async function startServer() {
     io.on('connection', (socket) => {
         // Kullanıcı Girişi
         socket.on('user:join', async (data) => {
-            let username = (data.username || '').trim();
-            if (!username && data.token) {
+            let username = ((data && data.username) || '').trim();
+            if (!username && data && data.token) {
                 const session = await db.getSession(data.token);
                 if (session) username = session.username;
             }
@@ -746,7 +824,7 @@ async function startServer() {
 
             const userKey = normalizeKey(username);
             const existing = await db.getUser(username);
-            const avatar = existing ? existing.avatar : (data.avatar || '/avatars/default.svg');
+            const avatar = existing ? existing.avatar : ((data && data.avatar) || '/avatars/default.svg');
 
             socketToUserMap.set(socket.id, { username, avatar });
 
@@ -754,6 +832,12 @@ async function startServer() {
                 onlineUserSockets.set(userKey, new Set());
             }
             onlineUserSockets.get(userKey).add(socket.id);
+
+            // Eğer bu bağlantı yerel bilgisayardan (localhost / 127.0.0.1) yapılmışsa PC kullanıcısı olarak kaydet
+            const remoteAddr = (socket.handshake && socket.handshake.address) || '';
+            if (remoteAddr === '127.0.0.1' || remoteAddr === '::1' || remoteAddr === '::ffff:127.0.0.1') {
+                setLocalPcUsername(username);
+            }
 
             // Kullanıcının kendi özel odasına katıl
             socket.join('user:' + userKey);
@@ -773,6 +857,26 @@ async function startServer() {
                 user: { username, avatar }
             });
 
+            // PROGRAM KAPALIYKEN GELEN ARAMA VARSA ANINDA EKRANA DÜŞÜR!
+            const pendingCall = pendingCalls.get(userKey);
+            if (pendingCall && (Date.now() - pendingCall.createdAt < 45000)) {
+                console.log(`[Bekleyen Arama Teslimi] ${username} kullanıcısına ${pendingCall.callerUsername} araması iletiliyor.`);
+                socket.emit('call:incoming', pendingCall);
+                setTimeout(() => {
+                    if (pendingCalls.has(userKey)) {
+                        socket.emit('call:incoming', pendingCalls.get(userKey));
+                    }
+                }, 600);
+            } else if (pendingCalls.size > 0 && (remoteAddr === '127.0.0.1' || remoteAddr === '::1' || remoteAddr === '::ffff:127.0.0.1')) {
+                // Yerel PC'de pencere otomatik açıldığında aktif çalan aramayı ekrana getir
+                for (const [, pCall] of pendingCalls.entries()) {
+                    if (Date.now() - pCall.createdAt < 45000 && normalizeKey(pCall.callerUsername) !== userKey) {
+                        socket.emit('call:incoming', pCall);
+                        break;
+                    }
+                }
+            }
+
             // OFFLINE OLAN KULLANICI ŞİMDİ GİRDİĞİNDE:
             // Kullanıcı çevrimdışıyken gelmiş olan tüm okunmamış mesajları anında teslim et!
             try {
@@ -788,10 +892,10 @@ async function startServer() {
             }
         });
 
-        // Birebir Özel Mesaj Gönderme (Lite SQL'e Kalıcı Olarak Kaydedilir & Offline Kullanıcıya Saklanır)
+        // Birebir Özel Mesaj Gönderme (Mükerrer Gönderim Korumalı & Lite SQL Kayıtlı)
         socket.on('chat:send_message', async (msg, ack) => {
             let sender = socketToUserMap.get(socket.id);
-            if (!sender && msg.token) {
+            if (!sender && msg && msg.token) {
                 const session = await db.getSession(msg.token);
                 if (session) {
                     const existing = await db.getUser(session.username);
@@ -812,7 +916,7 @@ async function startServer() {
                 return;
             }
 
-            const recipient = (msg.recipient || '').trim();
+            const recipient = ((msg && msg.recipient) || '').trim();
             if (!recipient) {
                 if (ack) ack({ success: false, error: 'Alıcı seçilmedi' });
                 return;
@@ -820,6 +924,24 @@ async function startServer() {
 
             const senderKey = normalizeKey(sender.username);
             const recipientKey = normalizeKey(recipient);
+            const cleanText = (msg.text || '').trim();
+
+            // 1. Mükerrer tempId koruması (Mesajların iki kere gitmesini kesin olarak engeller)
+            if (msg.tempId && processedTempIds.has(msg.tempId)) {
+                const existingSaved = processedTempIds.get(msg.tempId);
+                if (ack) ack({ success: true, message: existingSaved, isRecipientOnline: existingSaved.isRecipientOnline, deduplicated: true });
+                return;
+            }
+
+            // 2. Aynı saniye içinde (600ms) aynı metnin çift tetiklenmesini engelle
+            if (cleanText && !msg.file) {
+                const lastSent = lastMessageBySender.get(senderKey);
+                const nowMs = Date.now();
+                if (lastSent && lastSent.recipientKey === recipientKey && lastSent.text === cleanText && (nowMs - lastSent.time) < 600) {
+                    if (ack) ack({ success: true, message: lastSent.msg, isRecipientOnline: lastSent.msg.isRecipientOnline, deduplicated: true });
+                    return;
+                }
+            }
 
             // Alıcı şu an bağlı ve Online mı kontrol et
             const isRecipientOnline = onlineUserSockets.has(recipientKey) && onlineUserSockets.get(recipientKey).size > 0;
@@ -837,25 +959,42 @@ async function startServer() {
             });
 
             savedMsg.isRecipientOnline = isRecipientOnline;
+            if (msg.tempId) {
+                savedMsg.tempId = msg.tempId;
+                processedTempIds.set(msg.tempId, savedMsg);
+                if (processedTempIds.size > 500) {
+                    const firstKey = processedTempIds.keys().next().value;
+                    processedTempIds.delete(firstKey);
+                }
+            }
 
-            // GİZLİLİK GARANTİSİ:
-            // Gönderenin ekranına mesajı onayla
+            if (cleanText && !msg.file) {
+                lastMessageBySender.set(senderKey, {
+                    recipientKey,
+                    text: cleanText,
+                    time: Date.now(),
+                    msg: savedMsg
+                });
+            }
+
+            // Önce gönderenin ack callback'ini yanıtla (böylece geçici baloncuk ID'si anında güncellenir)
+            if (ack) ack({ success: true, message: savedMsg, isRecipientOnline });
+
+            // Gönderenin diğer açık sekmelerine ve alıcının odasına ilet
             io.to('user:' + senderKey).emit('chat:message', savedMsg);
 
-            // Alıcı Online ise anında alıcının odasına ilet
-            if (recipientKey !== senderKey && isRecipientOnline) {
+            if (recipientKey !== senderKey) {
                 io.to('user:' + recipientKey).emit('chat:message', savedMsg);
             }
 
-            // Sistem bildirim kuyruğuna ekle (Masaüstü Tray ve Arka Plan için)
+            // Sistem bildirim kuyruğuna ekle (Program kapalıyken ekrana düşmesi için)
             addSystemNotification({
                 type: 'message',
+                msgId: savedMsg.id,
                 sender: sender.username,
                 recipient: recipient,
                 text: msg.text || (msg.file ? '📎 Dosya / Fotoğraf paylaştı' : 'Yeni bir mesaj gönderdi')
             });
-
-            if (ack) ack({ success: true, message: savedMsg, isRecipientOnline });
         });
 
         // Mesajları Okundu Olarak İşaretleme
@@ -975,35 +1114,43 @@ async function startServer() {
         });
 
         // ==========================================
-        // BİREBİR WEBRTC SESLİ / GÖRÜNTÜLÜ ARAMA
+        // BİREBİR WEBRTC + GERÇEK ZAMANLI SES RÖLESİ ARAMA SİSTEMİ
+        // Program kapalı olsa bile aramayı bekletir ve pencere açıldığında ekrana düşürür!
         // ==========================================
         socket.on('call:initiate', (data) => {
             const sender = socketToUserMap.get(socket.id);
             if (!sender) return;
 
             const recipient = (data.recipient || '').trim();
+            if (!recipient) return;
             const recipientKey = normalizeKey(recipient);
-            const isOnline = onlineUserSockets.has(recipientKey) && onlineUserSockets.get(recipientKey).size > 0;
+            const callId = 'call_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5);
 
-            if (!isOnline) {
-                socket.emit('call:error', { message: `${recipient} şu anda Offline, aranamıyor.` });
-                return;
-            }
+            const callPayload = {
+                callId,
+                callerUsername: sender.username,
+                callerAvatar: sender.avatar,
+                callType: data.callType || 'voice',
+                callerSocketId: socket.id,
+                recipient: recipient,
+                createdAt: Date.now()
+            };
 
-            // Sistem bildirim kuyruğuna arama uyarısı ekle
+            // Program kapalıyken açıldığında teslim etmek için bekleyen aramalara kaydet
+            pendingCalls.set(recipientKey, callPayload);
+
+            // Sistem bildirim kuyruğuna arama uyarısı ekle (MSJ.exe ve PWA arka plan dinleyicisi ekranı açar)
             addSystemNotification({
                 type: 'call',
+                callId,
                 sender: sender.username,
+                callerAvatar: sender.avatar,
                 recipient: recipient,
                 callType: data.callType || 'voice'
             });
 
-            io.to('user:' + recipientKey).emit('call:incoming', {
-                callerUsername: sender.username,
-                callerAvatar: sender.avatar,
-                callType: data.callType || 'voice',
-                callerSocketId: socket.id
-            });
+            // Alıcı şu an açıksa anında gönder
+            io.to('user:' + recipientKey).emit('call:incoming', callPayload);
         });
 
         // Arayan Kişi Açılmadan Aramayı İptal Ettiğinde
@@ -1011,12 +1158,23 @@ async function startServer() {
             const sender = socketToUserMap.get(socket.id);
             if (!sender) return;
 
-            if (data.targetSocketId) {
+            if (data && data.recipient) {
+                pendingCalls.delete(normalizeKey(data.recipient));
+            }
+
+            addSystemNotification({
+                type: 'call_ended',
+                sender: sender.username,
+                recipient: (data && data.recipient) || ''
+            });
+
+            if (data && data.targetSocketId) {
                 io.to(data.targetSocketId).emit('call:cancelled', {
                     callerUsername: sender.username,
                     reason: 'Arama iptal edildi'
                 });
-            } else if (data.recipient) {
+            }
+            if (data && data.recipient) {
                 const recipientKey = normalizeKey(data.recipient);
                 io.to('user:' + recipientKey).emit('call:cancelled', {
                     callerUsername: sender.username,
@@ -1029,6 +1187,8 @@ async function startServer() {
         socket.on('call:missed', async (data) => {
             const sender = socketToUserMap.get(socket.id);
             if (!sender || !data.recipient) return;
+
+            pendingCalls.delete(normalizeKey(data.recipient));
 
             try {
                 const missedMsg = await db.saveMessage({
@@ -1053,33 +1213,108 @@ async function startServer() {
         });
 
         socket.on('call:accept', (data) => {
-            if (data.callerSocketId) {
-                io.to(data.callerSocketId).emit('call:accepted', {
-                    responderSocketId: socket.id
-                });
+            const responder = socketToUserMap.get(socket.id);
+            if (responder) {
+                pendingCalls.delete(normalizeKey(responder.username));
+            }
+            if (data && data.callerUsername) {
+                for (const [k, v] of pendingCalls.entries()) {
+                    if (normalizeKey(v.callerUsername) === normalizeKey(data.callerUsername)) {
+                        pendingCalls.delete(k);
+                    }
+                }
+            }
+
+            addSystemNotification({
+                type: 'call_ended',
+                sender: (data && data.callerUsername) || '',
+                recipient: responder ? responder.username : ''
+            });
+
+            const acceptPayload = {
+                responderSocketId: socket.id,
+                responderUsername: responder ? responder.username : ''
+            };
+
+            if (data && data.callerSocketId) {
+                io.to(data.callerSocketId).emit('call:accepted', acceptPayload);
+            } else if (data && data.callerUsername) {
+                io.to('user:' + normalizeKey(data.callerUsername)).emit('call:accepted', acceptPayload);
             }
         });
 
         socket.on('call:reject', (data) => {
-            if (data.callerSocketId) {
-                io.to(data.callerSocketId).emit('call:rejected', {
-                    reason: data.reason || 'Arama reddedildi'
-                });
+            const responder = socketToUserMap.get(socket.id);
+            if (responder) {
+                pendingCalls.delete(normalizeKey(responder.username));
+            }
+
+            addSystemNotification({
+                type: 'call_ended',
+                sender: (data && data.callerUsername) || '',
+                recipient: responder ? responder.username : ''
+            });
+
+            const rejectPayload = {
+                reason: (data && data.reason) || 'Arama reddedildi'
+            };
+
+            if (data && data.callerSocketId) {
+                io.to(data.callerSocketId).emit('call:rejected', rejectPayload);
+            } else if (data && data.callerUsername) {
+                io.to('user:' + normalizeKey(data.callerUsername)).emit('call:rejected', rejectPayload);
             }
         });
 
         socket.on('call:signal', (data) => {
+            if (!data || !data.signal) return;
+            const sender = socketToUserMap.get(socket.id);
+            const payload = {
+                senderSocketId: socket.id,
+                senderUsername: sender ? sender.username : '',
+                signal: data.signal
+            };
             if (data.targetSocketId) {
-                io.to(data.targetSocketId).emit('call:signal', {
-                    senderSocketId: socket.id,
-                    signal: data.signal
-                });
+                io.to(data.targetSocketId).emit('call:signal', payload);
+            } else if (data.targetUsername) {
+                io.to('user:' + normalizeKey(data.targetUsername)).emit('call:signal', payload);
+            }
+        });
+
+        // GERÇEK ZAMANLI DÜŞÜK GECİKMELİ SES RÖLESİ (WebRTC UDP engellense bile sesin %100 gitmesini ve gelmesini sağlar)
+        socket.on('call:audio_chunk', (data) => {
+            if (!data || !data.audio) return;
+            const payload = {
+                senderSocketId: socket.id,
+                audio: data.audio,
+                sampleRate: data.sampleRate || 16000
+            };
+            if (data.targetSocketId) {
+                socket.to(data.targetSocketId).volatile.emit('call:audio_chunk', payload);
+            } else if (data.targetUsername) {
+                socket.to('user:' + normalizeKey(data.targetUsername)).volatile.emit('call:audio_chunk', payload);
             }
         });
 
         socket.on('call:end', (data) => {
-            if (data.targetSocketId) {
+            const sender = socketToUserMap.get(socket.id);
+            if (sender) {
+                pendingCalls.delete(normalizeKey(sender.username));
+            }
+            if (data && data.targetUsername) {
+                pendingCalls.delete(normalizeKey(data.targetUsername));
+            }
+
+            addSystemNotification({
+                type: 'call_ended',
+                sender: sender ? sender.username : '',
+                recipient: (data && data.targetUsername) || ''
+            });
+
+            if (data && data.targetSocketId) {
                 io.to(data.targetSocketId).emit('call:ended');
+            } else if (data && data.targetUsername) {
+                io.to('user:' + normalizeKey(data.targetUsername)).emit('call:ended');
             }
         });
 
