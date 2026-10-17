@@ -173,6 +173,7 @@ const btnChatMenu = document.getElementById('btnChatMenu');
 const chatDropdownMenu = document.getElementById('chatDropdownMenu');
 const menuItemChatAudioSettings = document.getElementById('menuItemChatAudioSettings');
 const menuItemClearChat = document.getElementById('menuItemClearChat');
+const menuItemDeleteUser = document.getElementById('menuItemDeleteUser');
 const menuItemContactInfo = document.getElementById('menuItemContactInfo');
 const menuItemCloseChat = document.getElementById('menuItemCloseChat');
 const menuItemSwitchUser = document.getElementById('menuItemSwitchUser');
@@ -253,6 +254,7 @@ const btnProfileNewUser = document.getElementById('btnProfileNewUser');
 const btnProfileSwitchUser = document.getElementById('btnProfileSwitchUser');
 const btnProfileChangePass = document.getElementById('btnProfileChangePass');
 const btnProfileLogout = document.getElementById('btnProfileLogout');
+const btnProfileDeleteAccount = document.getElementById('btnProfileDeleteAccount');
 
 // Ses Motoru (Bildirim, Çalma ve Arama Sesi)
 const remoteAudio = document.getElementById('remoteAudio');
@@ -738,8 +740,155 @@ function updateUnreadBadges() {
 }
 
 // ==========================================================
-// 1. KULLANICI GİRİŞİ, KAYIT VE KALICI OTURUM YÖNETİMİ
+// 1. KULLANICI GİRİŞİ, KAYIT VE KALICI KULLANICI YÖNETİMİ
+// (Kayıtlı kullanıcılar asla otomatik silinmez; yalnızca kullanıcı kendi isterse silinir)
 // ==========================================================
+
+function getPermanentLocalUsers() {
+    try {
+        const raw = localStorage.getItem('msj_permanent_users');
+        if (raw) {
+            const parsed = JSON.parse(raw);
+            if (Array.isArray(parsed)) return parsed;
+        }
+    } catch (e) {}
+    return [];
+}
+
+function savePermanentLocalUsers(usersArray) {
+    if (!Array.isArray(usersArray)) return;
+    const existing = getPermanentLocalUsers();
+    const map = new Map();
+    existing.forEach(u => {
+        if (u && u.username) map.set(normalizeKey(u.username), { username: u.username, avatar: u.avatar || '/avatars/default.svg' });
+    });
+    usersArray.forEach(u => {
+        if (u && u.username) map.set(normalizeKey(u.username), { username: u.username, avatar: u.avatar || '/avatars/default.svg' });
+    });
+    const merged = Array.from(map.values());
+    try {
+        localStorage.setItem('msj_permanent_users', JSON.stringify(merged));
+    } catch (e) {}
+    return merged;
+}
+
+function removePermanentLocalUser(usernameToRemove) {
+    const key = normalizeKey(usernameToRemove);
+    if (!key) return;
+    try {
+        const existing = getPermanentLocalUsers().filter(u => normalizeKey(u.username) !== key);
+        localStorage.setItem('msj_permanent_users', JSON.stringify(existing));
+    } catch (e) {}
+    try {
+        const cachedRaw = localStorage.getItem('msj_cached_contacts');
+        if (cachedRaw) {
+            const cached = JSON.parse(cachedRaw).filter(u => normalizeKey(u.username) !== key);
+            localStorage.setItem('msj_cached_contacts', JSON.stringify(cached));
+        }
+    } catch (e) {}
+    if (normalizeKey(localStorage.getItem('msj_saved_username') || '') === key) {
+        localStorage.removeItem('msj_saved_username');
+        localStorage.removeItem('msj_token');
+        sessionStorage.removeItem('msj_token');
+        localStorage.removeItem('msj_user');
+    }
+}
+
+async function syncPermanentUsersWithServer() {
+    try {
+        const localUsers = getPermanentLocalUsers();
+        const savedUsername = localStorage.getItem('msj_saved_username');
+        if (savedUsername) {
+            localUsers.push({ username: savedUsername, avatar: '/avatars/default.svg' });
+        }
+        const cachedRaw = localStorage.getItem('msj_cached_contacts');
+        if (cachedRaw) {
+            try {
+                const cached = JSON.parse(cachedRaw);
+                if (Array.isArray(cached)) {
+                    cached.forEach(c => {
+                        if (c && c.username) localUsers.push({ username: c.username, avatar: c.avatar });
+                    });
+                }
+            } catch (e) {}
+        }
+        if (localUsers.length > 0) {
+            const res = await fetch('/api/users/sync', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ users: localUsers })
+            });
+            const data = await res.json();
+            if (data && data.success && Array.isArray(data.users)) {
+                savePermanentLocalUsers(data.users);
+                return data.users;
+            }
+        }
+    } catch (e) {}
+    return null;
+}
+
+// Kullanıcı kendi isteğiyle bir kaydı silmek istediğinde çağrılır
+window.requestDeleteUser = async function(usernameToDelete) {
+    if (!usernameToDelete) return;
+    const confirmed = confirm(`"${usernameToDelete}" adlı kayıtlı kullanıcıyı kalıcı olarak silmek istediğinize emin misiniz?\n\n(İptal derseniz kullanıcı kayıtlı kalmaya devam eder.)`);
+    if (!confirmed) return;
+
+    try {
+        const res = await fetch('/api/users/' + encodeURIComponent(usernameToDelete), {
+            method: 'DELETE'
+        });
+        const data = await res.json();
+        if (data && data.success) {
+            removePermanentLocalUser(usernameToDelete);
+            contactsList = contactsList.filter(c => normalizeKey(c.username) !== normalizeKey(usernameToDelete));
+            renderChatsList(contactsList);
+
+            if (activeContact && normalizeKey(activeContact.username) === normalizeKey(usernameToDelete)) {
+                closeActiveChat();
+            }
+
+            if (currentUser && normalizeKey(currentUser.username) === normalizeKey(usernameToDelete)) {
+                currentUser = null;
+                closeProfileModal();
+                await loadRegisteredUsersDropdown();
+                showPasswordPrompt('');
+            } else {
+                await loadRegisteredUsersDropdown();
+                showStatusToast(`${usernameToDelete} kayıtlardan silindi`, false);
+            }
+        } else {
+            alert((data && data.error) || 'Kullanıcı silinemedi.');
+        }
+    } catch (e) {
+        alert('Sunucuya bağlanılamadı.');
+    }
+};
+
+async function quickLoginAsRegisteredUser(username) {
+    if (!username) return false;
+    try {
+        const token = localStorage.getItem('msj_token') || sessionStorage.getItem('msj_token') || '';
+        const autoRes = await fetch('/api/auth/auto_login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, token })
+        });
+        const autoData = await autoRes.json();
+        if (autoData && autoData.success && autoData.user) {
+            localStorage.setItem('msj_saved_username', autoData.user.username);
+            localStorage.setItem('msj_auto_login', 'true');
+            localStorage.setItem('msj_token', autoData.token);
+            sessionStorage.setItem('msj_token', autoData.token);
+            localStorage.setItem('msj_user', JSON.stringify(autoData.user));
+            savePermanentLocalUsers([autoData.user]);
+            onUserAuthenticated(autoData.user, autoData.token);
+            authModal.style.display = 'none';
+            return true;
+        }
+    } catch (e) {}
+    return false;
+}
 
 async function initAuth() {
     // 0. Önceden kayıtlı ve önbelleğe alınmış sohbet listesi varsa ANINDA ekrana bas
@@ -755,70 +904,73 @@ async function initAuth() {
         } catch (e) {}
     }
 
+    // Kalıcı kullanıcıları sunucuyla senkronize et (hiçbir kayıtlı kullanıcı kaybolmasın)
+    syncPermanentUsersWithServer().catch(() => {});
+
+    const urlParams = new URLSearchParams(window.location.search);
+    const autoUserParam = urlParams.get('autoUser') || '';
+
     const token = localStorage.getItem('msj_token') || sessionStorage.getItem('msj_token');
     const savedUserStr = localStorage.getItem('msj_user');
-    const savedUsername = localStorage.getItem('msj_saved_username') || '';
-    const isAutoLogin = localStorage.getItem('msj_auto_login') === 'true';
+    let savedUsername = autoUserParam || localStorage.getItem('msj_saved_username') || '';
+    if (!savedUsername && savedUserStr) {
+        try { savedUsername = JSON.parse(savedUserStr).username || ''; } catch (e) {}
+    }
 
-    // 1. Eğer yerel hafızada kalıcı token varsa (Beni Hatırla aktifken) doğrudan giriş yapmayı dene
-    // Sunucu yeni açılıyorsa birkaç saniye bekle ve tekrar dene (hemen şifre ekranına atma!)
+    // Varsayılan olarak kayıtlı kullanıcı varsa otomatik girişi açık tut (Böylece mesaj/arama geldiğinde anında Online olur)
+    const isAutoLogin = localStorage.getItem('msj_auto_login') !== 'false' || Boolean(autoUserParam);
+
+    // Eğer URL'de autoUser parametresiyle uyandırılmışsa (ör. arama veya mesaj geldiğinde) doğrudan o kullanıcıyla giriş yap
+    if (autoUserParam) {
+        const loggedIn = await quickLoginAsRegisteredUser(autoUserParam);
+        if (loggedIn) return;
+    }
+
+    // 1. Eğer yerel hafızada kalıcı token varsa doğrudan giriş yapmayı dene
     if (token && isAutoLogin) {
         let attempts = 0;
         let verified = false;
 
-        while (attempts < 5 && !verified) {
+        while (attempts < 4 && !verified) {
             try {
                 const res = await fetch('/api/auth/verify', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ token })
+                    body: JSON.stringify({ token, username: savedUsername })
                 });
                 const data = await res.json();
                 if (data.success && data.user) {
+                    localStorage.setItem('msj_saved_username', data.user.username);
+                    localStorage.setItem('msj_user', JSON.stringify(data.user));
+                    savePermanentLocalUsers([data.user]);
                     onUserAuthenticated(data.user, token);
                     authModal.style.display = 'none';
                     return;
                 } else {
-                    // Token geçersizse döngüden çık
                     break;
                 }
             } catch (e) {
-                // Sunucu henüz açılıyor olabilir, 600ms bekle ve tekrar dene
                 attempts++;
-                if (attempts < 5) {
-                    await new Promise(r => setTimeout(r, 600));
+                if (attempts < 4) {
+                    await new Promise(r => setTimeout(r, 500));
                 }
             }
         }
     }
 
-    // 2. Token geçersiz veya yoksa, ama bu cihazda kayıtlı bir kullanıcı ve "Beni Hatırla" varsa:
-    // Otomatik giriş API'si ile şifre sormadan oturumu yenile
+    // 2. Token geçersiz veya yoksa, ama bu cihazda kayıtlı bir kullanıcı varsa:
+    // Otomatik giriş API'si ile şifre sormadan oturumu yenile ve Online yap
     if (savedUsername && isAutoLogin) {
-        try {
-            const autoRes = await fetch('/api/auth/auto_login', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username: savedUsername, token })
-            });
-            const autoData = await autoRes.json();
-            if (autoData.success && autoData.user) {
-                localStorage.setItem('msj_token', autoData.token);
-                localStorage.setItem('msj_user', JSON.stringify(autoData.user));
-                onUserAuthenticated(autoData.user, autoData.token);
+        const loggedIn = await quickLoginAsRegisteredUser(savedUsername);
+        if (loggedIn) return;
+
+        if (savedUserStr) {
+            try {
+                const localUser = JSON.parse(savedUserStr);
+                onUserAuthenticated(localUser, token || 'local_session');
                 authModal.style.display = 'none';
                 return;
-            }
-        } catch (e) {
-            // Çevrimdışı / yerel kullanıcı yedeği
-            if (savedUserStr) {
-                try {
-                    const localUser = JSON.parse(savedUserStr);
-                    onUserAuthenticated(localUser, token || 'local_session');
-                    authModal.style.display = 'none';
-                    return;
-                } catch(err) {}
-            }
+            } catch(err) {}
         }
     }
 
@@ -866,8 +1018,10 @@ function showPasswordPrompt(username) {
     btnAuthSubmit.textContent = 'Giriş Yap';
     btnToggleAuthMode.textContent = 'Hesabınız yok mu? Yeni Kullanıcı Aç';
 
+    loadRegisteredUsersDropdown();
+
     if (username) {
-        authSubtitle.textContent = 'Devam etmek için şifrenizi girin';
+        authSubtitle.textContent = 'Kayıtlı hesabınıza giriş yapın veya listeden seçin';
         rememberedUserBox.style.display = 'flex';
         rememberedName.textContent = username;
         rememberedAvatar.src = `/avatars/default.svg`;
@@ -877,7 +1031,7 @@ function showPasswordPrompt(username) {
         if (rowForgotPassword) rowForgotPassword.style.display = 'block';
         inputPassword.focus();
     } else {
-        authSubtitle.textContent = 'Kullanıcı adı ve şifrenizle giriş yapın';
+        authSubtitle.textContent = 'Kayıtlı kullanıcı seçin veya kullanıcı adınızı yazın';
         rememberedUserBox.style.display = 'none';
         fieldUsernameSelect.style.display = 'block';
         inputPassword.value = '';
@@ -887,43 +1041,72 @@ function showPasswordPrompt(username) {
 }
 
 async function loadRegisteredUsersDropdown() {
+    await syncPermanentUsersWithServer();
     let attempts = 0;
     while (attempts < 4) {
         try {
             const res = await fetch('/api/users/registered');
             const data = await res.json();
             if (data.success && Array.isArray(data.users)) {
+                savePermanentLocalUsers(data.users);
                 selectRegisteredUser.innerHTML = '<option value="">-- Kayıtlı Kullanıcı Seçin --</option>';
                 if (quickUsersList) quickUsersList.innerHTML = '';
 
                 data.users.forEach(u => {
                     const opt = document.createElement('option');
                     opt.value = u.username;
-                    const statusSuffix = u.lastSeen === 'Online' ? ' (Online)' : ' (Offline)';
+                    const statusSuffix = u.lastSeen === 'Online' ? ' (🟢 Online)' : ' (⚪ Offline)';
                     opt.textContent = `${u.username}${statusSuffix}`;
                     selectRegisteredUser.appendChild(opt);
 
                     if (quickUsersList) {
+                        const chipWrap = document.createElement('div');
+                        chipWrap.style.display = 'inline-flex';
+                        chipWrap.style.alignItems = 'center';
+                        chipWrap.style.gap = '2px';
+
                         const chip = document.createElement('button');
                         chip.type = 'button';
                         chip.className = 'quick-user-chip';
+                        chip.title = `${u.username} olarak hızlı giriş yap`;
                         chip.innerHTML = `
                             <img src="${u.avatar || '/avatars/default.svg'}" class="avatar-mini" alt="${escapeHtml(u.username)}">
-                            <span><strong>${escapeHtml(u.username)}</strong></span>
+                            <span><strong>${escapeHtml(u.username)}</strong> <small style="opacity:0.8;">${u.lastSeen === 'Online' ? '🟢' : '⚪'}</small></span>
                         `;
-                        chip.addEventListener('click', () => {
-                            inputUsername.value = u.username;
-                            rememberedName.textContent = u.username;
-                            rememberedAvatar.src = u.avatar || '/avatars/default.svg';
-                            rememberedUserBox.style.display = 'flex';
-                            fieldUsernameSelect.style.display = 'none';
-                            if (rowForgotPassword) rowForgotPassword.style.display = 'block';
-                            inputPassword.value = '';
-                            inputPassword.focus();
+                        chip.addEventListener('click', async () => {
+                            // Kayıtlı kullanıcıya tıklandığında doğrudan hızlı giriş yap (veya şifre alanını doldur)
+                            const ok = await quickLoginAsRegisteredUser(u.username);
+                            if (!ok) {
+                                inputUsername.value = u.username;
+                                rememberedName.textContent = u.username;
+                                rememberedAvatar.src = u.avatar || '/avatars/default.svg';
+                                rememberedUserBox.style.display = 'flex';
+                                fieldUsernameSelect.style.display = 'none';
+                                if (rowForgotPassword) rowForgotPassword.style.display = 'block';
+                                inputPassword.value = '';
+                                inputPassword.focus();
+                            }
                         });
-                        quickUsersList.appendChild(chip);
+
+                        const delBtn = document.createElement('button');
+                        delBtn.type = 'button';
+                        delBtn.title = `${u.username} kullanıcısını sil`;
+                        delBtn.textContent = '🗑️';
+                        delBtn.style.cssText = 'background:transparent;border:none;cursor:pointer;font-size:13px;padding:4px;opacity:0.75;';
+                        delBtn.addEventListener('click', (e) => {
+                            e.stopPropagation();
+                            window.requestDeleteUser(u.username);
+                        });
+
+                        chipWrap.appendChild(chip);
+                        chipWrap.appendChild(delBtn);
+                        quickUsersList.appendChild(chipWrap);
                     }
                 });
+
+                if (selectRegisteredUser) {
+                    selectRegisteredUser.style.display = data.users.length > 0 ? 'block' : 'none';
+                }
 
                 if (quickUsersContainer) {
                     quickUsersContainer.style.display = data.users.length > 0 ? 'block' : 'none';
@@ -942,7 +1125,7 @@ async function loadRegisteredUsersDropdown() {
         } catch (e) {
             attempts++;
             if (attempts < 4) {
-                await new Promise(r => setTimeout(r, 600));
+                await new Promise(r => setTimeout(r, 500));
             }
         }
     }
@@ -952,10 +1135,13 @@ async function loadRegisteredUsersDropdown() {
     return 0;
 }
 
-selectRegisteredUser.addEventListener('change', () => {
+selectRegisteredUser.addEventListener('change', async () => {
     if (selectRegisteredUser.value) {
         inputUsername.value = selectRegisteredUser.value;
-        inputPassword.focus();
+        const ok = await quickLoginAsRegisteredUser(selectRegisteredUser.value);
+        if (!ok) {
+            inputPassword.focus();
+        }
     }
 });
 
@@ -1183,8 +1369,11 @@ document.getElementById('authForm').addEventListener('submit', async (e) => {
 function onUserAuthenticated(user, token) {
     currentUser = user;
     menuUsernameDisplay.textContent = user.username;
+    savePermanentLocalUsers([user]);
+    localStorage.setItem('msj_saved_username', user.username);
+    localStorage.setItem('msj_auto_login', 'true');
 
-    // Soket sunucusuna kendi oturumunu bildir
+    // Soket sunucusuna kendi oturumunu bildir (Anında Online durumuna geçer)
     socket.emit('user:join', { token, username: user.username });
 
     // Service Worker'a aktif kullanıcıyı bildir (Arka planda bildirim sorgulaması için)
@@ -1219,6 +1408,7 @@ function checkUrlDeepLinkActions() {
         const params = new URLSearchParams(window.location.search);
         const openChatUser = params.get('openChat');
         const autoAcceptCall = params.get('autoAcceptCall');
+        const incomingCall = params.get('incomingCall');
         if (openChatUser) {
             setTimeout(() => {
                 openChatForSender(openChatUser);
@@ -1229,6 +1419,10 @@ function checkUrlDeepLinkActions() {
                             btnAcceptCall.click();
                         }
                     }, 600);
+                } else if (incomingCall === '1' && currentUser) {
+                    // Bekleyen aramayı sunucudan hemen tetikle
+                    const token = localStorage.getItem('msj_token') || sessionStorage.getItem('msj_token') || '';
+                    socket.emit('user:join', { token, username: currentUser.username });
                 }
             }, 300);
             // URL'yi temizle
@@ -1244,6 +1438,9 @@ function checkUrlDeepLinkActions() {
 async function loadChatsList() {
     let token = localStorage.getItem('msj_token') || sessionStorage.getItem('msj_token');
 
+    // Önce yerel kalıcı kullanıcıları sunucuyla eşitle ki hiçbir kayıtlı kullanıcı eksik kalmasın
+    await syncPermanentUsersWithServer();
+
     if (token) {
         try {
             const res = await fetch('/api/chats', {
@@ -1253,6 +1450,7 @@ async function loadChatsList() {
 
             if (data.success && data.chats) {
                 contactsList = data.chats;
+                savePermanentLocalUsers(contactsList);
                 localStorage.setItem('msj_cached_contacts', JSON.stringify(contactsList));
                 renderChatsList(contactsList);
                 return;
@@ -1267,6 +1465,7 @@ async function loadChatsList() {
         const regRes = await fetch('/api/users/registered');
         const regData = await regRes.json();
         if (regData && regData.success && Array.isArray(regData.users)) {
+            savePermanentLocalUsers(regData.users);
             const filtered = currentUser
                 ? regData.users.filter(u => normalizeKey(u.username) !== normalizeKey(currentUser.username))
                 : regData.users;
@@ -1303,7 +1502,7 @@ function renderChatsList(chats) {
         item.dataset.username = contact.username;
         item.style.cursor = 'pointer';
 
-        let lastSnippet = contact.isOnline ? '🟢 Çevrimiçi' : '⚪ Çevrimdışı';
+        let lastSnippet = contact.isOnline ? '🟢 Çevrimiçi (Online)' : '⚪ Çevrimdışı (Mesaj & Arama Açık)';
         let isUnreadSnippet = false;
 
         if (contact.lastMessage) {
@@ -1332,19 +1531,44 @@ function renderChatsList(chats) {
                         ${hasUnread ? `<span class="unread-pill" title="Okunmamış Mesaj"><span style="font-size: 11px;">✉️</span> ${contact.unreadCount}</span>` : ''}
                     </div>
                 </div>
-                <div class="chat-bottom-line">
+                <div class="chat-bottom-line" style="gap: 6px;">
                     <div class="chat-last-msg-preview ${isUnreadSnippet ? 'unread' : ''}" title="${escapeHtml(lastSnippet)}">
                         ${isUnreadSnippet ? '<span class="msg-unread-icon">✉️</span>' : ''}
                         <span>${escapeHtml(lastSnippet)}</span>
                     </div>
-                    <button type="button" class="btn-chat-action ${hasUnread ? 'unread' : ''}">
-                        ${hasUnread ? `✉️ Oku (${contact.unreadCount})` : '💬 Mesaj / Ara'}
-                    </button>
+                    <div class="contact-quick-actions" style="display: flex; align-items: center; gap: 4px; flex-shrink: 0;">
+                        <button type="button" class="btn-chat-action ${hasUnread ? 'unread' : ''}" data-quick-action="message" title="Mesaj Gönder (Offline olsa bile iletilir)">
+                            ${hasUnread ? `✉️ Oku (${contact.unreadCount})` : '💬 Mesaj'}
+                        </button>
+                        <button type="button" class="btn-chat-action" data-quick-action="voice" title="Sesli Ara (Offline olsa bile cihazı uyandırır ve çalar)" style="padding: 4px 8px;">
+                            📞
+                        </button>
+                        <button type="button" class="btn-chat-action" data-quick-action="video" title="Görüntülü Ara (Offline olsa bile cihazı uyandırır ve çalar)" style="padding: 4px 8px;">
+                            📹
+                        </button>
+                        <button type="button" class="btn-chat-action" data-quick-action="delete" title="Kullanıcıyı Sil (Kayıtlardan Kaldır)" style="padding: 4px 7px; background: rgba(234, 0, 56, 0.14); color: #ff6b81; border-color: rgba(234, 0, 56, 0.3);">
+                            🗑️
+                        </button>
+                    </div>
                 </div>
             </div>
         `;
 
-        item.addEventListener('click', () => {
+        item.addEventListener('click', (e) => {
+            const actionBtn = e.target.closest('[data-quick-action]');
+            if (actionBtn) {
+                e.stopPropagation();
+                const action = actionBtn.dataset.quickAction;
+                if (action === 'delete') {
+                    window.requestDeleteUser(contact.username);
+                    return;
+                }
+                selectContact(contact);
+                if (action === 'voice' || action === 'video') {
+                    setTimeout(() => initiateCall(action), 250);
+                }
+                return;
+            }
             selectContact(contact);
         });
 
@@ -1453,7 +1677,7 @@ function renderNewChatUsers(list) {
                 <div class="new-chat-user-info">
                     <span class="new-chat-username">${escapeHtml(contact.username)}</span>
                     <span class="new-chat-status ${contact.isOnline ? 'online' : 'offline'}">
-                        ${contact.isOnline ? '🟢 Online' : '⚪ Offline'}
+                        ${contact.isOnline ? '🟢 Online' : '⚪ Offline (Mesaj & Arama Açık)'}
                     </span>
                 </div>
             </div>
@@ -1467,11 +1691,22 @@ function renderNewChatUsers(list) {
                 <button type="button" class="btn-new-chat-action call" title="Görüntülü Ara" data-action="video">
                     📹
                 </button>
+                <button type="button" class="btn-new-chat-action delete" title="Bu Kullanıcıyı Sil" data-action="delete" style="background: rgba(234, 0, 56, 0.16); color: #ff6b81;">
+                    🗑️
+                </button>
             </div>
         `;
 
         // Satıra veya butonlara basıldığında doğrudan o kullanıcı seçilip yazışma ekranı açılsın
         item.addEventListener('click', (e) => {
+            const delBtn = e.target.closest('.btn-new-chat-action.delete');
+            if (delBtn) {
+                e.stopPropagation();
+                window.requestDeleteUser(contact.username).then(() => {
+                    renderNewChatUsers(contactsList);
+                });
+                return;
+            }
             const callBtn = e.target.closest('.btn-new-chat-action.call');
             if (callBtn) {
                 const actionType = callBtn.dataset.action;
@@ -2178,15 +2413,127 @@ socket.on('user:status_change', (data) => {
             headerOnlineDot.style.display = 'none';
         }
     }
+
+    if (data.isOnline && currentCallTarget && normalizeKey(currentCallTarget) === normalizeKey(data.username)) {
+        if (outgoingCallModal && outgoingCallModal.style.display === 'flex' && outgoingCallStatus) {
+            outgoingCallStatus.textContent = 'Çalıyor (Karşı cihaz Online oldu)...';
+        }
+    }
 });
 
 // Yeni Bir Kullanıcı Kayıt Olduğunda
 socket.on('user:new_registered', (data) => {
+    if (data && data.username) {
+        savePermanentLocalUsers([{ username: data.username, avatar: data.avatar || '/avatars/default.svg' }]);
+    }
     if (currentUser && normalizeKey(data.username) !== normalizeKey(currentUser.username)) {
         showStatusToast(data.username, true);
         playStatusChime(true);
         loadChatsList();
         loadRegisteredUsersDropdown();
+    }
+});
+
+// Kullanıcı Kendi İsteğiyle Silindiğinde
+socket.on('user:deleted', (data) => {
+    if (!data || !data.username) return;
+    removePermanentLocalUser(data.username);
+    contactsList = contactsList.filter(c => normalizeKey(c.username) !== normalizeKey(data.username));
+    renderChatsList(contactsList);
+    if (activeContact && normalizeKey(activeContact.username) === normalizeKey(data.username)) {
+        closeActiveChat();
+    }
+    loadRegisteredUsersDropdown();
+});
+
+// CEP TELEFONU GİBİ OTOMATİK UYANMA VE ONLINE OLMA SİSTEMİ:
+// Kullanıcı Offline veya çıkış yapmış/beklemede olsa bile kendisine mesaj ya da arama geldiğinde
+// otomatik olarak Online olur ve ekrana arama / mesaj bildirimi düşer.
+socket.on('system:wakeup', async (data) => {
+    if (!data || !data.targetUsername) return;
+
+    // Eğer gönderen kişi bizzat bu sekmedeki aktif kullanıcıysa işlem yapma
+    if (currentUser && normalizeKey(currentUser.username) === normalizeKey(data.sender)) {
+        return;
+    }
+
+    const targetKey = normalizeKey(data.targetUsername);
+    const isAlreadyTarget = currentUser && normalizeKey(currentUser.username) === targetKey;
+    const savedUsername = localStorage.getItem('msj_saved_username') || '';
+    const isSavedTarget = savedUsername && normalizeKey(savedUsername) === targetKey;
+    const isStandbyWithoutActiveUser = !currentUser && (!savedUsername || isSavedTarget);
+
+    // Eğer bu tarayıcıda başka bir kullanıcı aktif oturumdaysa onun oturumunu bölme
+    if (!isAlreadyTarget && !isSavedTarget && !isStandbyWithoutActiveUser) {
+        return;
+    }
+
+    let wokeUpFromOffline = false;
+    if (!isAlreadyTarget) {
+        wokeUpFromOffline = true;
+        await quickLoginAsRegisteredUser(data.targetUsername);
+    } else {
+        // Zaten bu kullanıcıysa ama Offline görünüyorsa hemen sunucuya Online olduğunu bildir
+        const token = localStorage.getItem('msj_token') || sessionStorage.getItem('msj_token') || '';
+        socket.emit('user:join', { token, username: currentUser.username });
+        if (authModal && authModal.style.display !== 'none') {
+            authModal.style.display = 'none';
+        }
+    }
+
+    try { window.focus(); } catch (e) {}
+
+    if (data.type === 'call') {
+        showStatusToast(`🟢 Otomatik Online • 📞 ${data.sender} Arıyor`, true);
+        // Eğer gelen arama ekranı henüz açılmadıysa hemen ekrana düşür
+        setTimeout(() => {
+            if (incomingCallModal && incomingCallModal.style.display !== 'flex' && (!activeCallScreen || activeCallScreen.style.display !== 'flex')) {
+                currentTargetSocketId = data.callerSocketId || currentTargetSocketId;
+                currentCallTarget = data.sender;
+                currentCallType = data.callType || 'voice';
+                if (incomingCallerName) incomingCallerName.textContent = data.sender;
+                if (incomingCallerAvatar) incomingCallerAvatar.src = data.callerAvatar || '/avatars/default.svg';
+                if (incomingCallType) {
+                    incomingCallType.textContent = currentCallType === 'video' ? 'Gelen Görüntülü Arama...' : 'Gelen Sesli Arama...';
+                }
+                incomingCallModal.style.display = 'flex';
+                playRingtone();
+                triggerSystemNotification(`📞 GELEN ARAMA: ${data.sender}`, {
+                    body: `${data.sender} sizi arıyor... Cevaplamak için dokunun.`,
+                    icon: data.callerAvatar || '/icon-192.png',
+                    badge: '/icon-192.png',
+                    tag: 'incoming-call',
+                    renotify: true,
+                    requireInteraction: true
+                });
+            }
+        }, 150);
+    } else if (data.type === 'message') {
+        const msgObj = data.message || {
+            id: 'wakeup_' + Date.now(),
+            sender: data.sender,
+            recipient: data.targetUsername,
+            text: data.text || 'Yeni mesaj',
+            timestamp: new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' })
+        };
+
+        showStatusToast(`🟢 Otomatik Online • 💬 ${data.sender} mesaj gönderdi`, true);
+
+        if (wokeUpFromOffline) {
+            playIncomingMessageSound();
+            showMessageNotificationToast(msgObj);
+            triggerSystemNotification(`💬 ${data.sender}`, {
+                body: msgObj.text || 'Yeni bir mesajınız var',
+                icon: '/icon-192.png',
+                badge: '/icon-192.png',
+                tag: 'msg-' + data.sender
+            });
+            loadChatsList().then(() => {
+                if (!activeContact) {
+                    openChatForSender(data.sender);
+                }
+            });
+        }
     }
 });
 
@@ -2863,7 +3210,15 @@ async function initiateCall(callType) {
 
     // GİDEN ARAMA EKRANINI AÇ (RESİMDEKİ GİBİ ARANIYOR / ÇALIYOR...)
     if (outgoingTargetName) outgoingTargetName.textContent = activeContact.username;
-    if (outgoingCallStatus) outgoingCallStatus.textContent = callType === 'video' ? 'Görüntülü Arama Yapılıyor...' : 'Sesli Arama Yapılıyor...';
+    if (outgoingCallStatus) {
+        if (activeContact.isOnline) {
+            outgoingCallStatus.textContent = callType === 'video' ? 'Görüntülü Arama Yapılıyor (Çalıyor)...' : 'Sesli Arama Yapılıyor (Çalıyor)...';
+        } else {
+            outgoingCallStatus.textContent = callType === 'video'
+                ? 'Görüntülü Aranıyor (Karşı cihaz otomatik Online yapılıyor...)'
+                : 'Sesli Aranıyor (Karşı cihaz otomatik Online yapılıyor...)';
+        }
+    }
     if (outgoingTargetAvatar) outgoingTargetAvatar.src = activeContact.avatar || '/avatars/default.svg';
     if (outgoingCallModal) outgoingCallModal.style.display = 'flex';
 
@@ -3433,6 +3788,13 @@ if (menuItemClearChat) {
     });
 }
 
+if (menuItemDeleteUser) {
+    menuItemDeleteUser.addEventListener('click', () => {
+        if (!activeContact) return;
+        window.requestDeleteUser(activeContact.username);
+    });
+}
+
 if (menuItemCloseChat) {
     menuItemCloseChat.addEventListener('click', () => {
         closeActiveChat();
@@ -3442,7 +3804,7 @@ if (menuItemCloseChat) {
 if (menuItemContactInfo) {
     menuItemContactInfo.addEventListener('click', () => {
         if (!activeContact) return;
-        alert(`Kullanıcı: ${activeContact.username}\nDurum: ${activeContact.isOnline ? 'Çevrimiçi (Online)' : 'Çevrimdışı (Offline)'}`);
+        alert(`Kullanıcı: ${activeContact.username}\nDurum: ${activeContact.isOnline ? '🟢 Çevrimiçi (Online)' : '⚪ Çevrimdışı (Offline - Mesaj ve Arama Gönderilebilir)'}`);
     });
 }
 
@@ -3451,7 +3813,7 @@ if (menuItemContactInfo) {
 // ==========================================================
 
 async function performLogout() {
-    if (!confirm('Oturumu kapatmak istediğinize emin misiniz?')) {
+    if (!confirm('Oturumu kapatmak istediğinize emin misiniz?\n(Kayıtlı kullanıcılarınız silinmez; mesaj veya arama geldiğinde otomatik Online olup bildirim gelir.)')) {
         return;
     }
 
@@ -3466,15 +3828,14 @@ async function performLogout() {
         } catch (e) {}
     }
 
-    // Kesinlikle otomatik girişi iptal et ve yerel oturumu sil
+    // Oturumu kapatırken kayıtlı kullanıcıları ve kişi listesini ASLA SİLME!
     localStorage.setItem('msj_auto_login', 'false');
     localStorage.removeItem('msj_token');
     sessionStorage.removeItem('msj_token');
-    localStorage.removeItem('msj_user');
-    localStorage.removeItem('msj_cached_contacts');
+    currentUser = null;
 
-    // Sayfayı temiz şekilde yenileyerek giriş / kayıt ekranını aç
-    location.reload();
+    await loadRegisteredUsersDropdown();
+    showPasswordPrompt(localStorage.getItem('msj_saved_username') || '');
 }
 
 function openProfileModal() {
@@ -3513,6 +3874,13 @@ if (btnProfileLogout) {
     btnProfileLogout.addEventListener('click', () => {
         closeProfileModal();
         performLogout();
+    });
+}
+
+if (btnProfileDeleteAccount) {
+    btnProfileDeleteAccount.addEventListener('click', () => {
+        if (!currentUser || !currentUser.username) return;
+        window.requestDeleteUser(currentUser.username);
     });
 }
 
@@ -3685,6 +4053,51 @@ function formatBytes(bytes) {
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
+
+// Sekme / Pencere görünür olduğunda veya odaklandığında otomatik Online ol
+window.addEventListener('focus', () => {
+    if (currentUser && socket.connected) {
+        const token = localStorage.getItem('msj_token') || sessionStorage.getItem('msj_token') || '';
+        socket.emit('user:join', { token, username: currentUser.username });
+    }
+});
+
+document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && currentUser && socket.connected) {
+        const token = localStorage.getItem('msj_token') || sessionStorage.getItem('msj_token') || '';
+        socket.emit('user:join', { token, username: currentUser.username });
+    }
+});
+
+// Arka Plan / Bekleme Modu Yedek Uyandırıcı (WebSocket uyku moduna girse bile mesaj/arama gelince anında Online yapar)
+let clientLastPollNotifId = 0;
+setInterval(async () => {
+    try {
+        const targetUser = (currentUser && currentUser.username) || localStorage.getItem('msj_saved_username') || '';
+        const res = await fetch(`/api/system/notifications/poll?since=${clientLastPollNotifId}${targetUser ? '&user=' + encodeURIComponent(targetUser) : ''}`);
+        const data = await res.json();
+        if (data && data.success) {
+            if (clientLastPollNotifId > 0 && data.lastId > clientLastPollNotifId && Array.isArray(data.notifications)) {
+                for (const item of data.notifications) {
+                    if (currentUser && normalizeKey(item.sender) === normalizeKey(currentUser.username)) continue;
+                    if (item.recipient) {
+                        // Eğer bu cihaz hedef kullanıcıysa ve henüz Online değilse otomatik Online yap
+                        const savedU = localStorage.getItem('msj_saved_username') || '';
+                        if (!currentUser && (!savedU || normalizeKey(savedU) === normalizeKey(item.recipient))) {
+                            await quickLoginAsRegisteredUser(item.recipient);
+                        } else if (currentUser && normalizeKey(currentUser.username) === normalizeKey(item.recipient)) {
+                            const token = localStorage.getItem('msj_token') || sessionStorage.getItem('msj_token') || '';
+                            socket.emit('user:join', { token, username: currentUser.username });
+                        }
+                    }
+                }
+            }
+            if (typeof data.lastId === 'number') {
+                clientLastPollNotifId = data.lastId;
+            }
+        }
+    } catch (e) {}
+}, 3500);
 
 // Uygulamayı Başlat
 initAuth();

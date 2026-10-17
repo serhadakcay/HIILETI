@@ -1,20 +1,5 @@
-// MSJ Service Worker - PWA Kurulabilirlik, Çevrimdışı Önbellek, Arka Plan Mesaj ve Arama Bildirimleri
-const CACHE_NAME = 'msj-cache-v10';
-const ASSETS = [
-    '/',
-    '/index.html',
-    '/style.css',
-    '/app.js',
-    '/manifest.json',
-    '/icon.svg',
-    '/icon-192.png',
-    '/icon-512.png',
-    '/apple-touch-icon.png',
-    '/sounds/message.wav',
-    '/sounds/ringtone.wav',
-    '/sounds/ringback.wav',
-    '/sounds/ended.wav'
-];
+// MSJ Service Worker - Arka Plan Mesaj ve Arama Bildirimleri (Önbellek Kilitlenmesini Önlemek İçin Ağ-Öncelikli)
+const CACHE_NAME = 'msj-cache-v12';
 
 let swLastNotificationId = 0;
 let swCurrentUser = '';
@@ -35,6 +20,7 @@ function startSwBackgroundPoll() {
                 if (data.lastId > swLastNotificationId && swLastNotificationId > 0 && Array.isArray(data.notifications)) {
                     for (const item of data.notifications) {
                         if (swCurrentUser && item.sender && item.sender.toLowerCase() === swCurrentUser.toLowerCase()) continue;
+                        const autoUserSuffix = item.recipient ? `&autoUser=${encodeURIComponent(item.recipient)}` : '';
                         if (item.type === 'call') {
                             self.registration.showNotification(`📞 GELEN ARAMA: ${item.sender}`, {
                                 body: `${item.sender} sizi arıyor! Cevaplamak için dokunun.`,
@@ -44,7 +30,7 @@ function startSwBackgroundPoll() {
                                 renotify: true,
                                 requireInteraction: true,
                                 vibrate: [1000, 500, 1000, 500, 1000, 500],
-                                data: { url: `/?openChat=${encodeURIComponent(item.sender)}&incomingCall=1` }
+                                data: { url: `/?openChat=${encodeURIComponent(item.sender)}&incomingCall=1${autoUserSuffix}` }
                             });
                         } else if (item.type === 'message') {
                             self.registration.showNotification(`💬 ${item.sender}`, {
@@ -54,7 +40,7 @@ function startSwBackgroundPoll() {
                                 tag: 'msg-' + item.sender,
                                 renotify: true,
                                 vibrate: [180, 80, 180],
-                                data: { url: `/?openChat=${encodeURIComponent(item.sender)}` }
+                                data: { url: `/?openChat=${encodeURIComponent(item.sender)}${autoUserSuffix}` }
                             });
                         }
                     }
@@ -76,49 +62,17 @@ self.addEventListener('message', (event) => {
 
 self.addEventListener('install', (event) => {
     event.waitUntil(
-        caches.open(CACHE_NAME).then((cache) => {
-            return cache.addAll(ASSETS).catch(() => {});
-        })
+        caches.keys().then((keys) => Promise.all(keys.map((k) => caches.delete(k))))
     );
     self.skipWaiting();
 });
 
 self.addEventListener('activate', (event) => {
     event.waitUntil(
-        caches.keys().then((keys) => {
-            return Promise.all(
-                keys.map((key) => {
-                    if (key !== CACHE_NAME) {
-                        return caches.delete(key);
-                    }
-                })
-            );
-        })
+        caches.keys().then((keys) => Promise.all(keys.map((k) => caches.delete(k))))
     );
     self.clients.claim();
     startSwBackgroundPoll();
-});
-
-self.addEventListener('fetch', (event) => {
-    // API, socket.io veya upload isteklerini cache'e alma, doğrudan ağa ilet
-    const url = event.request.url;
-    if (url.includes('/socket.io/') || url.includes('/api/') || url.includes('/uploads/')) {
-        return;
-    }
-
-    event.respondWith(
-        fetch(event.request)
-            .then((response) => {
-                if (response && response.status === 200 && response.type === 'basic') {
-                    const responseToCache = response.clone();
-                    caches.open(CACHE_NAME).then((cache) => {
-                        cache.put(event.request, responseToCache);
-                    });
-                }
-                return response;
-            })
-            .catch(() => caches.match(event.request).then(cached => cached || caches.match('/index.html')))
-    );
 });
 
 // Bildirime dokunulduğunda / tıklandığında uygulamayı ön plana getir ve ilgili sohbeti/aramayı aç

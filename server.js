@@ -29,7 +29,7 @@ const dataDir = path.join(__dirname, 'data');
 // Statik Dosyalar (Önbellek sorunlarını önlemek için no-cache başlığı ile)
 app.use((req, res, next) => {
     if (req.path === '/' || req.path.endsWith('.html') || req.path.endsWith('.js') || req.path.endsWith('.css')) {
-        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
         res.setHeader('Pragma', 'no-cache');
         res.setHeader('Expires', '0');
     }
@@ -289,7 +289,11 @@ app.post('/api/auth/auto_login', async (req, res) => {
             return res.status(400).json({ success: false, error: 'Kullanıcı adı zorunludur' });
         }
         const cleanUser = username.trim();
-        const user = await db.getUser(cleanUser);
+        let user = await db.getUser(cleanUser);
+        if (!user) {
+            // Cihazda kayıtlı kullanıcı varsa silinmesine izin verme, veritabanına otomatik geri yükle
+            user = await db.ensureUserExists(cleanUser);
+        }
         if (!user) {
             return res.status(404).json({ success: false, error: 'Kullanıcı bulunamadı' });
         }
@@ -324,20 +328,32 @@ app.post('/api/auth/auto_login', async (req, res) => {
 // 3. Oturum Doğrulama API
 app.post('/api/auth/verify', async (req, res) => {
     try {
-        const { token } = req.body;
+        const { token, username } = req.body;
         if (!token) {
             return res.status(401).json({ success: false, error: 'Geçersiz oturum' });
         }
 
         const session = await db.getSession(token);
         if (!session) {
+            if (username && username.trim().length >= 2) {
+                const ensuredUser = await db.ensureUserExists(username.trim());
+                if (ensuredUser) {
+                    await db.saveSession(token, ensuredUser.username);
+                    return res.json({
+                        success: true,
+                        user: { username: ensuredUser.username, avatar: ensuredUser.avatar }
+                    });
+                }
+            }
             return res.status(401).json({ success: false, error: 'Geçersiz veya süresi dolmuş oturum' });
         }
 
         await db.updateSessionLastUsed(token);
-        const user = await db.getUser(session.username);
+        let user = await db.getUser(session.username);
+        if (!user && session.username) {
+            user = await db.ensureUserExists(session.username);
+        }
         if (!user) {
-            await db.deleteSession(token);
             return res.status(401).json({ success: false, error: 'Kullanıcı bulunamadı' });
         }
 
@@ -350,15 +366,11 @@ app.post('/api/auth/verify', async (req, res) => {
     }
 });
 
-// 4. Çıkış Yap API
+// 4. Çıkış Yap API (Kullanıcı kaydını asla silmez, sadece aktif oturumu kapatır)
 app.post('/api/auth/logout', async (req, res) => {
     try {
         const { token } = req.body;
         if (token) {
-            const session = await db.getSession(token);
-            if (session && session.username) {
-                await db.deleteSessionsForUser(session.username);
-            }
             await db.deleteSession(token);
         }
         res.json({ success: true });
@@ -381,6 +393,61 @@ app.get('/api/users/registered', async (req, res) => {
             };
         });
         res.json({ success: true, users: list });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// 5.1 Cihazdaki Kayıtlı Kullanıcıları Sunucuyla Senkronize Et (Kayıtlı kullanıcıların asla silinmemesi için)
+app.post('/api/users/sync', async (req, res) => {
+    try {
+        const { users } = req.body || {};
+        if (Array.isArray(users)) {
+            for (const item of users) {
+                const uName = typeof item === 'string' ? item : (item && item.username);
+                const uAvatar = (item && item.avatar) || '/avatars/default.svg';
+                if (uName && uName.trim().length >= 2) {
+                    await db.ensureUserExists(uName.trim(), uAvatar);
+                }
+            }
+        }
+        const all = await db.getAllUsers();
+        const list = all.map(u => {
+            const isOnline = onlineUserSockets.has(u.userKey) && onlineUserSockets.get(u.userKey).size > 0;
+            return {
+                username: u.username,
+                avatar: u.avatar || '/avatars/default.svg',
+                lastSeen: isOnline ? 'Online' : (u.lastSeen || 'Offline'),
+                isOnline
+            };
+        });
+        res.json({ success: true, users: list });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// 5.2 Kullanıcıyı Sil API (SADECE KULLANICI KENDİ İSTERSE SİLİNİR)
+app.delete('/api/users/:username', async (req, res) => {
+    try {
+        const targetUsername = (req.params.username || '').trim();
+        if (!targetUsername) {
+            return res.status(400).json({ success: false, error: 'Kullanıcı adı belirtilmedi' });
+        }
+        const result = await db.deleteUser(targetUsername);
+        if (!result.success) {
+            return res.status(404).json(result);
+        }
+
+        onlineUserSockets.delete(result.userKey);
+        if (globalIo) {
+            globalIo.emit('user:deleted', {
+                username: result.username,
+                userKey: result.userKey
+            });
+        }
+
+        res.json({ success: true, username: result.username });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
     }
@@ -826,7 +893,10 @@ async function startServer() {
             }
 
             const userKey = normalizeKey(username);
-            const existing = await db.getUser(username);
+            let existing = await db.getUser(username);
+            if (!existing) {
+                existing = await db.ensureUserExists(username, (data && data.avatar) || '/avatars/default.svg');
+            }
             const avatar = existing ? existing.avatar : ((data && data.avatar) || '/avatars/default.svg');
 
             socketToUserMap.set(socket.id, { username, avatar });
@@ -860,7 +930,7 @@ async function startServer() {
                 user: { username, avatar }
             });
 
-            // PROGRAM KAPALIYKEN GELEN ARAMA VARSA ANINDA EKRANA DÜŞÜR!
+            // PROGRAM KAPALIYKEN VEYA OFFLINE İKEN GELEN ARAMA VARSA ANINDA EKRANA DÜŞÜR!
             const pendingCall = pendingCalls.get(userKey);
             if (pendingCall && (Date.now() - pendingCall.createdAt < 45000)) {
                 console.log(`[Bekleyen Arama Teslimi] ${username} kullanıcısına ${pendingCall.callerUsername} araması iletiliyor.`);
@@ -924,6 +994,9 @@ async function startServer() {
                 if (ack) ack({ success: false, error: 'Alıcı seçilmedi' });
                 return;
             }
+
+            // Alıcının veritabanında kayıtlı kalmasını garantiye al
+            await db.ensureUserExists(recipient);
 
             const senderKey = normalizeKey(sender.username);
             const recipientKey = normalizeKey(recipient);
@@ -996,7 +1069,16 @@ async function startServer() {
                 msgId: savedMsg.id,
                 sender: sender.username,
                 recipient: recipient,
-                text: msg.text || (msg.file ? '📎 Dosya / Fotoğraf paylaştı' : 'Yeni bir mesaj gönderdi')
+                text: msg.text || (msg.file ? '📎 Dosya / Fotoğraf paylaştı' : 'Yeni bir mesaj gönderdi'),
+                isTargetOnline: isRecipientOnline
+            });
+
+            // OFFLINE VEYA BEKLEMEDEKİ ALICIYI ANINDA UYANDIR VE OTOMATİK ONLINE YAP (CEP TELEFONU GİBİ)
+            io.emit('system:wakeup', {
+                type: 'message',
+                sender: sender.username,
+                recipient: recipient,
+                message: savedMsg
             });
         });
 
@@ -1118,15 +1200,18 @@ async function startServer() {
 
         // ==========================================
         // BİREBİR WEBRTC + GERÇEK ZAMANLI SES RÖLESİ ARAMA SİSTEMİ
-        // Program kapalı olsa bile aramayı bekletir ve pencere açıldığında ekrana düşürür!
+        // Program kapalı veya alıcı Offline olsa bile aramayı bekletir, alıcıyı uyandırıp Online yapar ve ekrana düşürür!
         // ==========================================
-        socket.on('call:initiate', (data) => {
+        socket.on('call:initiate', async (data) => {
             const sender = socketToUserMap.get(socket.id);
             if (!sender) return;
 
             const recipient = (data.recipient || '').trim();
             if (!recipient) return;
+            await db.ensureUserExists(recipient);
+
             const recipientKey = normalizeKey(recipient);
+            const isRecipientOnline = onlineUserSockets.has(recipientKey) && onlineUserSockets.get(recipientKey).size > 0;
             const callId = 'call_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5);
 
             const callPayload = {
@@ -1139,7 +1224,7 @@ async function startServer() {
                 createdAt: Date.now()
             };
 
-            // Program kapalıyken açıldığında teslim etmek için bekleyen aramalara kaydet
+            // Program kapalıyken veya Offline iken açıldığında teslim etmek için bekleyen aramalara kaydet
             pendingCalls.set(recipientKey, callPayload);
 
             // Sistem bildirim kuyruğuna arama uyarısı ekle (MSJ.exe ve PWA arka plan dinleyicisi ekranı açar)
@@ -1149,11 +1234,21 @@ async function startServer() {
                 sender: sender.username,
                 callerAvatar: sender.avatar,
                 recipient: recipient,
-                callType: data.callType || 'voice'
+                callType: data.callType || 'voice',
+                isTargetOnline: isRecipientOnline
             });
 
             // Alıcı şu an açıksa anında gönder
             io.to('user:' + recipientKey).emit('call:incoming', callPayload);
+
+            // OFFLINE VEYA BEKLEMEDEKİ ALICIYI ANINDA UYANDIR VE OTOMATİK ONLINE YAP (CEP TELEFONU GİBİ)
+            io.emit('system:wakeup', {
+                type: 'call',
+                sender: sender.username,
+                recipient: recipient,
+                callType: data.callType || 'voice',
+                callPayload
+            });
         });
 
         // Arayan Kişi Açılmadan Aramayı İptal Ettiğinde

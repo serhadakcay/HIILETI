@@ -13,7 +13,7 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="HIHaberleşme">
     <meta name="mobile-web-app-capable" content="yes">
-    <link rel="stylesheet" href="/style.css?v=8">
+    <link rel="stylesheet" href="/style.css?v=10">
 </head>
 <body>
     <!-- ==========================================
@@ -172,9 +172,10 @@
                     <div class="dropdown-menu chat-options-dropdown" id="chatDropdownMenu" style="display:none;">
                         <div class="dropdown-item" id="menuItemChatAudioSettings">🎧 Mikrofon ve Hoparlör Ayarları</div>
                         <div class="dropdown-item danger" id="menuItemClearChat">🗑️ Sohbeti Temizle (Yazışmaları Sil)</div>
+                        <div class="dropdown-item danger" id="menuItemDeleteUser">❌ Bu Kullanıcıyı Sil (Kayıtlardan Kaldır)</div>
                         <div class="dropdown-item" id="menuItemContactInfo">👤 Kullanıcı Bilgisi</div>
                         <div class="dropdown-divider"></div>
-                        <div class="dropdown-item" id="menuItemCloseChat">❌ Sohbeti Kapat</div>
+                        <div class="dropdown-item" id="menuItemCloseChat">⬅️ Sohbeti Kapat</div>
                     </div>
                 </div>
             </header>
@@ -372,8 +373,11 @@
                     <button type="button" class="profile-action-btn warning" id="btnProfileChangePass">
                         🔑 Şifremi Değiştir / Güncelle
                     </button>
-                    <button type="button" class="profile-action-btn danger" id="btnProfileLogout">
-                        🚪 Profilden Çıkış Yap
+                    <button type="button" class="profile-action-btn secondary" id="btnProfileLogout">
+                        🚪 Oturumu Kapat (Kullanıcı Kayıtlı Kalır)
+                    </button>
+                    <button type="button" class="profile-action-btn danger" id="btnProfileDeleteAccount">
+                        🗑️ Bu Kullanıcı Hesabını Tamamen Sil
                     </button>
                 </div>
             </div>
@@ -745,7 +749,36 @@
         </div>
     </div>
 
+    <script>
+        // Eski Service Worker önbelleklerini temizle ve yükleme ekranında takılmayı %100 önle
+        (function() {
+            try {
+                if ('caches' in window) {
+                    caches.keys().then(function(keys) {
+                        keys.forEach(function(k) { caches.delete(k); });
+                    });
+                }
+                if ('serviceWorker' in navigator) {
+                    navigator.serviceWorker.getRegistrations().then(function(regs) {
+                        regs.forEach(function(r) { r.update(); });
+                    });
+                }
+            } catch (e) {}
+
+            setTimeout(function() {
+                var loadingEl = document.getElementById('chatListLoading');
+                var authEl = document.getElementById('authModal');
+                if (loadingEl && (!authEl || authEl.style.display === 'none')) {
+                    if (typeof initAuth === 'function') {
+                        initAuth();
+                    } else if (authEl) {
+                        authEl.style.display = 'flex';
+                    }
+                }
+            }, 2200);
+        })();
+    </script>
     <script src="/socket.io/socket.io.js"></script>
-    <script src="/app.js?v=8"></script>
+    <script src="/app.js?v=10"></script>
 </body>
 </html>

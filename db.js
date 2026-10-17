@@ -196,14 +196,32 @@ class DatabaseManager {
                 }
             }
 
-            // 2. Mesajlar
+            // 2. Mesajlar (Mesajlarda geçen gönderici/alıcı kullanıcılar veritabanında yoksa otomatik geri yükle)
             if (fs.existsSync(messagesFile)) {
                 try {
+                    const crypto = require('crypto');
                     const rawMessages = JSON.parse(fs.readFileSync(messagesFile, 'utf8') || '{}');
                     for (const convoKey of Object.keys(rawMessages)) {
                         const list = rawMessages[convoKey] || [];
                         for (const msg of list) {
                             if (!msg || !msg.id) continue;
+                            for (const uName of [msg.sender, msg.recipient]) {
+                                if (uName && uName.trim().length >= 2) {
+                                    const ex = await this.getUser(uName.trim());
+                                    if (!ex) {
+                                        const salt = crypto.randomBytes(16).toString('hex');
+                                        const hash = crypto.pbkdf2Sync('123456', salt, 1000, 64, 'sha512').toString('hex');
+                                        await this.insertUserToDb({
+                                            username: uName.trim(),
+                                            salt,
+                                            hash,
+                                            avatar: '/avatars/default.svg',
+                                            lastSeen: 'Offline',
+                                            createdAt: msg.createdAt || new Date().toISOString()
+                                        });
+                                    }
+                                }
+                            }
                             await this.insertMessageToDbIfNotExists({
                                 id: msg.id,
                                 sender: msg.sender,
@@ -222,13 +240,27 @@ class DatabaseManager {
                 }
             }
 
-            // 3. Oturumlar
+            // 3. Oturumlar (Oturumu olan kullanıcılar veritabanında yoksa otomatik geri yükle)
             if (fs.existsSync(sessionsFile)) {
                 try {
+                    const crypto = require('crypto');
                     const rawSessions = JSON.parse(fs.readFileSync(sessionsFile, 'utf8') || '{}');
                     for (const token of Object.keys(rawSessions)) {
                         const s = rawSessions[token];
                         if (!s || !s.username) continue;
+                        const exUser = await this.getUser(s.username);
+                        if (!exUser) {
+                            const salt = crypto.randomBytes(16).toString('hex');
+                            const hash = crypto.pbkdf2Sync('123456', salt, 1000, 64, 'sha512').toString('hex');
+                            await this.insertUserToDb({
+                                username: s.username.trim(),
+                                salt,
+                                hash,
+                                avatar: '/avatars/default.svg',
+                                lastSeen: 'Offline',
+                                createdAt: s.createdAt || new Date().toISOString()
+                            });
+                        }
                         const existingSession = await this.getSession(token);
                         if (!existingSession) {
                             await this.insertSessionToDb(token, s.username, s.createdAt, s.lastUsed);
@@ -250,9 +282,12 @@ class DatabaseManager {
     async exportDbToJson() {
         try {
             ensureDataDir();
-            // 1. Tüm kullanıcıları users.json dosyasına yaz
+            // 1. Tüm kullanıcıları mevcut users.json ile birleştirerek yaz (hiçbir kayıtlı kullanıcı silinmesin)
+            let usersMap = {};
+            if (fs.existsSync(usersFile)) {
+                try { usersMap = JSON.parse(fs.readFileSync(usersFile, 'utf8') || '{}'); } catch (e) { usersMap = {}; }
+            }
             const allUsers = await this.getAllUsers();
-            const usersMap = {};
             for (const u of allUsers) {
                 usersMap[u.userKey] = {
                     username: u.username,
@@ -429,6 +464,69 @@ class DatabaseManager {
         } catch (e) {}
 
         return await this.getUser(userKey);
+    }
+
+    async ensureUserExists(username, avatar = '/avatars/default.svg') {
+        if (!username || username.trim().length < 2) return null;
+        const clean = username.trim();
+        let existing = await this.getUser(clean);
+        if (existing) return existing;
+
+        const crypto = require('crypto');
+        const salt = crypto.randomBytes(16).toString('hex');
+        const hash = crypto.pbkdf2Sync('123456', salt, 1000, 64, 'sha512').toString('hex');
+        return await this.createUser({
+            username: clean,
+            salt,
+            hash,
+            avatar: avatar || '/avatars/default.svg',
+            lastSeen: 'Offline',
+            createdAt: new Date().toISOString()
+        });
+    }
+
+    // KULLANICIYI SADECE KENDİSİ İSTERSE SİLME (Otomatik silme asla yapılmaz)
+    async deleteUser(usernameOrKey) {
+        const userKey = normalizeKey(usernameOrKey);
+        if (!userKey) return { success: false, error: 'Kullanıcı adı geçersiz' };
+
+        const existing = await this.getUser(userKey);
+        if (!existing) {
+            return { success: false, error: 'Kullanıcı bulunamadı' };
+        }
+
+        if (this.type === 'mysql') {
+            await this.mysqlPool.query('DELETE FROM users WHERE user_key = ?', [userKey]);
+            await this.mysqlPool.query('DELETE FROM sessions WHERE user_key = ?', [userKey]);
+        } else {
+            this.sqliteDb.prepare('DELETE FROM users WHERE user_key = ?').run(userKey);
+            this.sqliteDb.prepare('DELETE FROM sessions WHERE user_key = ?').run(userKey);
+            try { this.sqliteDb.exec('PRAGMA wal_checkpoint(PASSIVE);'); } catch (e) {}
+        }
+
+        // users.json içinden sil
+        try {
+            if (fs.existsSync(usersFile)) {
+                const raw = JSON.parse(fs.readFileSync(usersFile, 'utf8') || '{}');
+                delete raw[userKey];
+                fs.writeFileSync(usersFile, JSON.stringify(raw, null, 2), 'utf8');
+            }
+        } catch (e) {}
+
+        // sessions.json içinden sil
+        try {
+            if (fs.existsSync(sessionsFile)) {
+                const rawS = JSON.parse(fs.readFileSync(sessionsFile, 'utf8') || '{}');
+                for (const t of Object.keys(rawS)) {
+                    if (normalizeKey(rawS[t].username) === userKey) {
+                        delete rawS[t];
+                    }
+                }
+                fs.writeFileSync(sessionsFile, JSON.stringify(rawS, null, 2), 'utf8');
+            }
+        } catch (e) {}
+
+        return { success: true, username: existing.username, userKey };
     }
 
     formatUserRow(row) {
