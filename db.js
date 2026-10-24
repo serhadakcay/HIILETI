@@ -7,6 +7,27 @@ function normalizeKey(str) {
     return str.trim().toLocaleLowerCase('tr-TR');
 }
 
+function normalizePhone(phoneStr) {
+    if (!phoneStr) return '';
+    const digits = String(phoneStr).replace(/\D+/g, '');
+    if (!digits) return '';
+    if (digits.length === 12 && digits.startsWith('905')) {
+        return '0' + digits.slice(2);
+    }
+    if (digits.length === 10 && digits.startsWith('5')) {
+        return '0' + digits;
+    }
+    return digits;
+}
+
+function isLikelyPhoneNumber(str) {
+    if (!str) return false;
+    const trimmed = String(str).trim();
+    if (!/^[+\d\s().-]+$/.test(trimmed)) return false;
+    const digits = trimmed.replace(/\D+/g, '');
+    return digits.length >= 7 && digits.length <= 15;
+}
+
 function getConvoKey(u1, u2) {
     if (!u1 || !u2) return '';
     return [normalizeKey(u1), normalizeKey(u2)].sort().join('___');
@@ -112,6 +133,7 @@ class DatabaseManager {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_key TEXT UNIQUE NOT NULL COLLATE NOCASE,
                 username TEXT NOT NULL COLLATE NOCASE,
+                phone TEXT DEFAULT '',
                 salt TEXT NOT NULL,
                 hash TEXT NOT NULL,
                 avatar TEXT DEFAULT '/avatars/default.svg',
@@ -147,6 +169,10 @@ class DatabaseManager {
             CREATE INDEX IF NOT EXISTS idx_messages_unread ON messages(recipient, is_read);
         `);
 
+        try {
+            this.sqliteDb.exec(`ALTER TABLE users ADD COLUMN phone TEXT DEFAULT '';`);
+        } catch (e) {}
+
         // Başlangıçta WAL kontrol noktasını çalıştırarak veritabanı dosyasını tam olarak diske yaz
         this.checkpointSqlite();
 
@@ -165,6 +191,7 @@ class DatabaseManager {
                 id INT AUTO_INCREMENT PRIMARY KEY,
                 user_key VARCHAR(100) UNIQUE NOT NULL,
                 username VARCHAR(100) NOT NULL,
+                phone VARCHAR(40) DEFAULT '',
                 salt VARCHAR(128) NOT NULL,
                 hash VARCHAR(256) NOT NULL,
                 avatar VARCHAR(255) DEFAULT '/avatars/default.svg',
@@ -173,6 +200,9 @@ class DatabaseManager {
                 INDEX idx_users_key (user_key)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
         `);
+        try {
+            await this.mysqlPool.query(`ALTER TABLE users ADD COLUMN phone VARCHAR(40) DEFAULT ''`);
+        } catch (e) {}
 
         await this.mysqlPool.query(`
             CREATE TABLE IF NOT EXISTS sessions (
@@ -267,12 +297,15 @@ class DatabaseManager {
                         if (!existing) {
                             await this.insertUserToDb({
                                 username: u.username,
+                                phone: u.phone || '',
                                 salt: u.salt,
                                 hash: u.hash,
                                 avatar: u.avatar || '/avatars/default.svg',
                                 lastSeen: u.lastSeen || 'Offline',
                                 createdAt: u.createdAt || new Date().toISOString()
                             });
+                        } else if (u.phone && !existing.phone) {
+                            await this.updateUserPhone(u.username, u.phone);
                         }
                     }
                 } catch (e) {
@@ -385,6 +418,7 @@ class DatabaseManager {
                 if (deletedMap[u.userKey] || u.userKey.startsWith('test_logout_user_') || u.userKey.startsWith('testuser_')) continue;
                 usersMap[u.userKey] = {
                     username: u.username,
+                    phone: u.phone || (usersMap[u.userKey] && usersMap[u.userKey].phone) || '',
                     salt: u.salt,
                     hash: u.hash,
                     avatar: u.avatar || '/avatars/default.svg',
@@ -439,15 +473,80 @@ class DatabaseManager {
                 'SELECT * FROM users WHERE user_key = ? OR LOWER(username) = ? LIMIT 1',
                 [userKey, userKey]
             );
-            if (rows.length === 0) return null;
-            return this.formatUserRow(rows[0]);
+            if (rows.length > 0) return this.formatUserRow(rows[0]);
         } else {
             const row = this.sqliteDb.prepare(
                 'SELECT * FROM users WHERE user_key = ? OR LOWER(username) = ? LIMIT 1'
             ).get(userKey, userKey);
-            if (!row) return null;
-            return this.formatUserRow(row);
+            if (row) return this.formatUserRow(row);
         }
+
+        // Eğer girilen değer bir telefon numarasıysa telefon numarasından da kullanıcıyı bul
+        if (isLikelyPhoneNumber(rawTrim)) {
+            return await this.findUserByPhone(rawTrim);
+        }
+        return null;
+    }
+
+    async findUserByPhone(phoneStr) {
+        const cleanPhone = normalizePhone(phoneStr);
+        if (!cleanPhone || cleanPhone.length < 7) return null;
+        const last10 = cleanPhone.length >= 10 ? cleanPhone.slice(-10) : cleanPhone;
+
+        const all = await this.getAllUsers();
+        for (const u of all) {
+            const uPhone = normalizePhone(u.phone);
+            const uNamePhone = isLikelyPhoneNumber(u.username) ? normalizePhone(u.username) : '';
+            if (uPhone && (uPhone === cleanPhone || (uPhone.length >= 10 && uPhone.slice(-10) === last10))) {
+                return u;
+            }
+            if (uNamePhone && (uNamePhone === cleanPhone || (uNamePhone.length >= 10 && uNamePhone.slice(-10) === last10))) {
+                return u;
+            }
+        }
+        return null;
+    }
+
+    async findOrCreateUserByPhone(phoneStr, customName = '') {
+        const cleanPhone = normalizePhone(phoneStr);
+        if (!cleanPhone || cleanPhone.length < 7) {
+            return { success: false, error: 'Geçerli bir telefon numarası giriniz (Örn: 05XX XXX XX XX)' };
+        }
+
+        let existing = await this.findUserByPhone(cleanPhone);
+        if (existing) {
+            if (!existing.phone) {
+                await this.updateUserPhone(existing.username, cleanPhone);
+                existing.phone = cleanPhone;
+            }
+            return { success: true, user: existing, isNew: false };
+        }
+
+        const displayUsername = (customName && customName.trim().length >= 2)
+            ? customName.trim()
+            : cleanPhone;
+
+        const byName = await this.getUser(displayUsername);
+        if (byName) {
+            await this.updateUserPhone(byName.username, cleanPhone);
+            byName.phone = cleanPhone;
+            return { success: true, user: byName, isNew: false };
+        }
+
+        const crypto = require('crypto');
+        const salt = crypto.randomBytes(16).toString('hex');
+        const hash = crypto.pbkdf2Sync('123456', salt, 1000, 64, 'sha512').toString('hex');
+        const created = await this.createUser({
+            username: displayUsername,
+            phone: cleanPhone,
+            salt,
+            hash,
+            avatar: '/avatars/default.svg',
+            lastSeen: 'Offline',
+            createdAt: new Date().toISOString()
+        });
+        if (created) created._wasCreated = true;
+        return { success: true, user: created, isNew: true };
     }
 
     async getAllUsers() {
@@ -462,28 +561,30 @@ class DatabaseManager {
 
     async insertUserToDb(userData) {
         const userKey = normalizeKey(userData.username);
+        const phone = userData.phone ? normalizePhone(userData.phone) : (isLikelyPhoneNumber(userData.username) ? normalizePhone(userData.username) : '');
         const avatar = userData.avatar || '/avatars/default.svg';
         const lastSeen = userData.lastSeen || 'Offline';
         const createdAt = userData.createdAt || new Date().toISOString();
 
         if (this.type === 'mysql') {
             await this.mysqlPool.query(
-                `INSERT INTO users (user_key, username, salt, hash, avatar, last_seen, created_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)
-                 ON DUPLICATE KEY UPDATE username = VALUES(username), salt = VALUES(salt), hash = VALUES(hash), avatar = VALUES(avatar)`,
-                [userKey, userData.username, userData.salt, userData.hash, avatar, lastSeen, createdAt]
+                `INSERT INTO users (user_key, username, phone, salt, hash, avatar, last_seen, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 ON DUPLICATE KEY UPDATE username = VALUES(username), phone = IF(VALUES(phone) != '', VALUES(phone), phone), salt = VALUES(salt), hash = VALUES(hash), avatar = VALUES(avatar)`,
+                [userKey, userData.username, phone, userData.salt, userData.hash, avatar, lastSeen, createdAt]
             );
         } else {
             const stmt = this.sqliteDb.prepare(`
-                INSERT INTO users (user_key, username, salt, hash, avatar, last_seen, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO users (user_key, username, phone, salt, hash, avatar, last_seen, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(user_key) DO UPDATE SET
                     username = excluded.username,
+                    phone = CASE WHEN excluded.phone != '' THEN excluded.phone ELSE users.phone END,
                     salt = excluded.salt,
                     hash = excluded.hash,
                     avatar = excluded.avatar
             `);
-            stmt.run(userKey, userData.username, userData.salt, userData.hash, avatar, lastSeen, createdAt);
+            stmt.run(userKey, userData.username, phone, userData.salt, userData.hash, avatar, lastSeen, createdAt);
             this.checkpointSqlite();
         }
 
@@ -494,8 +595,10 @@ class DatabaseManager {
             if (fs.existsSync(usersFile)) {
                 try { rawUsers = JSON.parse(fs.readFileSync(usersFile, 'utf8') || '{}'); } catch (e) {}
             }
+            const prevPhone = (rawUsers[userKey] && rawUsers[userKey].phone) || '';
             rawUsers[userKey] = {
                 username: userData.username,
+                phone: phone || prevPhone || '',
                 salt: userData.salt,
                 hash: userData.hash,
                 avatar,
@@ -504,6 +607,30 @@ class DatabaseManager {
             };
             fs.writeFileSync(usersFile, JSON.stringify(rawUsers, null, 2), 'utf8');
         } catch (e) {}
+    }
+
+    async updateUserPhone(usernameOrKey, phoneStr) {
+        const userKey = normalizeKey(usernameOrKey);
+        const cleanPhone = normalizePhone(phoneStr);
+        if (!userKey) return null;
+        if (this.type === 'mysql') {
+            await this.mysqlPool.query('UPDATE users SET phone = ? WHERE user_key = ?', [cleanPhone, userKey]);
+        } else {
+            this.sqliteDb.prepare('UPDATE users SET phone = ? WHERE user_key = ?').run(cleanPhone, userKey);
+            this.checkpointSqlite();
+        }
+
+        try {
+            if (fs.existsSync(usersFile)) {
+                const raw = JSON.parse(fs.readFileSync(usersFile, 'utf8') || '{}');
+                if (raw[userKey]) {
+                    raw[userKey].phone = cleanPhone;
+                    fs.writeFileSync(usersFile, JSON.stringify(raw, null, 2), 'utf8');
+                }
+            }
+        } catch (e) {}
+
+        return await this.getUser(userKey);
     }
 
     async createUser(userData) {
@@ -571,6 +698,10 @@ class DatabaseManager {
         const crypto = require('crypto');
         let existing = await this.getUser(clean);
         if (existing) {
+            if (extraData && extraData.phone && !existing.phone) {
+                await this.updateUserPhone(existing.username, extraData.phone);
+                existing = await this.getUser(existing.username);
+            }
             // Eğer senkronizasyonla gerçek şifre hash/salt bilgisi geldiyse ve mevcut kayıt varsayılan '123456' ise güncelle
             if (extraData && extraData.salt && extraData.hash && existing.salt) {
                 const defaultHash = crypto.pbkdf2Sync('123456', existing.salt, 1000, 64, 'sha512').toString('hex');
@@ -586,6 +717,7 @@ class DatabaseManager {
         const hash = (extraData && extraData.hash) ? extraData.hash : crypto.pbkdf2Sync('123456', salt, 1000, 64, 'sha512').toString('hex');
         const created = await this.createUser({
             username: clean,
+            phone: (extraData && extraData.phone) ? extraData.phone : (isLikelyPhoneNumber(clean) ? normalizePhone(clean) : ''),
             salt,
             hash,
             avatar: avatar || '/avatars/default.svg',
@@ -645,6 +777,7 @@ class DatabaseManager {
             id: row.id,
             userKey: row.user_key,
             username: row.username,
+            phone: row.phone || (isLikelyPhoneNumber(row.username) ? normalizePhone(row.username) : ''),
             salt: row.salt,
             hash: row.hash,
             avatar: row.avatar || '/avatars/default.svg',
@@ -1090,6 +1223,7 @@ class DatabaseManager {
 
             chatItems.push({
                 username: contact.username,
+                phone: contact.phone || '',
                 avatar: contact.avatar || '/avatars/default.svg',
                 isOnline,
                 statusText: isOnline ? 'Online' : 'Offline',
@@ -1137,5 +1271,7 @@ const db = new DatabaseManager();
 module.exports = {
     db,
     normalizeKey,
+    normalizePhone,
+    isLikelyPhoneNumber,
     getConvoKey
 };

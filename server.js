@@ -75,7 +75,7 @@ function getPrimaryIp() {
 // ==========================================
 // KULLANICI, ŞİFRE, KALICI OTURUM VE GİZLİ MESAJ VERİTABANI (LITE SQL / MYSQL)
 // ==========================================
-const { db, normalizeKey, getConvoKey } = require('./db');
+const { db, normalizeKey, normalizePhone, isLikelyPhoneNumber, getConvoKey } = require('./db');
 let globalIo = null;
 
 function hashPassword(password, salt) {
@@ -112,11 +112,12 @@ async function authenticateToken(req, res, next) {
 // 1. Kayıt Ol API
 app.post('/api/auth/register', async (req, res) => {
     try {
-        const { username, password, resetExisting } = req.body;
+        const { username, password, phone, resetExisting } = req.body;
         if (!username || !password) {
             return res.status(400).json({ success: false, error: 'Kullanıcı adı ve şifre zorunludur' });
         }
         const cleanUser = username.trim();
+        const cleanPhone = phone ? normalizePhone(phone) : (isLikelyPhoneNumber(cleanUser) ? normalizePhone(cleanUser) : '');
         if (cleanUser.length < 2) {
             return res.status(400).json({ success: false, error: 'Kullanıcı adı en az 2 karakter olmalıdır' });
         }
@@ -126,17 +127,21 @@ app.post('/api/auth/register', async (req, res) => {
 
         const existing = await db.getUser(cleanUser);
         if (existing) {
+            if (cleanPhone && !existing.phone) {
+                await db.updateUserPhone(existing.username, cleanPhone);
+                existing.phone = cleanPhone;
+            }
             // Kullanıcı bu kullanıcı adı için şifreyi güncellemek istiyorsa
             if (resetExisting) {
                 const salt = crypto.randomBytes(16).toString('hex');
                 const hash = hashPassword(password, salt);
-                await db.updateUserPassword(cleanUser, salt, hash);
+                await db.updateUserPassword(existing.username, salt, hash);
                 const token = crypto.randomBytes(32).toString('hex');
                 await db.saveSession(token, existing.username);
                 return res.json({
                     success: true,
                     token,
-                    user: { username: existing.username, avatar: existing.avatar },
+                    user: { username: existing.username, phone: existing.phone || cleanPhone || '', avatar: existing.avatar },
                     message: 'Şifreniz güncellendi ve giriş yapıldı.'
                 });
             }
@@ -154,7 +159,7 @@ app.post('/api/auth/register', async (req, res) => {
                 return res.json({
                     success: true,
                     token,
-                    user: { username: existing.username, avatar: existing.avatar },
+                    user: { username: existing.username, phone: existing.phone || cleanPhone || '', avatar: existing.avatar },
                     message: 'Zaten kayıtlısınız, giriş yapıldı.'
                 });
             }
@@ -171,6 +176,7 @@ app.post('/api/auth/register', async (req, res) => {
 
         const newUser = await db.createUser({
             username: cleanUser,
+            phone: cleanPhone,
             salt,
             hash,
             avatar,
@@ -184,6 +190,7 @@ app.post('/api/auth/register', async (req, res) => {
         if (globalIo) {
             globalIo.emit('user:new_registered', {
                 username: cleanUser,
+                phone: cleanPhone,
                 avatar,
                 isOnline: true
             });
@@ -196,7 +203,7 @@ app.post('/api/auth/register', async (req, res) => {
         res.json({
             success: true,
             token,
-            user: { username: cleanUser, avatar }
+            user: { username: cleanUser, phone: cleanPhone, avatar }
         });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
@@ -428,6 +435,7 @@ app.get('/api/users/registered', async (req, res) => {
             const isOnline = onlineUserSockets.has(u.userKey) && onlineUserSockets.get(u.userKey).size > 0;
             return {
                 username: u.username,
+                phone: u.phone || '',
                 avatar: u.avatar || '/avatars/default.svg',
                 lastSeen: isOnline ? 'Online' : (u.lastSeen || 'Offline'),
                 isOnline,
@@ -460,6 +468,7 @@ app.post('/api/users/sync', async (req, res) => {
                 const uAvatar = (item && item.avatar) || '/avatars/default.svg';
                 if (uName && uName.trim().length >= 2) {
                     const extraData = (typeof item === 'object' && item) ? {
+                        phone: item.phone || '',
                         salt: item.salt,
                         hash: item.hash,
                         createdAt: item.createdAt,
@@ -473,6 +482,7 @@ app.post('/api/users/sync', async (req, res) => {
                             const isOnline = onlineUserSockets.has(uKey) && onlineUserSockets.get(uKey).size > 0;
                             globalIo.emit('user:new_registered', {
                                 username: ensured.username,
+                                phone: ensured.phone || '',
                                 avatar: ensured.avatar || '/avatars/default.svg',
                                 isOnline
                             });
@@ -489,6 +499,7 @@ app.post('/api/users/sync', async (req, res) => {
             const isOnline = onlineUserSockets.has(u.userKey) && onlineUserSockets.get(u.userKey).size > 0;
             return {
                 username: u.username,
+                phone: u.phone || '',
                 avatar: u.avatar || '/avatars/default.svg',
                 lastSeen: isOnline ? 'Online' : (u.lastSeen || 'Offline'),
                 isOnline,
@@ -498,6 +509,122 @@ app.post('/api/users/sync', async (req, res) => {
             };
         });
         res.json({ success: true, users: list, deletedUsers: db.getDeletedUserKeys() });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// 5.1.2 Kayıtlı Olmayan veya Kayıtlı Kullanıcıyı Telefon Numarasından Arama / Bulma / Bağlanma API
+app.get('/api/users/search_phone', async (req, res) => {
+    try {
+        const rawQuery = (req.query.q || req.query.phone || '').trim();
+        const cleanDigits = normalizePhone(rawQuery);
+        const all = await db.getAllUsers();
+        const matches = [];
+
+        if (rawQuery) {
+            const qKey = normalizeKey(rawQuery);
+            const last10 = cleanDigits.length >= 10 ? cleanDigits.slice(-10) : cleanDigits;
+            for (const u of all) {
+                const uPhone = normalizePhone(u.phone || '');
+                const nameMatch = normalizeKey(u.username).includes(qKey);
+                const phoneMatch = cleanDigits.length >= 3 && (
+                    (uPhone && (uPhone.includes(cleanDigits) || (last10.length >= 7 && uPhone.endsWith(last10)))) ||
+                    normalizePhone(u.username).includes(cleanDigits)
+                );
+                if (nameMatch || phoneMatch) {
+                    const isOnline = onlineUserSockets.has(u.userKey) && onlineUserSockets.get(u.userKey).size > 0;
+                    matches.push({
+                        username: u.username,
+                        phone: u.phone || (isLikelyPhoneNumber(u.username) ? normalizePhone(u.username) : ''),
+                        avatar: u.avatar || '/avatars/default.svg',
+                        isOnline,
+                        statusText: isOnline ? 'Online' : 'Offline',
+                        lastSeen: isOnline ? 'Online' : (u.lastSeen || 'Offline')
+                    });
+                }
+            }
+        }
+
+        res.json({
+            success: true,
+            query: rawQuery,
+            normalizedPhone: cleanDigits,
+            isPhoneQuery: isLikelyPhoneNumber(rawQuery) || cleanDigits.length >= 7,
+            matches
+        });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+app.post('/api/users/find_by_phone', async (req, res) => {
+    try {
+        const { phone, customName } = req.body || {};
+        if (!phone || String(phone).trim().length < 3) {
+            return res.status(400).json({ success: false, error: 'Lütfen geçerli bir telefon numarası girin.' });
+        }
+
+        const result = await db.findOrCreateUserByPhone(phone, customName);
+        if (!result.success || !result.user) {
+            return res.status(400).json(result);
+        }
+
+        const u = result.user;
+        const uKey = normalizeKey(u.username);
+        const isOnline = onlineUserSockets.has(uKey) && onlineUserSockets.get(uKey).size > 0;
+
+        if (result.isNew && globalIo) {
+            globalIo.emit('user:new_registered', {
+                username: u.username,
+                phone: u.phone || normalizePhone(phone),
+                avatar: u.avatar || '/avatars/default.svg',
+                isOnline
+            });
+        }
+
+        if (typeof syncWithCloudServer === 'function') {
+            syncWithCloudServer().catch(() => {});
+        }
+
+        res.json({
+            success: true,
+            isNew: !!result.isNew,
+            user: {
+                username: u.username,
+                phone: u.phone || normalizePhone(phone),
+                avatar: u.avatar || '/avatars/default.svg',
+                isOnline,
+                statusText: isOnline ? 'Online' : 'Offline',
+                lastSeen: isOnline ? 'Online' : (u.lastSeen || 'Offline')
+            }
+        });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+app.post('/api/users/update_phone', async (req, res) => {
+    try {
+        const { username, phone } = req.body || {};
+        if (!username) {
+            return res.status(400).json({ success: false, error: 'Kullanıcı adı gerekli' });
+        }
+        const updated = await db.updateUserPhone(username, phone || '');
+        if (!updated) {
+            return res.status(404).json({ success: false, error: 'Kullanıcı bulunamadı' });
+        }
+        if (typeof syncWithCloudServer === 'function') {
+            syncWithCloudServer().catch(() => {});
+        }
+        res.json({
+            success: true,
+            user: {
+                username: updated.username,
+                phone: updated.phone || '',
+                avatar: updated.avatar || '/avatars/default.svg'
+            }
+        });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
     }
@@ -862,6 +989,101 @@ app.get('/api/system/notifications/poll', (req, res) => {
     });
 });
 
+// Masaüstü bildirim penceresinden hızlı yanıt gönderme veya mesaj senkronizasyonu API
+app.post('/api/system/quick_reply', async (req, res) => {
+    try {
+        const { sender, recipient, text } = req.body || {};
+        const cleanSender = (sender || localPcUsername || '').trim();
+        const cleanRecipient = (recipient || '').trim();
+        const cleanText = (text || '').trim();
+        if (!cleanSender || !cleanRecipient || !cleanText) {
+            return res.status(400).json({ success: false, error: 'Eksik bilgi' });
+        }
+        await db.ensureUserExists(cleanSender);
+        await db.ensureUserExists(cleanRecipient);
+
+        const savedMsg = await db.saveMessage({
+            id: 'msg_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6),
+            sender: cleanSender,
+            recipient: cleanRecipient,
+            text: cleanText,
+            file: null,
+            timestamp: new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }),
+            date: 'Bugün',
+            createdAt: new Date().toISOString(),
+            read: false
+        });
+
+        if (globalIo) {
+            globalIo.to('user:' + normalizeKey(cleanSender)).emit('chat:message', savedMsg);
+            globalIo.to('user:' + normalizeKey(cleanRecipient)).emit('chat:message', savedMsg);
+            globalIo.emit('system:wakeup', {
+                type: 'message',
+                sender: cleanSender,
+                targetUsername: cleanRecipient,
+                recipient: cleanRecipient,
+                text: cleanText,
+                message: savedMsg
+            });
+        }
+
+        if (typeof forwardMessageToCloud === 'function') {
+            forwardMessageToCloud(savedMsg).catch(() => {});
+        }
+
+        res.json({ success: true, message: savedMsg });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+const seenSyncedMessageIds = new Set();
+
+app.post('/api/messages/sync', async (req, res) => {
+    try {
+        const { messages } = req.body || {};
+        if (Array.isArray(messages)) {
+            for (const m of messages) {
+                if (!m || !m.id || !m.sender || !m.recipient) continue;
+                await db.ensureUserExists(m.sender);
+                await db.ensureUserExists(m.recipient);
+                await db.insertMessageToDbIfNotExists(m);
+
+                if (!seenSyncedMessageIds.has(m.id)) {
+                    seenSyncedMessageIds.add(m.id);
+                    const recKey = normalizeKey(m.recipient);
+                    const isRecOnline = onlineUserSockets.has(recKey) && onlineUserSockets.get(recKey).size > 0;
+                    const msgTime = m.createdAt ? new Date(m.createdAt).getTime() : Date.now();
+                    if (Date.now() - msgTime < 120000) {
+                        addSystemNotification({
+                            type: 'message',
+                            msgId: m.id,
+                            sender: m.sender,
+                            recipient: m.recipient,
+                            text: m.text || (m.file ? '📎 Dosya / Fotoğraf paylaştı' : 'Yeni bir mesaj gönderdi'),
+                            isTargetOnline: isRecOnline
+                        });
+                        if (globalIo) {
+                            globalIo.to('user:' + recKey).emit('chat:message', m);
+                            globalIo.emit('system:wakeup', {
+                                type: 'message',
+                                sender: m.sender,
+                                targetUsername: m.recipient,
+                                recipient: m.recipient,
+                                text: m.text || '',
+                                message: m
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
 // Masaüstü bildirim penceresinden (Program kapalıyken gelen arama ekranından) aramayı reddetme
 app.post('/api/system/call/reject', (req, res) => {
     const { callerUsername, recipient, reason } = req.body || {};
@@ -941,6 +1163,121 @@ const socketToUserMap = new Map();   // socket.id -> { username, avatar }
 // ==========================================
 const CLOUD_SERVER_URL = process.env.CLOUD_SYNC_URL || 'https://hiileti.onrender.com';
 let isCloudSyncing = false;
+let cloudLastNotifId = 0;
+let isCloudNotifPolling = false;
+
+async function forwardMessageToCloud(savedMsg) {
+    if (IS_CLOUD || !savedMsg || typeof fetch !== 'function') return;
+    try {
+        seenSyncedMessageIds.add(savedMsg.id);
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 8000);
+        await fetch(`${CLOUD_SERVER_URL}/api/messages/sync`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ messages: [savedMsg] }),
+            signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+    } catch (e) {}
+}
+
+async function pollCloudNotificationsAndMessages() {
+    if (IS_CLOUD || isCloudNotifPolling || typeof fetch !== 'function') return;
+    isCloudNotifPolling = true;
+    try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 6000);
+        const res = await fetch(`${CLOUD_SERVER_URL}/api/system/notifications/poll?since=${cloudLastNotifId}`, {
+            signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+
+        if (res && res.ok) {
+            const data = await res.json();
+            if (data && data.success) {
+                if (typeof data.lastId === 'number' && data.lastId < cloudLastNotifId) {
+                    cloudLastNotifId = 0;
+                }
+                if (cloudLastNotifId > 0 && Array.isArray(data.notifications) && data.notifications.length > 0) {
+                    for (const item of data.notifications) {
+                        if (!item || !item.type) continue;
+                        if (item.type === 'message') {
+                            const msgId = item.msgId || ('cloud_msg_' + item.id + '_' + Date.now());
+                            if (seenSyncedMessageIds.has(msgId)) continue;
+                            seenSyncedMessageIds.add(msgId);
+
+                            await db.ensureUserExists(item.sender);
+                            await db.ensureUserExists(item.recipient);
+                            const savedMsg = {
+                                id: msgId,
+                                sender: item.sender,
+                                recipient: item.recipient,
+                                text: item.text || '',
+                                file: null,
+                                timestamp: new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }),
+                                date: 'Bugün',
+                                createdAt: new Date().toISOString(),
+                                read: false
+                            };
+                            await db.insertMessageToDbIfNotExists(savedMsg);
+
+                            const recKey = normalizeKey(item.recipient);
+                            const isRecOnline = onlineUserSockets.has(recKey) && onlineUserSockets.get(recKey).size > 0;
+                            addSystemNotification({
+                                type: 'message',
+                                msgId: savedMsg.id,
+                                sender: item.sender,
+                                recipient: item.recipient,
+                                text: item.text || 'Yeni bir mesaj gönderdi',
+                                isTargetOnline: isRecOnline
+                            });
+
+                            if (globalIo) {
+                                globalIo.to('user:' + recKey).emit('chat:message', savedMsg);
+                                globalIo.emit('system:wakeup', {
+                                    type: 'message',
+                                    sender: item.sender,
+                                    targetUsername: item.recipient,
+                                    recipient: item.recipient,
+                                    text: item.text || '',
+                                    message: savedMsg
+                                });
+                            }
+                        } else if (item.type === 'call') {
+                            const recKey = normalizeKey(item.recipient);
+                            const isRecOnline = onlineUserSockets.has(recKey) && onlineUserSockets.get(recKey).size > 0;
+                            addSystemNotification({
+                                type: 'call',
+                                callId: item.callId || ('cloud_call_' + Date.now()),
+                                sender: item.sender,
+                                callerAvatar: item.callerAvatar || '/avatars/default.svg',
+                                recipient: item.recipient,
+                                callType: item.callType || 'voice',
+                                isTargetOnline: isRecOnline
+                            });
+                            if (globalIo) {
+                                globalIo.emit('system:wakeup', {
+                                    type: 'call',
+                                    sender: item.sender,
+                                    targetUsername: item.recipient,
+                                    recipient: item.recipient,
+                                    callType: item.callType || 'voice'
+                                });
+                            }
+                        }
+                    }
+                }
+                if (typeof data.lastId === 'number') {
+                    cloudLastNotifId = data.lastId;
+                }
+            }
+        }
+    } catch (e) {
+    } finally {
+        isCloudNotifPolling = false;
+    }
+}
 
 async function syncWithCloudServer() {
     if (IS_CLOUD || isCloudSyncing || typeof fetch !== 'function') return;
@@ -953,6 +1290,7 @@ async function syncWithCloudServer() {
             deletedUsers,
             users: localUsers.map(u => ({
                 username: u.username,
+                phone: u.phone || '',
                 avatar: u.avatar || '/avatars/default.svg',
                 salt: u.salt,
                 hash: u.hash,
@@ -984,6 +1322,7 @@ async function syncWithCloudServer() {
                     const uName = cu && cu.username ? cu.username.trim() : '';
                     if (uName.length >= 2 && !db.isUserDeleted(uName)) {
                         const ensured = await db.ensureUserExists(uName, cu.avatar || '/avatars/default.svg', {
+                            phone: cu.phone || '',
                             salt: cu.salt,
                             hash: cu.hash,
                             createdAt: cu.createdAt,
@@ -994,6 +1333,7 @@ async function syncWithCloudServer() {
                             const isOnline = onlineUserSockets.has(uKey) && onlineUserSockets.get(uKey).size > 0;
                             globalIo.emit('user:new_registered', {
                                 username: ensured.username,
+                                phone: ensured.phone || '',
                                 avatar: ensured.avatar || '/avatars/default.svg',
                                 isOnline
                             });
@@ -1046,9 +1386,13 @@ async function startServer() {
             console.error('SSL Sertifikası başlatılamadı, sadece HTTP çalışacak:', certErr.message);
         }
 
-        // Başlangıçta ve her 15 saniyede bir farklı ağ / bulut sunucusuyla kayıtlı kullanıcıları senkronize et
-        setTimeout(() => syncWithCloudServer().catch(() => {}), 1500);
-        setInterval(() => syncWithCloudServer().catch(() => {}), 15000);
+        // Başlangıçta ve periyodik olarak farklı ağ / bulut sunucusuyla kayıtlı kullanıcıları ve bildirimleri senkronize et
+        setTimeout(() => {
+            syncWithCloudServer().catch(() => {});
+            pollCloudNotificationsAndMessages().catch(() => {});
+        }, 1500);
+        setInterval(() => syncWithCloudServer().catch(() => {}), 12000);
+        setInterval(() => pollCloudNotificationsAndMessages().catch(() => {}), 3500);
     }
 
     io.on('connection', (socket) => {
@@ -1099,7 +1443,7 @@ async function startServer() {
             });
 
             socket.emit('auth:success', {
-                user: { username, avatar }
+                user: { username, avatar, phone: existing ? (existing.phone || '') : '' }
             });
 
             // PROGRAM KAPALIYKEN VEYA OFFLINE İKEN GELEN ARAMA VARSA ANINDA EKRANA DÜŞÜR!
@@ -1161,14 +1505,30 @@ async function startServer() {
                 return;
             }
 
-            const recipient = ((msg && msg.recipient) || '').trim();
+            let recipient = ((msg && msg.recipient) || '').trim();
             if (!recipient) {
                 if (ack) ack({ success: false, error: 'Alıcı seçilmedi' });
                 return;
             }
 
-            // Alıcının veritabanında kayıtlı kalmasını garantiye al
-            await db.ensureUserExists(recipient);
+            // Eğer alıcı bir telefon numarasıysa (kayıtlı veya kayıtlı olmayan), telefon numarasından bul veya oluştur
+            if (isLikelyPhoneNumber(recipient)) {
+                const phoneRes = await db.findOrCreateUserByPhone(recipient);
+                if (phoneRes && phoneRes.user) {
+                    recipient = phoneRes.user.username;
+                    if (phoneRes.isNewCreated) {
+                        io.emit('user:registered', {
+                            username: phoneRes.user.username,
+                            avatar: phoneRes.user.avatar,
+                            phone: phoneRes.user.phone || '',
+                            online: false
+                        });
+                    }
+                }
+            } else {
+                // Alıcının veritabanında kayıtlı kalmasını garantiye al
+                await db.ensureUserExists(recipient);
+            }
 
             const senderKey = normalizeKey(sender.username);
             const recipientKey = normalizeKey(recipient);
@@ -1250,8 +1610,12 @@ async function startServer() {
                 type: 'message',
                 sender: sender.username,
                 recipient: recipient,
+                targetUsername: recipient,
                 message: savedMsg
             });
+
+            // Bulut sunucusuna da ilet (farklı ağdaki veya programı kapalı olan alıcının ekranına düşmesi için)
+            forwardMessageToCloud(savedMsg).catch(() => {});
         });
 
         // Mesajları Okundu Olarak İşaretleme
@@ -1378,9 +1742,25 @@ async function startServer() {
             const sender = socketToUserMap.get(socket.id);
             if (!sender) return;
 
-            const recipient = (data.recipient || '').trim();
+            let recipient = (data.recipient || '').trim();
             if (!recipient) return;
-            await db.ensureUserExists(recipient);
+
+            if (isLikelyPhoneNumber(recipient)) {
+                const phoneRes = await db.findOrCreateUserByPhone(recipient);
+                if (phoneRes && phoneRes.user) {
+                    recipient = phoneRes.user.username;
+                    if (phoneRes.isNewCreated) {
+                        io.emit('user:registered', {
+                            username: phoneRes.user.username,
+                            avatar: phoneRes.user.avatar,
+                            phone: phoneRes.user.phone || '',
+                            online: false
+                        });
+                    }
+                }
+            } else {
+                await db.ensureUserExists(recipient);
+            }
 
             const recipientKey = normalizeKey(recipient);
             const isRecipientOnline = onlineUserSockets.has(recipientKey) && onlineUserSockets.get(recipientKey).size > 0;
@@ -1418,6 +1798,7 @@ async function startServer() {
                 type: 'call',
                 sender: sender.username,
                 recipient: recipient,
+                targetUsername: recipient,
                 callType: data.callType || 'voice',
                 callPayload
             });

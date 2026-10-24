@@ -1,5 +1,5 @@
 // MSJ Service Worker - Arka Plan Mesaj ve Arama Bildirimleri (Önbellek Kilitlenmesini Önlemek İçin Ağ-Öncelikli)
-const CACHE_NAME = 'msj-cache-v13';
+const CACHE_NAME = 'msj-cache-v14';
 
 let swLastNotificationId = 0;
 let swCurrentUser = '';
@@ -17,6 +17,10 @@ function startSwBackgroundPoll() {
             const res = await fetch(url);
             const data = await res.json();
             if (data && data.success) {
+                if (typeof data.lastId === 'number' && data.lastId < swLastNotificationId) {
+                    swLastNotificationId = 0;
+                    return;
+                }
                 if (data.lastId > swLastNotificationId && swLastNotificationId > 0 && Array.isArray(data.notifications)) {
                     for (const item of data.notifications) {
                         if (swCurrentUser && item.sender && item.sender.toLowerCase() === swCurrentUser.toLowerCase()) continue;

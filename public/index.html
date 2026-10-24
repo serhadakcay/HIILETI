@@ -80,6 +80,7 @@
                 <!-- Açılır Menü (Üç Nokta) -->
                 <div class="dropdown-menu" id="headerDropdown" style="display:none;">
                     <div class="dropdown-item" id="menuItemAudioSettings">🎧 Mikrofon ve Hoparlör Ayarları</div>
+                    <div class="dropdown-item" id="menuItemPhoneLookup">📱 Telefon Numarasından Kişi Bul</div>
                     <div class="dropdown-item" id="menuItemQr">📱 Telefondan Bağlan / QR Kod</div>
                     <div class="dropdown-item" id="menuItemCloudGuide">☁️ 7/24 Kullanım (PC Kapalıyken)</div>
                     <div class="dropdown-item" id="menuItemNewChat">💬 Yeni Yazışma Başlat</div>
@@ -97,7 +98,7 @@
                     <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" class="search-icon">
                         <path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/>
                     </svg>
-                    <input type="text" id="inputSearchChats" placeholder="Kullanıcı ara veya sohbet başlat" autocomplete="off" />
+                    <input type="text" id="inputSearchChats" placeholder="Kişi ara veya telefon numarası yazın (05XX...)" autocomplete="off" />
                     <button class="clear-search-btn" id="btnClearSearch" style="display:none;">&times;</button>
                 </div>
             </div>
@@ -108,6 +109,7 @@
                 <button type="button" class="filter-chip" data-filter="online">Online</button>
                 <button type="button" class="filter-chip" data-filter="unread">Okunmamış</button>
                 <button type="button" class="filter-chip" data-filter="favorites">Favoriler</button>
+                <button type="button" class="filter-chip" id="btnQuickPhoneLookup" style="background:rgba(0,168,132,0.18);color:#25d366;border:1px solid rgba(0,168,132,0.45);font-weight:600;" title="Kayıtlı olmayan kişiyi telefon numarasından bul">📱 Numaradan Bul</button>
                 <button type="button" class="filter-chip plus-chip" id="btnAddFilter" title="Filtre Ekle">+</button>
             </div>
 
@@ -291,13 +293,19 @@
             <form id="authForm" autocomplete="on">
                 <!-- Kullanıcı Seçim / Giriş Alanı -->
                 <div class="form-field" id="fieldUsernameSelect">
-                    <label for="inputUsername">Kullanıcı Adı</label>
+                    <label for="inputUsername">Kullanıcı Adı veya Telefon Numarası</label>
                     <div class="input-with-select">
                         <select id="selectRegisteredUser" class="auth-select" style="display:none;">
                             <option value="">-- Kayıtlı Kullanıcı Seçin --</option>
                         </select>
-                        <input type="text" id="inputUsername" class="auth-input" placeholder="Kullanıcı adınızı yazın" autocomplete="username" required />
+                        <input type="text" id="inputUsername" class="auth-input" placeholder="Kullanıcı adınızı veya telefon numaranızı yazın" autocomplete="username" required />
                     </div>
+                </div>
+
+                <!-- Yeni Kayıt İçin Telefon Numarası -->
+                <div class="form-field" id="fieldPhone" style="display:none;">
+                    <label for="inputPhone">📱 Telefon Numarası (Numarayla bulunabilmeniz için)</label>
+                    <input type="tel" id="inputPhone" class="auth-input" placeholder="Örn: 05XX XXX XX XX (İsteğe bağlı)" autocomplete="tel" />
                 </div>
 
                 <!-- Şifre Alanı -->
@@ -358,9 +366,13 @@
                     <img id="profileUserAvatar" class="avatar-large" src="/avatars/default.svg" alt="Avatar">
                 </div>
                 <h2 id="profileUsernameDisplay" class="profile-name">Kullanıcı</h2>
+                <div id="profilePhoneDisplay" style="color:#00a884;font-size:14px;font-weight:600;margin-top:4px;margin-bottom:6px;">📱 Telefon: Eklenmedi</div>
                 <div class="profile-badge-online">🟢 Çevrimiçi (Aktif Hesap)</div>
                 
                 <div class="profile-actions-list">
+                    <button type="button" class="profile-action-btn primary" id="btnProfileUpdatePhone">
+                        📱 Telefon Numaramı Ekle / Güncelle
+                    </button>
                     <button type="button" class="profile-action-btn primary" id="btnProfileAudioSettings">
                         🎧 Mikrofon ve Hoparlör Ayarları
                     </button>
@@ -724,8 +736,24 @@
                     <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" class="search-icon">
                         <path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/>
                     </svg>
-                    <input type="text" id="inputSearchNewChat" placeholder="Kişi ara veya adını yazın..." autocomplete="off" />
+                    <input type="text" id="inputSearchNewChat" placeholder="Kişi adı veya telefon numarası yazın (05XX...)" autocomplete="off" />
                     <button type="button" class="clear-search-btn" id="btnClearNewChatSearch" style="display:none;">&times;</button>
+                </div>
+            </div>
+
+            <!-- KAYITLI OLMAYAN KULLANICIYI TELEFON NUMARASINDAN BULMA PANELİ -->
+            <div class="phone-lookup-panel" id="phoneLookupBox" style="margin:10px 14px;padding:12px 14px;background:rgba(0,168,132,0.10);border:1px solid rgba(0,168,132,0.35);border-radius:12px;">
+                <div style="font-size:13px;font-weight:700;color:#25d366;margin-bottom:8px;display:flex;align-items:center;gap:6px;">
+                    <span>📱 Kayıtlı Olmayan Kişiyi Telefon Numarasından Bul</span>
+                </div>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+                    <input type="tel" id="inputLookupPhone" placeholder="Telefon Numarası (Örn: 0555 123 45 67)" autocomplete="off" style="flex:2;min-width:170px;padding:9px 12px;border-radius:8px;border:1px solid #2a3942;background:#111b21;color:#e9edef;font-size:14px;outline:none;" />
+                    <input type="text" id="inputLookupCustomName" placeholder="İsim (İsteğe bağlı)" autocomplete="off" style="flex:1;min-width:120px;padding:9px 12px;border-radius:8px;border:1px solid #2a3942;background:#111b21;color:#e9edef;font-size:13px;outline:none;" />
+                </div>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                    <button type="button" id="btnLookupStartChat" style="flex:2;padding:9px 12px;border-radius:8px;border:none;background:#00a884;color:#fff;font-weight:700;font-size:13px;cursor:pointer;">💬 Numarayı Bul ve Mesaj Gönder</button>
+                    <button type="button" id="btnLookupVoiceCall" style="flex:1;padding:9px 10px;border-radius:8px;border:1px solid rgba(0,168,132,0.5);background:#1f2c34;color:#25d366;font-weight:600;font-size:13px;cursor:pointer;">📞 Sesli Ara</button>
+                    <button type="button" id="btnLookupVideoCall" style="flex:1;padding:9px 10px;border-radius:8px;border:1px solid rgba(0,168,132,0.5);background:#1f2c34;color:#25d366;font-weight:600;font-size:13px;cursor:pointer;">📹 Görüntülü</button>
                 </div>
             </div>
 
@@ -779,6 +807,6 @@
         })();
     </script>
     <script src="/socket.io/socket.io.js"></script>
-    <script src="/app.js?v=11"></script>
+    <script src="/app.js?v=12"></script>
 </body>
 </html>
