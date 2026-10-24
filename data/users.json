@@ -1,6 +1,7 @@
 {
   "s1": {
     "username": "S1",
+    "phone": "",
     "salt": "b237bb62835abadfae267a9c841a87b8",
     "hash": "b4760464643e08dc4a8007d4f09cb3bdcc4c71cdc5d3c799be713ba44b7efdbc948604a98d5d95900464fc2bc9eca8046b2040bce2b76fe8a3ec87540210c448",
     "avatar": "/avatars/default.svg",
@@ -9,6 +10,7 @@
   },
   "ser1": {
     "username": "Ser1",
+    "phone": "",
     "salt": "016648385251d3a98784e50beebc590d",
     "hash": "46b7021a70a7841126122c4a95b698c52ca63311c8c0813f63e36957e8098d6c7369cc9d018403059743ac49de82585c20e8dcc60034211d67b0298a63b3b43b",
     "avatar": "/avatars/default.svg",
@@ -17,18 +19,29 @@
   },
   "serhad": {
     "username": "Serhad",
+    "phone": "",
     "salt": "b530aaa4e040fa61a28e8ada73f8bf61",
     "hash": "dd45db0b32ae583f0254f2be096eea5e7e81ed85ff0fd89f2b308a7aa36e4c1973f0dfc61ce205d271adefeccd18c74982d528335931f8f8d48ca6c3e57a0f64",
     "avatar": "/avatars/default.svg",
-    "lastSeen": "Offline",
+    "lastSeen": "Online",
     "createdAt": "2026-10-09T12:40:27.927Z"
   },
   "cözücem": {
     "username": "cözücem",
+    "phone": "",
     "salt": "32a82ec67342433f4a27730eaea27ff2",
     "hash": "4c8b9c057f30b84c6e54aa64a7a68be6aff1d3047676135a676f49941bee803859f6eee499530ebefc24a66a71461c47177baca61d8cc708378d29ff23c06789",
     "avatar": "/avatars/default.svg",
     "lastSeen": "Offline",
     "createdAt": "2026-10-17T18:29:41.862Z"
+  },
+  "05320524648": {
+    "username": "05320524648",
+    "phone": "05320524648",
+    "salt": "8c57ec6bd0654827f85ae8e42e8fe319",
+    "hash": "7c757617b9ee811bedfce09b90526b005bd68ac2461853cb6addc02ebfeba4c2d5fcd1941096e6d48d2bb348693c95984f18ea88c0295a93ebdd59abfe8355b0",
+    "avatar": "/avatars/default.svg",
+    "lastSeen": "Offline",
+    "createdAt": "2026-10-24T16:03:21.641Z"
   }
 }

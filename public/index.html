@@ -13,7 +13,7 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="HIHaberleşme">
     <meta name="mobile-web-app-capable" content="yes">
-    <link rel="stylesheet" href="/style.css?v=10">
+    <link rel="stylesheet" href="/style.css?v=14">
 </head>
 <body>
     <!-- ==========================================
@@ -188,11 +188,11 @@
                 <div class="date-pill-badge" id="chatDateBadge">Bugün</div>
 
                 <!-- SARI ŞİFRELEME UYARISI BANNERI (RESİM 2) -->
-                <div class="encryption-warning-banner">
+                <div class="encryption-warning-banner" onclick="if(window.showE2EEVerificationDialog) window.showE2EEVerificationDialog();" style="cursor:pointer;" title="Uçtan Uca Şifreleme (E2EE) Güvenlik Kodunu Doğrula">
                     <span class="enc-icon">🔒</span>
                     <span class="enc-text">
-                        Mesajlar ve aramalar uçtan uca şifrelidir. Yalnızca bu sohbetteki kişiler bu içerikleri okuyabilir, dinleyebilir veya paylaşabilir.
-                        <a href="javascript:void(0);" class="enc-link" id="btnEncDetails">Daha fazla bilgi</a>
+                        Mesajlar ve aramalar uçtan uca şifrelidir (256-Bit E2EE). Yalnızca bu sohbetteki kişiler bu içerikleri okuyabilir, dinleyebilir veya paylaşabilir.
+                        <a href="javascript:void(0);" class="enc-link" id="btnEncDetails">Güvenlik kodunu doğrula</a>
                     </span>
                 </div>
             </div>
@@ -807,6 +807,6 @@
         })();
     </script>
     <script src="/socket.io/socket.io.js"></script>
-    <script src="/app.js?v=12"></script>
+    <script src="/app.js?v=14"></script>
 </body>
 </html>

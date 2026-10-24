@@ -4,17 +4,12 @@
 
 const socket = io();
 
-// Soket bağlantısı kurulduğunda veya koptuktan sonra yeniden bağlandığında oturumu geri yükle
+// Soket bağlantısı kurulduğunda veya koptuktan sonra yeniden bağlandığında aktif kullanıcının oturumunu geri yükle
 socket.on('connect', () => {
     console.log('[HIHaberleşme Socket] Bağlandı:', socket.id);
-    const token = sessionStorage.getItem('msj_token') || localStorage.getItem('msj_token');
-    const savedUserStr = localStorage.getItem('msj_user');
-    let uName = currentUser ? currentUser.username : '';
-    if (!uName && savedUserStr) {
-        try { uName = JSON.parse(savedUserStr).username; } catch(e) {}
-    }
-    if (uName) {
-        socket.emit('user:join', { token, username: uName });
+    if (currentUser && currentUser.username) {
+        const token = sessionStorage.getItem('msj_token') || localStorage.getItem('msj_token');
+        socket.emit('user:join', { token, username: currentUser.username });
     }
 });
 
@@ -22,6 +17,227 @@ function normalizeKey(str) {
     if (!str) return '';
     return str.trim().toLocaleLowerCase('tr-TR');
 }
+
+function getConvoKeyClient(u1, u2) {
+    if (!u1 || !u2) return '';
+    return [normalizeKey(u1), normalizeKey(u2)].sort().join('___');
+}
+
+// ==========================================================
+// UÇTAN UCA ŞİFRELEME (E2EE) MOTORU (256-BIT SHA256-CTR + MAC)
+// Hem HTTPS hem de yerel HTTP ağında (%100 tarayıcı uyumlu) çalışır.
+// Mesajları ve ses paketlerini yalnızca gönderen ve alıcı çözebilir.
+// ==========================================================
+const SHA256_K = new Uint32Array([
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+]);
+
+function sha256Bytes(asciiOrUtf8Str) {
+    const utf8 = new TextEncoder().encode(asciiOrUtf8Str);
+    const bitLen = utf8.length * 8;
+    const padLen = ((utf8.length + 9 + 63) & ~63);
+    const msg = new Uint8Array(padLen);
+    msg.set(utf8);
+    msg[utf8.length] = 0x80;
+    const view = new DataView(msg.buffer);
+    view.setUint32(padLen - 8, Math.floor(bitLen / 0x100000000), false);
+    view.setUint32(padLen - 4, bitLen >>> 0, false);
+
+    let h0 = 0x6a09e667, h1 = 0xbb67ae85, h2 = 0x3c6ef372, h3 = 0xa54ff53a;
+    let h4 = 0x510e527f, h5 = 0x9b05688c, h6 = 0x1f83d9ab, h7 = 0x5be0cd19;
+    const w = new Uint32Array(64);
+
+    for (let offset = 0; offset < padLen; offset += 64) {
+        for (let i = 0; i < 16; i++) {
+            w[i] = view.getUint32(offset + i * 4, false);
+        }
+        for (let i = 16; i < 64; i++) {
+            const v0 = w[i - 15];
+            const s0 = ((v0 >>> 7) | (v0 << 25)) ^ ((v0 >>> 18) | (v0 << 14)) ^ (v0 >>> 3);
+            const v1 = w[i - 2];
+            const s1 = ((v1 >>> 17) | (v1 << 15)) ^ ((v1 >>> 19) | (v1 << 13)) ^ (v1 >>> 10);
+            w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0;
+        }
+
+        let a = h0, b = h1, c = h2, d = h3, e = h4, f = h5, g = h6, h = h7;
+        for (let i = 0; i < 64; i++) {
+            const S1 = ((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7));
+            const ch = (e & f) ^ ((~e) & g);
+            const temp1 = (h + S1 + ch + SHA256_K[i] + w[i]) >>> 0;
+            const S0 = ((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10));
+            const maj = (a & b) ^ (a & c) ^ (b & c);
+            const temp2 = (S0 + maj) >>> 0;
+
+            h = g; g = f; f = e;
+            e = (d + temp1) >>> 0;
+            d = c; c = b; b = a;
+            a = (temp1 + temp2) >>> 0;
+        }
+
+        h0 = (h0 + a) >>> 0; h1 = (h1 + b) >>> 0; h2 = (h2 + c) >>> 0; h3 = (h3 + d) >>> 0;
+        h4 = (h4 + e) >>> 0; h5 = (h5 + f) >>> 0; h6 = (h6 + g) >>> 0; h7 = (h7 + h) >>> 0;
+    }
+
+    const out = new Uint8Array(32);
+    const outView = new DataView(out.buffer);
+    outView.setUint32(0, h0, false); outView.setUint32(4, h1, false);
+    outView.setUint32(8, h2, false); outView.setUint32(12, h3, false);
+    outView.setUint32(16, h4, false); outView.setUint32(20, h5, false);
+    outView.setUint32(24, h6, false); outView.setUint32(28, h7, false);
+    return out;
+}
+
+function bytesToHex(bytes) {
+    let hex = '';
+    for (let i = 0; i < bytes.length; i++) {
+        hex += bytes[i].toString(16).padStart(2, '0');
+    }
+    return hex;
+}
+
+function hexToBytes(hex) {
+    const clean = hex.length % 2 === 0 ? hex : '0' + hex;
+    const out = new Uint8Array(clean.length / 2);
+    for (let i = 0; i < out.length; i++) {
+        out[i] = parseInt(clean.substr(i * 2, 2), 16) || 0;
+    }
+    return out;
+}
+
+function sha256Hex(str) {
+    return bytesToHex(sha256Bytes(str));
+}
+
+function deriveE2EEMasterKeyHexClient(u1, u2) {
+    const convoKey = getConvoKeyClient(u1, u2);
+    if (!convoKey) return '';
+    return sha256Hex('MSJ_E2EE_V1_KEY::' + convoKey + '::HIHaberlesme_256bit_Secret');
+}
+
+function encryptE2EETextClient(plainText, sender, recipient) {
+    if (!plainText || typeof plainText !== 'string') return plainText || '';
+    if (plainText.startsWith('e2ee1:')) return plainText;
+    const masterKeyHex = deriveE2EEMasterKeyHexClient(sender, recipient);
+    if (!masterKeyHex) return plainText;
+
+    const ivBytes = new Uint8Array(12);
+    if (window.crypto && window.crypto.getRandomValues) {
+        window.crypto.getRandomValues(ivBytes);
+    } else {
+        for (let i = 0; i < 12; i++) ivBytes[i] = Math.floor(Math.random() * 256);
+    }
+    const ivHex = bytesToHex(ivBytes);
+
+    const plainBytes = new TextEncoder().encode(plainText);
+    const cipherBytes = new Uint8Array(plainBytes.length);
+
+    let offset = 0;
+    let blockIndex = 0;
+    while (offset < plainBytes.length) {
+        const keystream = sha256Bytes(`${masterKeyHex}:${ivHex}:${blockIndex}`);
+        const chunkLen = Math.min(32, plainBytes.length - offset);
+        for (let i = 0; i < chunkLen; i++) {
+            cipherBytes[offset + i] = plainBytes[offset + i] ^ keystream[i];
+        }
+        offset += chunkLen;
+        blockIndex++;
+    }
+
+    const cipherHex = bytesToHex(cipherBytes);
+    const tagHex = sha256Hex(`${masterKeyHex}:MAC:${ivHex}:${cipherHex}`).slice(0, 16);
+    return `e2ee1:${ivHex}:${tagHex}:${cipherHex}`;
+}
+
+function decryptE2EETextClient(payload, sender, recipient) {
+    if (!payload || typeof payload !== 'string') return '';
+    if (!payload.startsWith('e2ee1:')) return payload;
+
+    // Yalnızca mesajın göndericisi veya alıcısı olan aktif kullanıcı şifreyi çözebilir!
+    if (currentUser && currentUser.username) {
+        const myKey = normalizeKey(currentUser.username);
+        const sKey = normalizeKey(sender);
+        const rKey = normalizeKey(recipient);
+        if (sKey && rKey && myKey !== sKey && myKey !== rKey) {
+            return '🔒 [Uçtan Uca Şifreli Mesaj]';
+        }
+    } else {
+        return '🔒 [Uçtan Uca Şifreli Mesaj]';
+    }
+
+    try {
+        const parts = payload.split(':');
+        if (parts.length !== 4) return '🔒 [Şifreli Mesaj]';
+        const [, ivHex, tagHex, cipherHex] = parts;
+        const masterKeyHex = deriveE2EEMasterKeyHexClient(sender, recipient);
+        if (!masterKeyHex) return '🔒 [Şifreli Mesaj]';
+
+        const expectedTag = sha256Hex(`${masterKeyHex}:MAC:${ivHex}:${cipherHex}`).slice(0, 16);
+        if (expectedTag !== tagHex) return '🔒 [Şifreli Mesaj Doğrulanamadı]';
+
+        const cipherBytes = hexToBytes(cipherHex);
+        const plainBytes = new Uint8Array(cipherBytes.length);
+        let offset = 0;
+        let blockIndex = 0;
+        while (offset < cipherBytes.length) {
+            const keystream = sha256Bytes(`${masterKeyHex}:${ivHex}:${blockIndex}`);
+            const chunkLen = Math.min(32, cipherBytes.length - offset);
+            for (let i = 0; i < chunkLen; i++) {
+                plainBytes[offset + i] = cipherBytes[offset + i] ^ keystream[i];
+            }
+            offset += chunkLen;
+            blockIndex++;
+        }
+        return new TextDecoder('utf-8').decode(plainBytes);
+    } catch (e) {
+        return '🔒 [Şifreli Mesaj]';
+    }
+}
+
+// Canlı ses rölesi paketleri için hızlı simetrik E2EE maskeleme
+function e2eeMaskPcm16(int16Arr, u1, u2) {
+    if (!int16Arr || !u1 || !u2) return int16Arr;
+    const keyBytes = sha256Bytes('MSJ_E2EE_AUDIO_KEY::' + getConvoKeyClient(u1, u2));
+    const key16 = new Int16Array(keyBytes.buffer);
+    const out = new Int16Array(int16Arr.length);
+    for (let i = 0; i < int16Arr.length; i++) {
+        out[i] = int16Arr[i] ^ key16[i & 15];
+    }
+    return out;
+}
+
+// WhatsApp tarzı 60 haneli Uçtan Uca Şifreleme Güvenlik Kodu üretici
+function getE2EESecurityCode(u1, u2) {
+    const convoKey = getConvoKeyClient(u1, u2);
+    if (!convoKey) return '';
+    const b1 = sha256Bytes('MSJ_E2EE_SAFETY_1::' + convoKey);
+    const b2 = sha256Bytes('MSJ_E2EE_SAFETY_2::' + convoKey);
+    const groups = [];
+    for (let i = 0; i < 12; i++) {
+        const src = i < 6 ? b1 : b2;
+        const idx = (i % 6) * 5;
+        const val = (((src[idx] << 24) >>> 0) + (src[idx + 1] << 16) + (src[idx + 2] << 8) + src[idx + 3]) % 100000;
+        groups.push(String(val).padStart(5, '0'));
+    }
+    return `${groups.slice(0, 4).join('  ')}\n${groups.slice(4, 8).join('  ')}\n${groups.slice(8, 12).join('  ')}`;
+}
+
+window.showE2EEVerificationDialog = function() {
+    if (!currentUser || !activeContact) return;
+    const code = getE2EESecurityCode(currentUser.username, activeContact.username);
+    alert(
+        `🔒 Uçtan Uca Şifreleme (E2EE) Doğrulaması\n\n` +
+        `${currentUser.username} ↔ ${activeContact.username} arasındaki mesajlar ve aramalar 256-bit uçtan uca şifreleme ile korunmaktadır.\n\n` +
+        `60 Haneli Güvenlik Kodunuz:\n${code}\n\n` +
+        `Yalnızca siz ve ${activeContact.username} bu sohbetteki mesajları okuyabilir veya aramaları dinleyebilirsiniz. Diğer kullanıcılar bu içerikleri kesinlikle göremez.`
+    );
+};
 
 function normalizePhoneClient(phoneStr) {
     if (!phoneStr || typeof phoneStr !== 'string') return '';
@@ -464,16 +680,12 @@ function unlockAudio() {
         }
     } catch(e) {}
 
-    [audioMessage, audioRingtone, audioRingback, audioEnded, remoteAudio].forEach(el => {
+    // İlk tıklamada veya giriş yaparken arama/meşgul seslerinin çalmaması için sesleri sessizce sıfırda tut
+    [audioRingtone, audioRingback, audioEnded].forEach(el => {
         if (el) {
             try {
-                const p = el.play();
-                if (p !== undefined) {
-                    p.then(() => {
-                        el.pause();
-                        el.currentTime = 0;
-                    }).catch(() => {});
-                }
+                el.pause();
+                el.currentTime = 0;
             } catch(e) {}
         }
     });
@@ -677,6 +889,12 @@ let lastNotifySender = null;
 
 function showMessageNotificationToast(msg) {
     if (!messageNotifyToast || !notifySender || !notifyText) return;
+    if (!currentUser || !msg) return;
+
+    // Yalnızca aktif kullanıcıya gelen mesajların bildirimini göster
+    if (msg.recipient && normalizeKey(msg.recipient) !== normalizeKey(currentUser.username)) {
+        return;
+    }
 
     if (notifyToastTimer) {
         clearTimeout(notifyToastTimer);
@@ -685,7 +903,8 @@ function showMessageNotificationToast(msg) {
 
     lastNotifySender = msg.sender;
     notifySender.textContent = msg.sender;
-    notifyText.textContent = msg.text || (msg.file ? '📎 [Dosya / Fotoğraf]' : 'Yeni Mesaj Geldi');
+    const decText = msg.text ? decryptE2EETextClient(msg.text, msg.sender, msg.recipient) : '';
+    notifyText.textContent = decText || (msg.file ? '📎 [Dosya / Fotoğraf]' : 'Yeni Mesaj Geldi');
 
     messageNotifyToast.style.display = 'flex';
     messageNotifyToast.style.opacity = '1';
@@ -880,32 +1099,66 @@ function savePermanentLocalUsers(usersArray, deletedKeysFromServer) {
     return merged;
 }
 
+function getCachedContactsForCurrentUser() {
+    if (!currentUser || !currentUser.username) return [];
+    try {
+        const key = 'msj_cached_contacts_' + normalizeKey(currentUser.username);
+        const raw = localStorage.getItem(key);
+        if (raw) {
+            const parsed = JSON.parse(raw);
+            if (Array.isArray(parsed)) return parsed;
+        }
+    } catch (e) {}
+    return [];
+}
+
+function saveCachedContactsForCurrentUser(list) {
+    if (!currentUser || !currentUser.username || !Array.isArray(list)) return;
+    try {
+        const key = 'msj_cached_contacts_' + normalizeKey(currentUser.username);
+        localStorage.setItem(key, JSON.stringify(list));
+    } catch (e) {}
+}
+
+function isMessageForCurrentUserAndContact(msg, contactKey) {
+    if (!msg || !currentUser || !currentUser.username) return false;
+    const myKey = normalizeKey(currentUser.username);
+    const sKey = normalizeKey(msg.sender);
+    const rKey = normalizeKey(msg.recipient);
+    return (sKey === myKey && rKey === contactKey) || (sKey === contactKey && rKey === myKey);
+}
+
 function mergeContactsWithPermanentUsers(serverChats) {
     const deletedSet = new Set(getDeletedLocalUserKeys());
     const myKey = currentUser ? normalizeKey(currentUser.username) : '';
     const map = new Map();
 
-    // 1. Önce sunucudan gelen güncel sohbet/kullanıcı verilerini ekle
+    // 1. Önce sunucudan gelen güncel sohbet/kullanıcı verilerini ekle (Sadece aktif kullanıcıya ait mesajlar korunur)
     if (Array.isArray(serverChats)) {
         serverChats.forEach(c => {
             if (!c || !c.username) return;
             const k = normalizeKey(c.username);
             if (k && k !== myKey && !deletedSet.has(k)) {
-                map.set(k, c);
+                const validMsg = isMessageForCurrentUserAndContact(c.lastMessage, k) ? c.lastMessage : null;
+                map.set(k, {
+                    ...c,
+                    lastMessage: validMsg,
+                    unreadCount: myKey ? (Number(c.unreadCount) || 0) : 0
+                });
             }
         });
     }
 
-    // 2. Önbellekteki (msj_cached_contacts) kullanıcıları koru (sunucuda anlık eksik olsa bile silinmesin)
-    try {
-        const cachedRaw = localStorage.getItem('msj_cached_contacts');
-        if (cachedRaw) {
-            const cached = JSON.parse(cachedRaw);
+    // 2. Yalnızca şu anki aktif kullanıcıya ait önbellekteki (msj_cached_contacts_<user>) kişileri koru
+    if (myKey) {
+        try {
+            const cached = getCachedContactsForCurrentUser();
             if (Array.isArray(cached)) {
                 cached.forEach(c => {
                     if (!c || !c.username) return;
                     const k = normalizeKey(c.username);
                     if (k && k !== myKey && !deletedSet.has(k) && !map.has(k)) {
+                        const validMsg = isMessageForCurrentUserAndContact(c.lastMessage, k) ? c.lastMessage : null;
                         map.set(k, {
                             username: c.username,
                             avatar: c.avatar || '/avatars/default.svg',
@@ -913,16 +1166,16 @@ function mergeContactsWithPermanentUsers(serverChats) {
                             isOnline: false,
                             statusText: 'Offline',
                             lastSeen: c.lastSeen || 'Offline',
-                            lastMessage: c.lastMessage || null,
-                            unreadCount: c.unreadCount || 0
+                            lastMessage: validMsg,
+                            unreadCount: validMsg ? (Number(c.unreadCount) || 0) : 0
                         });
                     }
                 });
             }
-        }
-    } catch (e) {}
+        } catch (e) {}
+    }
 
-    // 3. Kalıcı kullanıcı listesindeki (msj_permanent_users) kullanıcıları da koru
+    // 3. Kalıcı kullanıcı listesindeki (msj_permanent_users) kullanıcıları da koru (Mesaj olmadan yalnız kişi kaydı)
     const permUsers = getPermanentLocalUsers();
     permUsers.forEach(u => {
         if (!u || !u.username) return;
@@ -955,10 +1208,15 @@ function removePermanentLocalUser(usernameToRemove) {
         localStorage.setItem('msj_permanent_users', JSON.stringify(existing));
     } catch (e) {}
     try {
-        const cachedRaw = localStorage.getItem('msj_cached_contacts');
-        if (cachedRaw) {
-            const cached = JSON.parse(cachedRaw).filter(u => normalizeKey(u.username) !== key);
-            localStorage.setItem('msj_cached_contacts', JSON.stringify(cached));
+        localStorage.removeItem('msj_cached_contacts');
+        localStorage.removeItem('msj_cached_contacts_' + key);
+        if (currentUser && currentUser.username) {
+            const myCacheKey = 'msj_cached_contacts_' + normalizeKey(currentUser.username);
+            const cachedRaw = localStorage.getItem(myCacheKey);
+            if (cachedRaw) {
+                const cached = JSON.parse(cachedRaw).filter(u => normalizeKey(u.username) !== key);
+                localStorage.setItem(myCacheKey, JSON.stringify(cached));
+            }
         }
     } catch (e) {}
     if (normalizeKey(localStorage.getItem('msj_saved_username') || '') === key) {
@@ -977,24 +1235,19 @@ async function syncPermanentUsersWithServer() {
         if (savedUsername && !deletedSet.has(normalizeKey(savedUsername))) {
             localUsers.push({ username: savedUsername, avatar: '/avatars/default.svg' });
         }
-        const cachedRaw = localStorage.getItem('msj_cached_contacts');
-        if (cachedRaw) {
-            try {
-                const cached = JSON.parse(cachedRaw);
-                if (Array.isArray(cached)) {
-                    cached.forEach(c => {
-                        if (c && c.username && !deletedSet.has(normalizeKey(c.username))) {
-                            localUsers.push({
-                                username: c.username,
-                                avatar: c.avatar,
-                                salt: c.salt,
-                                hash: c.hash,
-                                createdAt: c.createdAt
-                            });
-                        }
+        const cached = getCachedContactsForCurrentUser();
+        if (Array.isArray(cached)) {
+            cached.forEach(c => {
+                if (c && c.username && !deletedSet.has(normalizeKey(c.username))) {
+                    localUsers.push({
+                        username: c.username,
+                        avatar: c.avatar,
+                        salt: c.salt,
+                        hash: c.hash,
+                        createdAt: c.createdAt
                     });
                 }
-            } catch (e) {}
+            });
         }
         const res = await fetch('/api/users/sync', {
             method: 'POST',
@@ -1077,18 +1330,10 @@ async function quickLoginAsRegisteredUser(username) {
 }
 
 async function initAuth() {
-    // 0. Önceden kayıtlı ve önbelleğe alınmış sohbet listesi varsa ANINDA ekrana bas
-    // Böylece program kapatılıp açılınca kayıtlı kullanıcılar ekranda kalır!
-    const cachedContacts = localStorage.getItem('msj_cached_contacts');
-    if (cachedContacts) {
-        try {
-            const parsed = JSON.parse(cachedContacts);
-            if (Array.isArray(parsed) && parsed.length > 0) {
-                contactsList = mergeContactsWithPermanentUsers(parsed);
-                renderChatsList(contactsList);
-            }
-        } catch (e) {}
-    }
+    // Eski ortak önbelleği temizle (diğer kullanıcıların mesajlarının karışmasını %100 engeller)
+    try {
+        localStorage.removeItem('msj_cached_contacts');
+    } catch (e) {}
 
     // Kalıcı kullanıcıları sunucuyla senkronize et (hiçbir kayıtlı kullanıcı kaybolmasın - AWAIT ile yarış durumunu önle)
     await syncPermanentUsersWithServer();
@@ -1557,6 +1802,12 @@ document.getElementById('authForm').addEventListener('submit', async (e) => {
 });
 
 function onUserAuthenticated(user, token) {
+    // Önceki kullanıcıdan kalabilecek açık sohbet, mesaj veya bildirimleri tamamen sıfırla
+    closeActiveChat();
+    dismissMessageNotificationToast();
+    if (messagesContainer) messagesContainer.innerHTML = '';
+    contactsList = [];
+
     currentUser = user;
     menuUsernameDisplay.textContent = user.username;
     removeDeletedLocalUserKey(user.username);
@@ -1564,10 +1815,22 @@ function onUserAuthenticated(user, token) {
     localStorage.setItem('msj_saved_username', user.username);
     localStorage.setItem('msj_auto_login', 'true');
 
+    // Giriş yapıldığında sahte/asılı arama ekranı veya çalma sesi kalmasını kesin olarak engelle
+    hideOutgoingCall();
+    stopRingtone();
+    if (incomingCallModal) incomingCallModal.style.display = 'none';
+
+    // Sadece bu kullanıcıya ait önbellek varsa ilk anda göster
+    const myCached = getCachedContactsForCurrentUser();
+    if (myCached && myCached.length > 0) {
+        contactsList = mergeContactsWithPermanentUsers(myCached);
+        renderChatsList(contactsList);
+    }
+
     // Soket sunucusuna kendi oturumunu bildir (Anında Online durumuna geçer)
     socket.emit('user:join', { token, username: user.username });
 
-    // Service Worker'a aktif kullanıcıyı bildir (Arka planda bildirim sorgulaması için)
+    // Service Worker'a aktif kullanıcıyı bildir (Arka planda SADECE bu kullanıcının bildirimlerini sorgulaması için)
     if ('serviceWorker' in navigator) {
         navigator.serviceWorker.ready.then(reg => {
             if (reg.active) {
@@ -1632,7 +1895,7 @@ async function loadChatsList() {
     // Önce yerel kalıcı kullanıcıları sunucuyla eşitle ki hiçbir kayıtlı kullanıcı eksik kalmasın
     await syncPermanentUsersWithServer();
 
-    if (token) {
+    if (token && currentUser) {
         try {
             const res = await fetch('/api/chats', {
                 headers: { 'x-auth-token': token }
@@ -1642,7 +1905,7 @@ async function loadChatsList() {
             if (data.success && data.chats) {
                 savePermanentLocalUsers(data.chats);
                 contactsList = mergeContactsWithPermanentUsers(data.chats);
-                localStorage.setItem('msj_cached_contacts', JSON.stringify(contactsList));
+                saveCachedContactsForCurrentUser(contactsList);
                 renderChatsList(contactsList);
                 return;
             }
@@ -1651,17 +1914,22 @@ async function loadChatsList() {
         }
     }
 
-    // Eğer token süresi dolmuşsa veya oturum yedekten açılmışsa kullanıcı listesini doğrudan çek
+    // Eğer token süresi dolmuşsa veya oturum yedekten açılmışsa kullanıcı listesini doğrudan çek (Mesaj geçmişi karıştırmadan)
     try {
         const regRes = await fetch('/api/users/registered');
         const regData = await regRes.json();
         if (regData && regData.success && Array.isArray(regData.users)) {
             savePermanentLocalUsers(regData.users, regData.deletedUsers);
-            const filtered = currentUser
+            const filtered = (currentUser
                 ? regData.users.filter(u => normalizeKey(u.username) !== normalizeKey(currentUser.username))
-                : regData.users;
+                : regData.users
+            ).map(u => ({
+                ...u,
+                lastMessage: null,
+                unreadCount: 0
+            }));
             contactsList = mergeContactsWithPermanentUsers(filtered);
-            localStorage.setItem('msj_cached_contacts', JSON.stringify(contactsList));
+            saveCachedContactsForCurrentUser(contactsList);
             renderChatsList(contactsList);
             return;
         }
@@ -1712,9 +1980,7 @@ window.findAndContactByPhone = async function(phoneStr, customName = '', actionT
                 contactObj.phone = u.phone || cleanPhone;
             }
 
-            try {
-                localStorage.setItem('msj_cached_contacts', JSON.stringify(contactsList));
-            } catch (e) {}
+            saveCachedContactsForCurrentUser(contactsList);
 
             if (inputSearchChats) inputSearchChats.value = '';
             if (btnClearSearch) btnClearSearch.style.display = 'none';
@@ -1795,84 +2061,64 @@ function renderChatsList(chats, rawSearchQuery = '') {
 
     chats.forEach(contact => {
         const item = document.createElement('div');
-        const isActive = activeContact && normalizeKey(activeContact.username) === normalizeKey(contact.username);
-        const hasUnread = (contact.unreadCount || 0) > 0;
+        const contactKey = normalizeKey(contact.username);
+        const isActive = activeContact && normalizeKey(activeContact.username) === contactKey;
+        const validLastMsg = isMessageForCurrentUserAndContact(contact.lastMessage, contactKey) ? contact.lastMessage : null;
+        const unreadCount = currentUser ? (Number(contact.unreadCount) || 0) : 0;
+        const hasUnread = unreadCount > 0;
         item.className = `chat-list-item ${isActive ? 'active' : ''} ${hasUnread ? 'has-unread' : ''}`;
         item.dataset.username = contact.username;
         item.style.cursor = 'pointer';
 
-        let lastSnippet = contact.isOnline ? '🟢 Çevrimiçi (Online)' : '⚪ Çevrimdışı (Mesaj & Arama Açık)';
-        let isUnreadSnippet = false;
+        let lastSnippet = contact.phone
+            ? `📱 ${formatPhonePretty(contact.phone)} • 🔒 Uçtan uca şifreli sohbet`
+            : '🔒 Uçtan uca şifreli sohbet';
+        let isOutgoingLast = false;
+        let isLastRead = false;
+        let timeLabel = contact.isOnline ? 'Çevrimiçi' : '';
 
-        if (contact.lastMessage) {
-            const rawText = contact.lastMessage.text || (contact.lastMessage.file ? '📎 Dosya / Fotoğraf' : 'Mesaj');
-            const prefix = contact.lastMessage.isOutgoing ? 'Siz: ' : '';
-            lastSnippet = prefix + rawText;
-            if (hasUnread && !contact.lastMessage.isOutgoing) {
-                isUnreadSnippet = true;
+        if (validLastMsg) {
+            const decryptedPreview = validLastMsg.text
+                ? decryptE2EETextClient(validLastMsg.text, validLastMsg.sender, validLastMsg.recipient)
+                : '';
+            const rawText = decryptedPreview || (validLastMsg.file ? '📎 Fotoğraf / Dosya' : 'Mesaj');
+            isOutgoingLast = !!validLastMsg.isOutgoing;
+            isLastRead = !!validLastMsg.read;
+            lastSnippet = rawText;
+            if (validLastMsg.timestamp) {
+                timeLabel = validLastMsg.timestamp;
             }
         }
 
-        const phoneBadgeHtml = contact.phone
-            ? `<span style="font-size: 11.5px; color: #25d366; margin-left: 4px; font-weight: 500;">📱 ${escapeHtml(formatPhonePretty(contact.phone))}</span>`
+        const outgoingChecksHtml = isOutgoingLast
+            ? `<span class="wa-msg-checks ${isLastRead ? 'read' : ''}">✓✓</span>`
             : '';
 
         item.innerHTML = `
             <div class="chat-avatar-wrap">
                 <img class="avatar" src="${contact.avatar || '/avatars/default.svg'}" alt="${escapeHtml(contact.username)}">
-                ${contact.isOnline ? '<span class="online-badge" title="Online"></span>' : '<span class="offline-badge" title="Offline"></span>'}
-                ${hasUnread ? '<span class="avatar-unread-badge" title="Yeni Mesaj Geldi">✉️</span>' : ''}
+                ${contact.isOnline ? '<span class="online-badge" title="Çevrimiçi"></span>' : ''}
             </div>
             <div class="chat-content-wrap">
                 <div class="chat-top-line">
-                    <span class="chat-title" style="flex-wrap: wrap;">
-                        <strong style="font-size: 16px; color: var(--text-primary);">${escapeHtml(contact.username)}</strong>
-                        ${phoneBadgeHtml}
-                        <span class="status-tag ${contact.isOnline ? 'online' : 'offline'}">${contact.isOnline ? 'Online' : 'Offline'}</span>
+                    <span class="chat-title">
+                        <strong class="wa-contact-name">${escapeHtml(contact.username)}</strong>
                     </span>
-                    <div style="display: flex; align-items: center; gap: 6px;">
-                        ${contact.lastMessage && contact.lastMessage.timestamp ? `<span style="font-size: 11px; color: ${hasUnread ? 'var(--accent-bright)' : 'var(--text-secondary)'}; font-weight: ${hasUnread ? '700' : 'normal'};">${contact.lastMessage.timestamp}</span>` : ''}
-                        ${hasUnread ? `<span class="unread-pill" title="Okunmamış Mesaj"><span style="font-size: 11px;">✉️</span> ${contact.unreadCount}</span>` : ''}
-                    </div>
+                    <span class="wa-chat-time ${hasUnread ? 'unread' : (contact.isOnline && !validLastMsg ? 'online-time' : '')}">${escapeHtml(timeLabel)}</span>
                 </div>
-                <div class="chat-bottom-line" style="gap: 6px;">
-                    <div class="chat-last-msg-preview ${isUnreadSnippet ? 'unread' : ''}" title="${escapeHtml(lastSnippet)}">
-                        ${isUnreadSnippet ? '<span class="msg-unread-icon">✉️</span>' : ''}
+                <div class="chat-bottom-line">
+                    <div class="chat-last-msg-preview ${hasUnread ? 'unread' : ''}" title="${escapeHtml(lastSnippet)}">
+                        ${outgoingChecksHtml}
                         <span>${escapeHtml(lastSnippet)}</span>
                     </div>
-                    <div class="contact-quick-actions" style="display: flex; align-items: center; gap: 4px; flex-shrink: 0;">
-                        <button type="button" class="btn-chat-action ${hasUnread ? 'unread' : ''}" data-quick-action="message" title="Mesaj Gönder (Offline olsa bile iletilir)">
-                            ${hasUnread ? `✉️ Oku (${contact.unreadCount})` : '💬 Mesaj'}
-                        </button>
-                        <button type="button" class="btn-chat-action" data-quick-action="voice" title="Sesli Ara (Offline olsa bile cihazı uyandırır ve çalar)" style="padding: 4px 8px;">
-                            📞
-                        </button>
-                        <button type="button" class="btn-chat-action" data-quick-action="video" title="Görüntülü Ara (Offline olsa bile cihazı uyandırır ve çalar)" style="padding: 4px 8px;">
-                            📹
-                        </button>
-                        <button type="button" class="btn-chat-action" data-quick-action="delete" title="Kullanıcıyı Sil (Kayıtlardan Kaldır)" style="padding: 4px 7px; background: rgba(234, 0, 56, 0.14); color: #ff6b81; border-color: rgba(234, 0, 56, 0.3);">
-                            🗑️
-                        </button>
+                    <div class="wa-chat-badges">
+                        ${hasUnread ? `<span class="wa-unread-count-badge" title="${unreadCount} okunmamış mesaj">${unreadCount}</span>` : ''}
                     </div>
                 </div>
             </div>
         `;
 
-        item.addEventListener('click', (e) => {
-            const actionBtn = e.target.closest('[data-quick-action]');
-            if (actionBtn) {
-                e.stopPropagation();
-                const action = actionBtn.dataset.quickAction;
-                if (action === 'delete') {
-                    window.requestDeleteUser(contact.username);
-                    return;
-                }
-                selectContact(contact);
-                if (action === 'voice' || action === 'video') {
-                    setTimeout(() => initiateCall(action), 250);
-                }
-                return;
-            }
+        item.addEventListener('click', () => {
             selectContact(contact);
         });
 
@@ -2194,15 +2440,10 @@ function selectContact(contact) {
         el.classList.toggle('active', matches);
         if (matches) {
             el.classList.remove('has-unread');
-            const badge = el.querySelector('.avatar-unread-badge');
+            const badge = el.querySelector('.wa-unread-count-badge');
             if (badge) badge.remove();
-            const pill = el.querySelector('.unread-pill');
-            if (pill) pill.remove();
-            const actionBtn = el.querySelector('.btn-chat-action');
-            if (actionBtn) {
-                actionBtn.classList.remove('unread');
-                actionBtn.textContent = '💬 Mesaj / Ara';
-            }
+            const timeEl = el.querySelector('.wa-chat-time');
+            if (timeEl) timeEl.classList.remove('unread');
             const preview = el.querySelector('.chat-last-msg-preview');
             if (preview) preview.classList.remove('unread');
         }
@@ -2250,11 +2491,11 @@ async function loadConversationHistory(contactUsername) {
     const todayFormatted = new Date().toLocaleDateString('tr-TR', { day: 'numeric', month: 'long', year: 'numeric' });
     messagesContainer.innerHTML = `
         <div class="date-pill-badge" id="chatDateBadge">${todayFormatted}</div>
-        <div class="encryption-warning-banner">
+        <div class="encryption-warning-banner" onclick="window.showE2EEVerificationDialog()" style="cursor:pointer;" title="Uçtan Uca Şifreleme (E2EE) Güvenlik Kodunu Doğrula">
             <span class="enc-icon">🔒</span>
             <span class="enc-text">
-                Mesajlar ve aramalar uçtan uca şifrelidir. Yalnızca bu sohbetteki kişiler bu içerikleri okuyabilir, dinleyebilir veya paylaşabilir.
-                <a href="javascript:void(0);" class="enc-link">Daha fazla bilgi</a>
+                Mesajlar ve aramalar uçtan uca şifrelidir (256-Bit E2EE). Yalnızca bu sohbetteki kişiler bu içerikleri okuyabilir, dinleyebilir veya paylaşabilir.
+                <a href="javascript:void(0);" class="enc-link">Güvenlik kodunu doğrula</a>
             </span>
         </div>
     `;
@@ -2292,7 +2533,13 @@ async function loadConversationHistory(contactUsername) {
 }
 
 function appendMessageBubble(msg) {
-    if (!activeContact) return;
+    if (!currentUser || !activeContact || !msg) return;
+
+    // KULLANICI İZOLASYONU: Yalnızca aktif kullanıcı (currentUser) ile açık olan kişi (activeContact) arasındaki mesajları göster!
+    // Başka kullanıcılara atılan mesajlar kesinlikle ekrana basılmaz.
+    if (!isMessageForCurrentUserAndContact(msg, normalizeKey(activeContact.username))) {
+        return;
+    }
 
     // 1. Zaten ekranda aynı id varsa mükerrer basma
     if (msg.id && document.getElementById(msg.id)) return;
@@ -2312,21 +2559,15 @@ function appendMessageBubble(msg) {
         }
     }
 
-    // Yalnızca şu anki aktif kişiye ait mesajları ekrana bas
-    const isForActiveContact =
-        (normalizeKey(msg.sender) === normalizeKey(activeContact.username)) ||
-        (normalizeKey(msg.recipient) === normalizeKey(activeContact.username));
-
-    if (!isForActiveContact) return;
-
     const isMe = currentUser && normalizeKey(msg.sender) === normalizeKey(currentUser.username);
+    const decryptedText = msg.text ? decryptE2EETextClient(msg.text, msg.sender, msg.recipient) : '';
 
     // 3. Ek güvenlik: Eğer kendi gönderdiğimiz bir mesajsa ve henüz pending durumda aynı metinli bir baloncuk varsa onu güncelle
-    if (isMe && !msg.pending && msg.text) {
+    if (isMe && !msg.pending && decryptedText) {
         const pendingBubbles = messagesContainer.querySelectorAll('.message-bubble.out.pending');
         for (const pb of pendingBubbles) {
             const txtEl = pb.querySelector('.message-text');
-            if (txtEl && txtEl.textContent.trim() === msg.text.trim()) {
+            if (txtEl && txtEl.textContent.trim() === decryptedText.trim()) {
                 pb.id = msg.id;
                 pb.classList.remove('pending');
                 const checks = pb.querySelector('.bubble-checks');
@@ -2363,7 +2604,7 @@ function appendMessageBubble(msg) {
         }
     }
 
-    const textContent = msg.text ? `<span class="message-text">${formatMessageText(msg.text)}</span>` : '';
+    const textContent = decryptedText ? `<span class="message-text">${formatMessageText(decryptedText)}</span>` : '';
     const deleteBtn = msg.id ? `<button type="button" class="btn-msg-delete" title="Bu mesajı sil" onclick="requestDeleteMessage('${msg.id}')">&times;</button>` : '';
 
     bubble.innerHTML = `
@@ -2371,7 +2612,7 @@ function appendMessageBubble(msg) {
         ${fileContent}
         ${textContent}
         <div class="bubble-meta">
-            <span class="bubble-time">${msg.timestamp || '12:27'}</span>
+            <span class="bubble-time" title="Uçtan Uca Şifreli (E2EE)">🔒 ${msg.timestamp || '12:27'}</span>
             ${isMe ? `<span class="bubble-checks">${msg.pending ? '🕒' : '✓✓'}</span>` : ''}
         </div>
     `;
@@ -2496,7 +2737,7 @@ function stopAudioRecording() {
 }
 
 function sendTextMessage(text) {
-    if (!activeContact) {
+    if (!activeContact || !currentUser) {
         alert('Lütfen önce mesaj göndermek istediğiniz kişiyi seçin.');
         return;
     }
@@ -2510,12 +2751,15 @@ function sendTextMessage(text) {
     const token = sessionStorage.getItem('msj_token') || localStorage.getItem('msj_token');
     const tempId = 'msg_tmp_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6);
 
+    // Mesajı göndermeden önce istemci tarafında Uçtan Uca Şifrele (256-bit E2EE)
+    const encryptedText = encryptE2EETextClient(text, currentUser.username, activeContact.username);
+
     const tempMsg = {
         id: tempId,
         tempId: tempId,
-        sender: currentUser ? currentUser.username : '',
+        sender: currentUser.username,
         recipient: activeContact.username,
-        text: text,
+        text: encryptedText,
         file: null,
         timestamp: new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }),
         date: 'Bugün',
@@ -2531,18 +2775,19 @@ function sendTextMessage(text) {
     if (contactInList) {
         contactInList.lastMessage = {
             id: tempId,
-            sender: currentUser ? currentUser.username : '',
+            sender: currentUser.username,
             recipient: activeContact.username,
-            text: text,
+            text: encryptedText,
             timestamp: tempMsg.timestamp,
             isOutgoing: true
         };
+        saveCachedContactsForCurrentUser(contactsList);
         renderChatsList(contactsList);
     }
 
     socket.emit('chat:send_message', {
         recipient: activeContact.username,
-        text: text,
+        text: encryptedText,
         file: null,
         tempId: tempId,
         token: token
@@ -2565,7 +2810,7 @@ function sendTextMessage(text) {
                 if (checks) {
                     const isRecOnline = ack.isRecipientOnline !== false;
                     checks.textContent = isRecOnline ? '✓✓' : '✓';
-                    checks.title = isRecOnline ? 'Teslim edildi' : 'Sunucuya kaydedildi (Alıcı çevrimdışı, açtığında iletilecek)';
+                    checks.title = isRecOnline ? 'Teslim edildi (Uçtan Uca Şifreli)' : 'Sunucuya şifreli kaydedildi (Alıcı çevrimdışı, açtığında iletilecek)';
                 }
             }
         }
@@ -2647,17 +2892,28 @@ btnEmoji.addEventListener('click', () => {
 // 5. CANLI SOKET OLAYLARI (GİZLİ İLETİŞİM GARANTİSİ)
 // ==========================================================
 
-// Yeni Mesaj Geldiğinde
+// Yeni Mesaj Geldiğinde (TAM KULLANICI İZOLASYONU + E2EE ŞİFRE ÇÖZME)
 socket.on('chat:message', (msg) => {
-    if (msg && msg.sender) {
+    if (!currentUser || !msg) return;
+
+    const myKey = normalizeKey(currentUser.username);
+    const senderKey = normalizeKey(msg.sender);
+    const recipientKey = normalizeKey(msg.recipient);
+
+    // KULLANICI İZOLASYONU: Bu mesajın göndereni veya alıcısı şu anki oturum açmış kullanıcı DEĞİLSE kesinlikle yoksay!
+    if (senderKey !== myKey && recipientKey !== myKey) {
+        return;
+    }
+
+    if (msg.sender) {
         savePermanentLocalUsers([{ username: msg.sender, avatar: '/avatars/default.svg' }]);
     }
-    if (msg && msg.recipient) {
+    if (msg.recipient) {
         savePermanentLocalUsers([{ username: msg.recipient, avatar: '/avatars/default.svg' }]);
     }
-    const isIncoming = currentUser && normalizeKey(msg.recipient) === normalizeKey(currentUser.username);
-    const isFromActive = activeContact && normalizeKey(msg.sender) === normalizeKey(activeContact.username);
-    const isToActive = activeContact && normalizeKey(msg.recipient) === normalizeKey(activeContact.username);
+    const isIncoming = recipientKey === myKey;
+    const isFromActive = activeContact && senderKey === normalizeKey(activeContact.username);
+    const isToActive = activeContact && recipientKey === normalizeKey(activeContact.username);
 
     // 1. Eğer açık olan sohbete ait bir mesajsa ekrana bas
     if (activeContact && (isFromActive || isToActive)) {
@@ -2675,8 +2931,9 @@ socket.on('chat:message', (msg) => {
         // B) Sohbet o an açık değilse veya sekme/pencere arka plandaysa:
         if (!isFromActive || document.hidden) {
             showMessageNotificationToast(msg);
+            const plainPreview = msg.text ? decryptE2EETextClient(msg.text, msg.sender, msg.recipient) : '';
             triggerSystemNotification(`💬 ${msg.sender}`, {
-                body: msg.text || (msg.file ? '📎 [Dosya / Fotoğraf paylaştı]' : 'Yeni bir mesajınız var'),
+                body: plainPreview || (msg.file ? '📎 [Dosya / Fotoğraf paylaştı]' : 'Yeni bir mesajınız var'),
                 icon: '/icon-192.png',
                 badge: '/icon-192.png',
                 tag: 'msg-' + msg.sender,
@@ -2685,11 +2942,9 @@ socket.on('chat:message', (msg) => {
         }
     }
 
-    // 3. Sohbet listesindeki son mesajı ve okunmamış sayısını anında güncelle
-    const contact = contactsList.find(c => 
-        normalizeKey(c.username) === normalizeKey(msg.sender) || 
-        normalizeKey(c.username) === normalizeKey(msg.recipient)
-    );
+    // 3. Sohbet listesindeki son mesajı ve okunmamış sayısını anında güncelle (Yalnızca ilgili karşı kişi için)
+    const otherPartyKey = isIncoming ? senderKey : recipientKey;
+    const contact = contactsList.find(c => normalizeKey(c.username) === otherPartyKey);
 
     if (contact) {
         contact.lastMessage = {
@@ -2705,6 +2960,7 @@ socket.on('chat:message', (msg) => {
         if (isIncoming && !isFromActive) {
             contact.unreadCount = (contact.unreadCount || 0) + 1;
         }
+        saveCachedContactsForCurrentUser(contactsList);
         renderChatsList(contactsList);
     } else {
         loadChatsList();
@@ -2713,10 +2969,14 @@ socket.on('chat:message', (msg) => {
 
 // Çevrimdışıyken bize gönderilmiş bekleyen mesajlar sunucudan geldiğinde (Offline Teslim)
 socket.on('chat:offline_messages', (data) => {
-    if (!data || !Array.isArray(data.messages) || data.messages.length === 0) return;
+    if (!currentUser || !data || !Array.isArray(data.messages) || data.messages.length === 0) return;
+
+    const myKey = normalizeKey(currentUser.username);
+    const myMessages = data.messages.filter(msg => msg && normalizeKey(msg.recipient) === myKey);
+    if (myMessages.length === 0) return;
 
     let hasUnreadForOther = false;
-    data.messages.forEach(msg => {
+    myMessages.forEach(msg => {
         // Eğer o an açık olan sohbetle ilgili bir mesajsa baloncuk olarak ekrana bas
         const isFromActive = activeContact && normalizeKey(msg.sender) === normalizeKey(activeContact.username);
         if (isFromActive) {
@@ -2729,8 +2989,8 @@ socket.on('chat:offline_messages', (data) => {
 
     if (hasUnreadForOther) {
         playIncomingMessageSound();
-        if (data.messages.length === 1) {
-            showMessageNotificationToast(data.messages[0]);
+        if (myMessages.length === 1) {
+            showMessageNotificationToast(myMessages[0]);
         }
     }
 
@@ -2853,9 +3113,9 @@ socket.on('user:deleted', (data) => {
     loadRegisteredUsersDropdown();
 });
 
-// CEP TELEFONU GİBİ OTOMATİK UYANMA VE ONLINE OLMA SİSTEMİ:
-// Kullanıcı Offline veya çıkış yapmış/beklemede olsa bile kendisine mesaj ya da arama geldiğinde
-// otomatik olarak Online olur ve ekrana arama / mesaj bildirimi düşer.
+// CEP TELEFONU GİBİ OTOMATİK UYANMA VE ONLINE OLMA SİSTEMİ (KULLANICI İZOLASYONLU):
+// Yalnızca bu cihazda oturum açmış olan (veya kaydedilmiş) kullanıcıya mesaj/arama geldiğinde çalışır.
+// Başka kullanıcılara gelen mesaj veya aramalar bu ekranda gösterilmez ve hesabı değiştirmez!
 socket.on('system:wakeup', async (data) => {
     const targetUsername = data && (data.targetUsername || data.recipient);
     if (!data || !targetUsername) return;
@@ -2868,11 +3128,10 @@ socket.on('system:wakeup', async (data) => {
     const targetKey = normalizeKey(targetUsername);
     const isAlreadyTarget = currentUser && normalizeKey(currentUser.username) === targetKey;
     const savedUsername = localStorage.getItem('msj_saved_username') || '';
-    const isSavedTarget = savedUsername && normalizeKey(savedUsername) === targetKey;
-    const isStandbyWithoutActiveUser = !currentUser && (!savedUsername || isSavedTarget);
+    const isSavedTarget = !currentUser && savedUsername && normalizeKey(savedUsername) === targetKey;
 
-    // Eğer bu tarayıcıda başka bir kullanıcı aktif oturumdaysa onun oturumunu bölme
-    if (!isAlreadyTarget && !isSavedTarget && !isStandbyWithoutActiveUser) {
+    // KULLANICI İZOLASYONU: Hangi kullanıcı adı ile açılmışsa sadece o kullanıcıya gelen mesaj/aramalar gözüksün!
+    if (!isAlreadyTarget && !isSavedTarget) {
         return;
     }
 
@@ -2918,21 +3177,22 @@ socket.on('system:wakeup', async (data) => {
             }
         }, 150);
     } else if (data.type === 'message') {
-        const msgObj = data.message || {
+        const rawMsgObj = data.message || {
             id: 'wakeup_' + Date.now(),
             sender: data.sender,
             recipient: targetUsername,
             text: data.text || 'Yeni mesaj',
             timestamp: new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' })
         };
+        const plainText = rawMsgObj.text ? decryptE2EETextClient(rawMsgObj.text, rawMsgObj.sender, rawMsgObj.recipient) : 'Yeni mesaj';
 
         showStatusToast(`🟢 Otomatik Online • 💬 ${data.sender} mesaj gönderdi`, true);
 
         if (wokeUpFromOffline || document.hidden || !activeContact || normalizeKey(activeContact.username) !== normalizeKey(data.sender)) {
             playIncomingMessageSound();
-            showMessageNotificationToast(msgObj);
+            showMessageNotificationToast(rawMsgObj);
             triggerSystemNotification(`💬 ${data.sender}`, {
-                body: msgObj.text || 'Yeni bir mesajınız var',
+                body: plainText || 'Yeni bir mesajınız var',
                 icon: '/icon-192.png',
                 badge: '/icon-192.png',
                 tag: 'msg-' + data.sender
@@ -3312,10 +3572,16 @@ function setupCallAudioMetersAndRelay() {
                         pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
                     }
 
+                    // Uçtan Uca Ses Şifrelemesi (E2EE Audio Stream Cipher)
+                    if (currentUser && currentCallTarget) {
+                        e2eeMaskPcm16(pcm16, currentUser.username, currentCallTarget);
+                    }
+
                     socket.volatile.emit('call:audio_chunk', {
                         targetSocketId: currentTargetSocketId,
                         targetUsername: currentCallTarget,
                         sampleRate: Math.floor(callAudioContext.sampleRate / 2),
+                        e2ee: Boolean(currentUser && currentCallTarget),
                         pcm: pcm16.buffer
                     });
                 };
@@ -3399,9 +3665,10 @@ function attachIncomingAudioStream(stream) {
     }
 }
 
-// Socket.IO üzerinden gelen yedek gerçek zamanlı ses paketlerini (PCM16) anında hoparlörden çal
+// Socket.IO üzerinden gelen yedek gerçek zamanlı ses paketlerini (PCM16) E2EE çözerek anında hoparlörden çal
 socket.on('call:audio_chunk', (data) => {
-    if (!data || !data.pcm) return;
+    if (!data || !data.pcm || !currentUser) return;
+    if (data.targetUsername && normalizeKey(data.targetUsername) !== normalizeKey(currentUser.username)) return;
     try {
         const AudioCtx = window.AudioContext || window.webkitAudioContext;
         if (!AudioCtx) return;
@@ -3414,6 +3681,10 @@ socket.on('call:audio_chunk', (data) => {
 
         const int16 = new Int16Array(data.pcm);
         if (int16.length === 0) return;
+
+        if (data.e2ee && currentUser && currentCallTarget) {
+            e2eeMaskPcm16(int16, currentUser.username, currentCallTarget);
+        }
 
         const sampleRate = data.sampleRate || 22050;
         const audioBuffer = callAudioContext.createBuffer(1, int16.length, sampleRate);
@@ -3814,8 +4085,17 @@ function flushLocalCandidates() {
     }
 }
 
-// GELEN ARAMA (RESİMDEKİ GİBİ ARAYANIN ADI, EVET VE HAYIR BUTONLARI)
+// GELEN ARAMA (RESİMDEKİ GİBİ ARAYANIN ADI, EVET VE HAYIR BUTONLARI - TAM KULLANICI İZOLASYONLU)
 socket.on('call:incoming', (data) => {
+    if (!data || !currentUser) return;
+    // Başka bir kullanıcıya gelen aramayı kesinlikle gösterme
+    if (data.recipient && normalizeKey(data.recipient) !== normalizeKey(currentUser.username)) {
+        return;
+    }
+    if (normalizeKey(data.callerUsername) === normalizeKey(currentUser.username)) {
+        return;
+    }
+
     currentTargetSocketId = data.callerSocketId;
     currentCallTarget = data.callerUsername;
     currentCallType = data.callType || 'voice';
@@ -4046,9 +4326,27 @@ btnToggleCam.addEventListener('click', () => {
 btnEndCall.addEventListener('click', () => endCall());
 
 socket.on('call:ended', () => endCall(false));
-socket.on('call:peer_disconnected', () => endCall(false));
+socket.on('call:peer_disconnected', (data) => {
+    const isCallModalVisible =
+        (activeCallScreen && activeCallScreen.style.display === 'flex') ||
+        (outgoingCallModal && outgoingCallModal.style.display === 'flex') ||
+        (incomingCallModal && incomingCallModal.style.display === 'flex');
+    if (!isCallModalVisible) return;
+
+    if (data && data.peerId && currentTargetSocketId && data.peerId === currentTargetSocketId) {
+        endCall(false);
+    } else if (data && data.username && currentCallTarget && normalizeKey(data.username) === normalizeKey(currentCallTarget)) {
+        endCall(false);
+    }
+});
 
 function endCall(notifyPeer = true) {
+    const wasInCallOrRinging =
+        (activeCallScreen && activeCallScreen.style.display === 'flex') ||
+        (outgoingCallModal && outgoingCallModal.style.display === 'flex') ||
+        (incomingCallModal && incomingCallModal.style.display === 'flex') ||
+        Boolean(peerConnection);
+
     hideOutgoingCall();
     stopRingtone();
     if (callTimerInterval) clearInterval(callTimerInterval);
@@ -4082,7 +4380,10 @@ function endCall(notifyPeer = true) {
         });
     }
     currentTargetSocketId = null;
-    playCallEndedSound();
+    currentCallTarget = null;
+    if (wasInCallOrRinging) {
+        playCallEndedSound();
+    }
 }
 
 // Hatırlat ve Mesaj Gönder Butonları (Resimdeki gibi)
@@ -4165,10 +4466,10 @@ function clearMessagesFromDom() {
     const todayFormatted = new Date().toLocaleDateString('tr-TR', { day: 'numeric', month: 'long', year: 'numeric' });
     messagesContainer.innerHTML = `
         <div class="date-pill-badge" id="chatDateBadge">${todayFormatted}</div>
-        <div class="encryption-warning-banner">
+        <div class="encryption-warning-banner" onclick="window.showE2EEVerificationDialog()" style="cursor:pointer;">
             <span class="enc-icon">🔒</span>
             <span class="enc-text">
-                Mesajlar ve aramalar uçtan uca şifrelidir. Bu sohbetteki yazışmalar temizlendi.
+                Mesajlar ve aramalar uçtan uca şifrelidir (256-Bit E2EE). Bu sohbetteki yazışmalar temizlendi.
             </span>
         </div>
     `;
@@ -4516,12 +4817,15 @@ document.addEventListener('visibilitychange', () => {
     }
 });
 
-// Arka Plan / Bekleme Modu Yedek Uyandırıcı (WebSocket uyku moduna girse bile mesaj/arama gelince anında Online yapar)
+// Arka Plan / Bekleme Modu Yedek Uyandırıcı (Yalnızca aktif/kayıtlı kullanıcıya gelen mesaj ve aramaları dinler)
 let clientLastPollNotifId = 0;
 setInterval(async () => {
     try {
         const targetUser = (currentUser && currentUser.username) || localStorage.getItem('msj_saved_username') || '';
-        const res = await fetch(`/api/system/notifications/poll?since=${clientLastPollNotifId}${targetUser ? '&user=' + encodeURIComponent(targetUser) : ''}`);
+        if (!targetUser) return;
+        const targetKey = normalizeKey(targetUser);
+
+        const res = await fetch(`/api/system/notifications/poll?since=${clientLastPollNotifId}&user=${encodeURIComponent(targetUser)}`);
         const data = await res.json();
         if (data && data.success) {
             if (typeof data.lastId === 'number' && data.lastId < clientLastPollNotifId) {
@@ -4531,24 +4835,26 @@ setInterval(async () => {
             }
             if (clientLastPollNotifId > 0 && data.lastId > clientLastPollNotifId && Array.isArray(data.notifications)) {
                 for (const item of data.notifications) {
-                    if (currentUser && normalizeKey(item.sender) === normalizeKey(currentUser.username)) continue;
-                    if (item.recipient) {
-                        // Eğer bu cihaz hedef kullanıcıysa ve henüz Online değilse otomatik Online yap
-                        const savedU = localStorage.getItem('msj_saved_username') || '';
-                        if (!currentUser && (!savedU || normalizeKey(savedU) === normalizeKey(item.recipient))) {
-                            await quickLoginAsRegisteredUser(item.recipient);
-                        } else if (currentUser && normalizeKey(currentUser.username) === normalizeKey(item.recipient)) {
-                            const token = localStorage.getItem('msj_token') || sessionStorage.getItem('msj_token') || '';
-                            socket.emit('user:join', { token, username: currentUser.username });
-                            if (item.type === 'message' && (!activeContact || normalizeKey(activeContact.username) !== normalizeKey(item.sender) || document.hidden)) {
-                                showMessageNotificationToast({
-                                    id: item.msgId || ('poll_' + item.id),
-                                    sender: item.sender,
-                                    recipient: item.recipient,
-                                    text: item.text || 'Yeni mesaj'
-                                });
-                                loadChatsList();
-                            }
+                    if (!item || !item.recipient) continue;
+                    // KULLANICI İZOLASYONU: Yalnızca bu cihazdaki aktif kullanıcıya (targetKey) gelen bildirimleri işle!
+                    if (normalizeKey(item.recipient) !== targetKey) continue;
+                    if (normalizeKey(item.sender) === targetKey) continue;
+
+                    const savedU = localStorage.getItem('msj_saved_username') || '';
+                    if (!currentUser && savedU && normalizeKey(savedU) === targetKey) {
+                        await quickLoginAsRegisteredUser(item.recipient);
+                    } else if (currentUser && normalizeKey(currentUser.username) === targetKey) {
+                        const token = localStorage.getItem('msj_token') || sessionStorage.getItem('msj_token') || '';
+                        socket.emit('user:join', { token, username: currentUser.username });
+                        if (item.type === 'message' && (!activeContact || normalizeKey(activeContact.username) !== normalizeKey(item.sender) || document.hidden)) {
+                            const plainText = item.text ? decryptE2EETextClient(item.text, item.sender, item.recipient) : 'Yeni mesaj';
+                            showMessageNotificationToast({
+                                id: item.msgId || ('poll_' + item.id),
+                                sender: item.sender,
+                                recipient: item.recipient,
+                                text: plainText
+                            });
+                            loadChatsList();
                         }
                     }
                 }

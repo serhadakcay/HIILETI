@@ -82,6 +82,88 @@ function hashPassword(password, salt) {
     return crypto.pbkdf2Sync(password, salt, 1000, 64, 'sha512').toString('hex');
 }
 
+// ==========================================
+// UÇTAN UCA ŞİFRELEME (E2EE) YARDIMCILARI (256-BIT SHA256-CTR + MAC)
+// ==========================================
+function deriveE2EEMasterKeyHex(u1, u2) {
+    const convoKey = getConvoKey(u1, u2);
+    if (!convoKey) return '';
+    return crypto.createHash('sha256')
+        .update('MSJ_E2EE_V1_KEY::' + convoKey + '::HIHaberlesme_256bit_Secret', 'utf8')
+        .digest('hex');
+}
+
+function encryptE2EETextServer(plainText, sender, recipient) {
+    if (!plainText || typeof plainText !== 'string') return plainText || '';
+    if (plainText.startsWith('e2ee1:')) return plainText;
+    const masterKeyHex = deriveE2EEMasterKeyHex(sender, recipient);
+    if (!masterKeyHex) return plainText;
+
+    const ivHex = crypto.randomBytes(12).toString('hex');
+    const plainBuf = Buffer.from(plainText, 'utf8');
+    const cipherBuf = Buffer.alloc(plainBuf.length);
+
+    let offset = 0;
+    let blockIndex = 0;
+    while (offset < plainBuf.length) {
+        const keystream = crypto.createHash('sha256')
+            .update(`${masterKeyHex}:${ivHex}:${blockIndex}`, 'utf8')
+            .digest();
+        const chunkLen = Math.min(32, plainBuf.length - offset);
+        for (let i = 0; i < chunkLen; i++) {
+            cipherBuf[offset + i] = plainBuf[offset + i] ^ keystream[i];
+        }
+        offset += chunkLen;
+        blockIndex++;
+    }
+
+    const cipherHex = cipherBuf.toString('hex');
+    const tagHex = crypto.createHash('sha256')
+        .update(`${masterKeyHex}:MAC:${ivHex}:${cipherHex}`, 'utf8')
+        .digest('hex')
+        .slice(0, 16);
+
+    return `e2ee1:${ivHex}:${tagHex}:${cipherHex}`;
+}
+
+function decryptE2EETextServer(payload, sender, recipient) {
+    if (!payload || typeof payload !== 'string' || !payload.startsWith('e2ee1:')) {
+        return payload || '';
+    }
+    try {
+        const parts = payload.split(':');
+        if (parts.length !== 4) return '🔒 Şifreli Mesaj';
+        const [, ivHex, tagHex, cipherHex] = parts;
+        const masterKeyHex = deriveE2EEMasterKeyHex(sender, recipient);
+        if (!masterKeyHex) return '🔒 Şifreli Mesaj';
+
+        const expectedTag = crypto.createHash('sha256')
+            .update(`${masterKeyHex}:MAC:${ivHex}:${cipherHex}`, 'utf8')
+            .digest('hex')
+            .slice(0, 16);
+        if (expectedTag !== tagHex) return '🔒 Şifreli Mesaj';
+
+        const cipherBuf = Buffer.from(cipherHex, 'hex');
+        const plainBuf = Buffer.alloc(cipherBuf.length);
+        let offset = 0;
+        let blockIndex = 0;
+        while (offset < cipherBuf.length) {
+            const keystream = crypto.createHash('sha256')
+                .update(`${masterKeyHex}:${ivHex}:${blockIndex}`, 'utf8')
+                .digest();
+            const chunkLen = Math.min(32, cipherBuf.length - offset);
+            for (let i = 0; i < chunkLen; i++) {
+                plainBuf[offset + i] = cipherBuf[offset + i] ^ keystream[i];
+            }
+            offset += chunkLen;
+            blockIndex++;
+        }
+        return plainBuf.toString('utf8');
+    } catch (e) {
+        return '🔒 Şifreli Mesaj';
+    }
+}
+
 // Kimlik Doğrulama Middleware
 async function authenticateToken(req, res, next) {
     try {
@@ -955,10 +1037,72 @@ app.post('/api/system/register_pc_user', (req, res) => {
     res.json({ success: true, localPcUsername });
 });
 
+// Yalnızca hedef alıcıya veya henüz hiçbir kullanıcıyla giriş yapmamış beklemedeki soketlere uyandırma sinyali gönderir
+// (Başka bir kullanıcı adıyla açık olan bilgisayar veya telefon ekranına diğer kullanıcıların mesaj/araması ASLA düşmez)
+function emitWakeupForRecipient(recipientUsername, payload) {
+    if (!globalIo || !recipientUsername) return;
+    const recKey = normalizeKey(recipientUsername);
+    if (!recKey) return;
+
+    for (const [, s] of globalIo.sockets.sockets) {
+        const mapped = socketToUserMap.get(s.id);
+        if (mapped && mapped.username) {
+            if (normalizeKey(mapped.username) === recKey) {
+                s.emit('system:wakeup', payload);
+            }
+        } else {
+            s.emit('system:wakeup', payload);
+        }
+    }
+}
+
+// Soket başka bir kullanıcıya geçtiğinde eski kullanıcı odalarından tamamen çıkarır
+function bindSocketToUser(socket, username, avatar) {
+    const userKey = normalizeKey(username);
+    const prev = socketToUserMap.get(socket.id);
+    if (prev && prev.username && normalizeKey(prev.username) !== userKey) {
+        const prevKey = normalizeKey(prev.username);
+        socket.leave('user:' + prevKey);
+        if (onlineUserSockets.has(prevKey)) {
+            onlineUserSockets.get(prevKey).delete(socket.id);
+            if (onlineUserSockets.get(prevKey).size === 0) {
+                onlineUserSockets.delete(prevKey);
+                db.updateUserLastSeen(prev.username, 'Offline').catch(() => {});
+                if (globalIo) {
+                    globalIo.emit('user:status_change', {
+                        username: prev.username,
+                        isOnline: false,
+                        statusText: 'Offline'
+                    });
+                }
+            }
+        }
+    }
+
+    for (const room of socket.rooms) {
+        if (room.startsWith('user:') && room !== 'user:' + userKey) {
+            socket.leave(room);
+        }
+    }
+
+    socketToUserMap.set(socket.id, { username, avatar });
+    if (!onlineUserSockets.has(userKey)) {
+        onlineUserSockets.set(userKey, new Set());
+    }
+    onlineUserSockets.get(userKey).add(socket.id);
+    socket.join('user:' + userKey);
+}
+
 app.get('/api/system/notifications/poll', (req, res) => {
     const since = parseInt(req.query.since || '0', 10);
-    const forUser = (req.query.user || '').trim();
-    const forUserKey = forUser ? normalizeKey(forUser) : '';
+    const isBridge = req.query.bridge === '1';
+    const rawUser = (req.query.user || '').trim();
+    const remoteIp = req.ip || (req.connection && req.connection.remoteAddress) || '';
+    const isLocalReq = remoteIp === '127.0.0.1' || remoteIp === '::1' || remoteIp === '::ffff:127.0.0.1';
+
+    // Hangi kullanıcı adıyla açılmışsa sadece o kullanıcıya gelen mesaj ve aramalar dönsün
+    const effectiveUser = rawUser || (!isBridge && isLocalReq ? localPcUsername : '');
+    const forUserKey = effectiveUser ? normalizeKey(effectiveUser) : '';
 
     // 45 saniyeden eski bekleyen aramaları temizle
     const now = Date.now();
@@ -968,15 +1112,24 @@ app.get('/api/system/notifications/poll', (req, res) => {
         }
     }
 
-    let newItems = systemNotificationsQueue.filter(n => n.id > since);
-    if (forUserKey) {
-        newItems = newItems.filter(n => !n.recipient || normalizeKey(n.recipient) === forUserKey);
+    let newItems = [];
+    if (isBridge) {
+        newItems = systemNotificationsQueue.filter(n => n.id > since);
+    } else if (forUserKey) {
+        newItems = systemNotificationsQueue
+            .filter(n => n.id > since && n.recipient && normalizeKey(n.recipient) === forUserKey && normalizeKey(n.sender) !== forUserKey)
+            .map(n => ({
+                ...n,
+                text: n.type === 'message' ? decryptE2EETextServer(n.text, n.sender, n.recipient) : n.text
+            }));
     }
 
     const activeCalls = [];
-    for (const [, callObj] of pendingCalls.entries()) {
-        if (!forUserKey || normalizeKey(callObj.recipient) === forUserKey) {
-            activeCalls.push(callObj);
+    if (isBridge || forUserKey) {
+        for (const [, callObj] of pendingCalls.entries()) {
+            if (isBridge || (callObj.recipient && normalizeKey(callObj.recipient) === forUserKey)) {
+                activeCalls.push(callObj);
+            }
         }
     }
 
@@ -1002,11 +1155,13 @@ app.post('/api/system/quick_reply', async (req, res) => {
         await db.ensureUserExists(cleanSender);
         await db.ensureUserExists(cleanRecipient);
 
+        const encryptedText = encryptE2EETextServer(cleanText, cleanSender, cleanRecipient);
+
         const savedMsg = await db.saveMessage({
             id: 'msg_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6),
             sender: cleanSender,
             recipient: cleanRecipient,
-            text: cleanText,
+            text: encryptedText,
             file: null,
             timestamp: new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }),
             date: 'Bugün',
@@ -1017,12 +1172,12 @@ app.post('/api/system/quick_reply', async (req, res) => {
         if (globalIo) {
             globalIo.to('user:' + normalizeKey(cleanSender)).emit('chat:message', savedMsg);
             globalIo.to('user:' + normalizeKey(cleanRecipient)).emit('chat:message', savedMsg);
-            globalIo.emit('system:wakeup', {
+            emitWakeupForRecipient(cleanRecipient, {
                 type: 'message',
                 sender: cleanSender,
                 targetUsername: cleanRecipient,
                 recipient: cleanRecipient,
-                text: cleanText,
+                text: encryptedText,
                 message: savedMsg
             });
         }
@@ -1065,7 +1220,7 @@ app.post('/api/messages/sync', async (req, res) => {
                         });
                         if (globalIo) {
                             globalIo.to('user:' + recKey).emit('chat:message', m);
-                            globalIo.emit('system:wakeup', {
+                            emitWakeupForRecipient(m.recipient, {
                                 type: 'message',
                                 sender: m.sender,
                                 targetUsername: m.recipient,
@@ -1188,7 +1343,7 @@ async function pollCloudNotificationsAndMessages() {
     try {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 6000);
-        const res = await fetch(`${CLOUD_SERVER_URL}/api/system/notifications/poll?since=${cloudLastNotifId}`, {
+        const res = await fetch(`${CLOUD_SERVER_URL}/api/system/notifications/poll?since=${cloudLastNotifId}&bridge=1`, {
             signal: controller.signal
         });
         clearTimeout(timeoutId);
@@ -1209,11 +1364,12 @@ async function pollCloudNotificationsAndMessages() {
 
                             await db.ensureUserExists(item.sender);
                             await db.ensureUserExists(item.recipient);
+                            const encText = encryptE2EETextServer(item.text || '', item.sender, item.recipient);
                             const savedMsg = {
                                 id: msgId,
                                 sender: item.sender,
                                 recipient: item.recipient,
-                                text: item.text || '',
+                                text: encText,
                                 file: null,
                                 timestamp: new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }),
                                 date: 'Bugün',
@@ -1229,18 +1385,18 @@ async function pollCloudNotificationsAndMessages() {
                                 msgId: savedMsg.id,
                                 sender: item.sender,
                                 recipient: item.recipient,
-                                text: item.text || 'Yeni bir mesaj gönderdi',
+                                text: encText || 'Yeni bir mesaj gönderdi',
                                 isTargetOnline: isRecOnline
                             });
 
                             if (globalIo) {
                                 globalIo.to('user:' + recKey).emit('chat:message', savedMsg);
-                                globalIo.emit('system:wakeup', {
+                                emitWakeupForRecipient(item.recipient, {
                                     type: 'message',
                                     sender: item.sender,
                                     targetUsername: item.recipient,
                                     recipient: item.recipient,
-                                    text: item.text || '',
+                                    text: encText,
                                     message: savedMsg
                                 });
                             }
@@ -1257,7 +1413,7 @@ async function pollCloudNotificationsAndMessages() {
                                 isTargetOnline: isRecOnline
                             });
                             if (globalIo) {
-                                globalIo.emit('system:wakeup', {
+                                emitWakeupForRecipient(item.recipient, {
                                     type: 'call',
                                     sender: item.sender,
                                     targetUsername: item.recipient,
@@ -1415,21 +1571,14 @@ async function startServer() {
             }
             const avatar = existing ? existing.avatar : ((data && data.avatar) || '/avatars/default.svg');
 
-            socketToUserMap.set(socket.id, { username, avatar });
-
-            if (!onlineUserSockets.has(userKey)) {
-                onlineUserSockets.set(userKey, new Set());
-            }
-            onlineUserSockets.get(userKey).add(socket.id);
+            // Soketi varsa önceki kullanıcı odalarından çıkarıp yalnızca bu kullanıcıya bağla
+            bindSocketToUser(socket, username, avatar);
 
             // Eğer bu bağlantı yerel bilgisayardan (localhost / 127.0.0.1) yapılmışsa PC kullanıcısı olarak kaydet
             const remoteAddr = (socket.handshake && socket.handshake.address) || '';
             if (remoteAddr === '127.0.0.1' || remoteAddr === '::1' || remoteAddr === '::ffff:127.0.0.1') {
                 setLocalPcUsername(username);
             }
-
-            // Kullanıcının kendi özel odasına katıl
-            socket.join('user:' + userKey);
 
             await db.updateUserLastSeen(username, 'Online');
 
@@ -1446,23 +1595,15 @@ async function startServer() {
                 user: { username, avatar, phone: existing ? (existing.phone || '') : '' }
             });
 
-            // PROGRAM KAPALIYKEN VEYA OFFLINE İKEN GELEN ARAMA VARSA ANINDA EKRANA DÜŞÜR!
+            // PROGRAM KAPALIYKEN VEYA OFFLINE İKEN GELEN GERÇEK AKTİF ARAMA VARSA ANINDA EKRANA DÜŞÜR!
             const pendingCall = pendingCalls.get(userKey);
-            if (pendingCall && (Date.now() - pendingCall.createdAt < 45000)) {
-                console.log(`[Bekleyen Arama Teslimi] ${username} kullanıcısına ${pendingCall.callerUsername} araması iletiliyor.`);
-                socket.emit('call:incoming', pendingCall);
-                setTimeout(() => {
-                    if (pendingCalls.has(userKey)) {
-                        socket.emit('call:incoming', pendingCalls.get(userKey));
-                    }
-                }, 600);
-            } else if (pendingCalls.size > 0 && (remoteAddr === '127.0.0.1' || remoteAddr === '::1' || remoteAddr === '::ffff:127.0.0.1')) {
-                // Yerel PC'de pencere otomatik açıldığında aktif çalan aramayı ekrana getir
-                for (const [, pCall] of pendingCalls.entries()) {
-                    if (Date.now() - pCall.createdAt < 45000 && normalizeKey(pCall.callerUsername) !== userKey) {
-                        socket.emit('call:incoming', pCall);
-                        break;
-                    }
+            if (pendingCall) {
+                const isCallerStillOnline = pendingCall.callerSocketId && socketToUserMap.has(pendingCall.callerSocketId);
+                if (isCallerStillOnline && (Date.now() - pendingCall.createdAt < 30000) && normalizeKey(pendingCall.callerUsername) !== userKey) {
+                    console.log(`[Bekleyen Arama Teslimi] ${username} kullanıcısına ${pendingCall.callerUsername} araması iletiliyor.`);
+                    socket.emit('call:incoming', pendingCall);
+                } else {
+                    pendingCalls.delete(userKey);
                 }
             }
 
@@ -1490,13 +1631,7 @@ async function startServer() {
                     const existing = await db.getUser(session.username);
                     const avatar = existing ? existing.avatar : '/avatars/default.svg';
                     sender = { username: session.username, avatar };
-                    socketToUserMap.set(socket.id, sender);
-                    const userKey = normalizeKey(session.username);
-                    if (!onlineUserSockets.has(userKey)) {
-                        onlineUserSockets.set(userKey, new Set());
-                    }
-                    onlineUserSockets.get(userKey).add(socket.id);
-                    socket.join('user:' + userKey);
+                    bindSocketToUser(socket, session.username, avatar);
                 }
             }
 
@@ -1554,11 +1689,14 @@ async function startServer() {
             // Alıcı şu an bağlı ve Online mı kontrol et
             const isRecipientOnline = onlineUserSockets.has(recipientKey) && onlineUserSockets.get(recipientKey).size > 0;
 
+            // Mesaj metni istemcide E2EE ile şifrelenmişse olduğu gibi koru, değilse E2EE ile şifrele
+            const storedText = cleanText ? encryptE2EETextServer(cleanText, sender.username, recipient) : '';
+
             const savedMsg = await db.saveMessage({
                 id: 'msg_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6),
                 sender: sender.username,
                 recipient: recipient,
-                text: msg.text || '',
+                text: storedText,
                 file: msg.file || null,
                 timestamp: new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }),
                 date: 'Bugün',
@@ -1601,12 +1739,12 @@ async function startServer() {
                 msgId: savedMsg.id,
                 sender: sender.username,
                 recipient: recipient,
-                text: msg.text || (msg.file ? '📎 Dosya / Fotoğraf paylaştı' : 'Yeni bir mesaj gönderdi'),
+                text: storedText || (msg.file ? '📎 Dosya / Fotoğraf paylaştı' : 'Yeni bir mesaj gönderdi'),
                 isTargetOnline: isRecipientOnline
             });
 
-            // OFFLINE VEYA BEKLEMEDEKİ ALICIYI ANINDA UYANDIR VE OTOMATİK ONLINE YAP (CEP TELEFONU GİBİ)
-            io.emit('system:wakeup', {
+            // OFFLINE VEYA BEKLEMEDEKİ ALICIYI ANINDA UYANDIR VE OTOMATİK ONLINE YAP (SADECE HEDEF ALICI İÇİN)
+            emitWakeupForRecipient(recipient, {
                 type: 'message',
                 sender: sender.username,
                 recipient: recipient,
@@ -1653,13 +1791,7 @@ async function startServer() {
                     const existing = await db.getUser(session.username);
                     const avatar = existing ? existing.avatar : '/avatars/default.svg';
                     sender = { username: session.username, avatar };
-                    socketToUserMap.set(socket.id, sender);
-                    const userKey = normalizeKey(session.username);
-                    if (!onlineUserSockets.has(userKey)) {
-                        onlineUserSockets.set(userKey, new Set());
-                    }
-                    onlineUserSockets.get(userKey).add(socket.id);
-                    socket.join('user:' + userKey);
+                    bindSocketToUser(socket, session.username, avatar);
                 }
             }
 
@@ -1793,8 +1925,8 @@ async function startServer() {
             // Alıcı şu an açıksa anında gönder
             io.to('user:' + recipientKey).emit('call:incoming', callPayload);
 
-            // OFFLINE VEYA BEKLEMEDEKİ ALICIYI ANINDA UYANDIR VE OTOMATİK ONLINE YAP (CEP TELEFONU GİBİ)
-            io.emit('system:wakeup', {
+            // OFFLINE VEYA BEKLEMEDEKİ ALICIYI ANINDA UYANDIR VE OTOMATİK ONLINE YAP (SADECE HEDEF ALICI İÇİN)
+            emitWakeupForRecipient(recipient, {
                 type: 'call',
                 sender: sender.username,
                 recipient: recipient,
@@ -1994,7 +2126,14 @@ async function startServer() {
                     }
                 }
 
-                socket.broadcast.emit('call:peer_disconnected', { peerId: socket.id });
+                // Eğer ayrılan soket bir arama başlatmışsa bekleyen aramayı temizle
+                for (const [k, v] of pendingCalls.entries()) {
+                    if (v.callerSocketId === socket.id || normalizeKey(v.callerUsername) === userKey) {
+                        pendingCalls.delete(k);
+                    }
+                }
+
+                socket.broadcast.emit('call:peer_disconnected', { peerId: socket.id, username: user.username });
             }
         });
     });

@@ -248,14 +248,14 @@ html, body {
 }
 
 /* ==========================================================
-   RESİM 1: SOHBETLER / KAYITLI KULLANICILAR EKRANI
+   RESİM 1: SOHBETLER / KAYITLI KULLANICILAR EKRANI (WHATSAPP GÖRÜNÜMÜ)
    ========================================================== */
 .chats-screen {
     width: 100%;
-    max-width: 680px;
+    max-width: 100%;
     height: 100%;
     height: 100dvh;
-    background-color: var(--bg-surface);
+    background-color: #111b21;
     display: flex;
     flex-direction: column;
     position: relative;
@@ -483,37 +483,95 @@ html, body {
     color: var(--text-primary);
 }
 
-/* 5. Sohbet / Kişiler Listesi */
+/* 5. Sohbet / Kişiler Listesi (WhatsApp Birebir Ana Ekran Görünümü) */
 .chat-list-container {
     flex: 1;
     overflow-y: auto;
-    padding: 10px 14px 24px;
+    padding: 0 0 84px 0;
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 0;
+    background-color: #111b21;
 }
 
 .chat-list-item {
     display: flex;
     align-items: center;
-    padding: 12px 14px;
-    gap: 12px;
+    padding: 13px 16px;
+    gap: 14px;
     cursor: pointer;
-    transition: background 0.15s, border-color 0.15s;
+    transition: background 0.15s;
     position: relative;
-    background-color: rgba(255, 255, 255, 0.03);
-    border: 1px solid var(--border-subtle);
-    border-radius: 12px;
+    background-color: transparent;
+    border: none;
+    border-bottom: 1px solid rgba(134, 150, 160, 0.15);
+    border-radius: 0;
 }
 
 .chat-list-item:hover {
-    background-color: var(--bg-hover);
-    border-color: rgba(255, 255, 255, 0.12);
+    background-color: #202c33;
 }
 
 .chat-list-item.active {
-    background-color: var(--bg-surface-hover);
-    border-color: var(--accent);
+    background-color: #2a3942;
+}
+
+.wa-contact-name {
+    font-size: 16.5px;
+    font-weight: 600;
+    color: #e9edef;
+    letter-spacing: -0.1px;
+}
+
+.wa-chat-time {
+    font-size: 12px;
+    color: #8696a0;
+    flex-shrink: 0;
+    margin-left: 8px;
+}
+
+.wa-chat-time.unread {
+    color: #25d366;
+    font-weight: 600;
+}
+
+.wa-chat-time.online-time {
+    color: #00a884;
+    font-weight: 500;
+}
+
+.wa-msg-checks {
+    font-size: 14px;
+    color: #8696a0;
+    margin-right: 2px;
+    font-weight: 700;
+}
+
+.wa-msg-checks.read {
+    color: #53bdeb;
+}
+
+.wa-chat-badges {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+    margin-left: 8px;
+}
+
+.wa-unread-count-badge {
+    min-width: 22px;
+    height: 22px;
+    border-radius: 11px;
+    background-color: #25d366;
+    color: #111b21;
+    font-size: 12px;
+    font-weight: 700;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 6px;
+    line-height: 1;
 }
 
 .chat-avatar-wrap {
@@ -718,25 +776,24 @@ html, body {
 }
 
 .chat-list-item.has-unread {
-    background-color: rgba(0, 168, 132, 0.1) !important;
-    border-color: rgba(37, 211, 102, 0.4) !important;
+    background-color: rgba(0, 168, 132, 0.05);
 }
 
 .chat-last-msg-preview {
-    font-size: 13.5px;
-    color: var(--text-secondary);
+    font-size: 14px;
+    color: #8696a0;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 4px;
     flex: 1;
     min-width: 0;
 }
 
 .chat-last-msg-preview.unread {
-    color: #25d366;
+    color: #e9edef;
     font-weight: 600;
 }
 

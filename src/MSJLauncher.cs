@@ -468,8 +468,9 @@ namespace MSJ
                         }
                         catch { }
 
-                        // Program kapalıysa (!appWindowVisible) veya alıcı çevrimdışı (Offline) görünüyorsa otomatik Online yapıp sohbet ekranını aç
-                        if (!isTargetOnline || !appWindowVisible)
+                        // Yalnızca program penceresi kapalıysa (!appWindowVisible) pencereyi otomatik aç;
+                        // pencere zaten açıksa mevcut kullanıcı oturumuna yeni sekme açarak müdahale etme!
+                        if (!appWindowVisible)
                         {
                             string q = "?openChat=" + Uri.EscapeDataString(sender);
                             if (!string.IsNullOrEmpty(recipient))
@@ -503,7 +504,7 @@ namespace MSJ
                     try
                     {
                         bool appWindowVisible = IsAppWindowVisible();
-                        if (!isTargetOnline || !appWindowVisible)
+                        if (!appWindowVisible)
                         {
                             string q = "?openChat=" + Uri.EscapeDataString(caller) + "&incomingCall=1";
                             if (!string.IsNullOrEmpty(recipient))

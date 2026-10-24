@@ -1,5 +1,5 @@
-// MSJ Service Worker - Arka Plan Mesaj ve Arama Bildirimleri (Önbellek Kilitlenmesini Önlemek İçin Ağ-Öncelikli)
-const CACHE_NAME = 'msj-cache-v14';
+// MSJ Service Worker - Arka Plan Mesaj ve Arama Bildirimleri (Kullanıcı İzolasyonlu & Ağ-Öncelikli)
+const CACHE_NAME = 'msj-cache-v16';
 
 let swLastNotificationId = 0;
 let swCurrentUser = '';
@@ -9,11 +9,13 @@ function startSwBackgroundPoll() {
     if (swPollTimer) return;
     swPollTimer = setInterval(async () => {
         try {
+            if (!swCurrentUser) return;
+
             const clientList = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
             const hasFocusedClient = clientList.some(c => c.focused);
             if (hasFocusedClient) return;
 
-            const url = `/api/system/notifications/poll?since=${swLastNotificationId}${swCurrentUser ? '&user=' + encodeURIComponent(swCurrentUser) : ''}`;
+            const url = `/api/system/notifications/poll?since=${swLastNotificationId}&user=${encodeURIComponent(swCurrentUser)}`;
             const res = await fetch(url);
             const data = await res.json();
             if (data && data.success) {
@@ -23,8 +25,10 @@ function startSwBackgroundPoll() {
                 }
                 if (data.lastId > swLastNotificationId && swLastNotificationId > 0 && Array.isArray(data.notifications)) {
                     for (const item of data.notifications) {
-                        if (swCurrentUser && item.sender && item.sender.toLowerCase() === swCurrentUser.toLowerCase()) continue;
-                        const autoUserSuffix = item.recipient ? `&autoUser=${encodeURIComponent(item.recipient)}` : '';
+                        if (!item || !item.recipient) continue;
+                        if (item.recipient.toLowerCase() !== swCurrentUser.toLowerCase()) continue;
+                        if (item.sender && item.sender.toLowerCase() === swCurrentUser.toLowerCase()) continue;
+                        const autoUserSuffix = `&autoUser=${encodeURIComponent(swCurrentUser)}`;
                         if (item.type === 'call') {
                             self.registration.showNotification(`📞 GELEN ARAMA: ${item.sender}`, {
                                 body: `${item.sender} sizi arıyor! Cevaplamak için dokunun.`,
@@ -37,8 +41,11 @@ function startSwBackgroundPoll() {
                                 data: { url: `/?openChat=${encodeURIComponent(item.sender)}&incomingCall=1${autoUserSuffix}` }
                             });
                         } else if (item.type === 'message') {
+                            const previewText = (item.text && !String(item.text).startsWith('e2ee1:'))
+                                ? item.text
+                                : '🔒 Uçtan uca şifreli yeni mesajınız var';
                             self.registration.showNotification(`💬 ${item.sender}`, {
-                                body: item.text || 'Yeni bir mesajınız var',
+                                body: previewText,
                                 icon: '/icon-192.png',
                                 badge: '/icon-192.png',
                                 tag: 'msg-' + item.sender,
