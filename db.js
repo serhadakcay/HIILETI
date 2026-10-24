@@ -33,6 +33,48 @@ function getConvoKey(u1, u2) {
     return [normalizeKey(u1), normalizeKey(u2)].sort().join('___');
 }
 
+function decryptE2EETextIfNeeded(payload, sender, recipient) {
+    if (!payload || typeof payload !== 'string' || !payload.startsWith('e2ee1:')) {
+        return payload || '';
+    }
+    try {
+        const crypto = require('crypto');
+        const parts = payload.split(':');
+        if (parts.length !== 4) return payload;
+        const [, ivHex, tagHex, cipherHex] = parts;
+        const convoKey = getConvoKey(sender, recipient);
+        if (!convoKey) return payload;
+        const masterKeyHex = crypto.createHash('sha256')
+            .update('MSJ_E2EE_V1_KEY::' + convoKey + '::HIHaberlesme_256bit_Secret', 'utf8')
+            .digest('hex');
+
+        const expectedTag = crypto.createHash('sha256')
+            .update(`${masterKeyHex}:MAC:${ivHex}:${cipherHex}`, 'utf8')
+            .digest('hex')
+            .slice(0, 16);
+        if (expectedTag !== tagHex) return payload;
+
+        const cipherBuf = Buffer.from(cipherHex, 'hex');
+        const plainBuf = Buffer.alloc(cipherBuf.length);
+        let offset = 0;
+        let blockIndex = 0;
+        while (offset < cipherBuf.length) {
+            const keystream = crypto.createHash('sha256')
+                .update(`${masterKeyHex}:${ivHex}:${blockIndex}`, 'utf8')
+                .digest();
+            const chunkLen = Math.min(32, cipherBuf.length - offset);
+            for (let i = 0; i < chunkLen; i++) {
+                plainBuf[offset + i] = cipherBuf[offset + i] ^ keystream[i];
+            }
+            offset += chunkLen;
+            blockIndex++;
+        }
+        return plainBuf.toString('utf8');
+    } catch (e) {
+        return payload;
+    }
+}
+
 const dataDir = path.join(__dirname, 'data');
 const usersFile = path.join(dataDir, 'users.json');
 const sessionsFile = path.join(dataDir, 'sessions.json');
@@ -435,7 +477,14 @@ class DatabaseManager {
                 allMsgs = rows.map(r => this.formatMessageRow(r));
             } else {
                 const rows = this.sqliteDb.prepare('SELECT * FROM messages ORDER BY created_at ASC').all();
-                allMsgs = rows.map(r => this.formatMessageRow(r));
+                const updateStmt = this.sqliteDb.prepare('UPDATE messages SET text = ? WHERE id = ?');
+                allMsgs = rows.map(r => {
+                    const formatted = this.formatMessageRow(r);
+                    if (r.text && r.text.startsWith('e2ee1:') && formatted.text !== r.text) {
+                        try { updateStmt.run(formatted.text, r.id); } catch (e) {}
+                    }
+                    return formatted;
+                });
             }
 
             const messagesMap = {};
@@ -945,6 +994,10 @@ class DatabaseManager {
         const convoKey = getConvoKey(msg.sender, msg.recipient);
         const id = msg.id || ('msg_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6));
         const fileJson = msg.file ? JSON.stringify(msg.file) : null;
+        let cleanText = decryptE2EETextIfNeeded(msg.text || '', msg.sender, msg.recipient);
+        if (msg.file && cleanText === '📎 Dosya / Fotoğraf paylaştı') {
+            cleanText = '';
+        }
         const timestamp = msg.timestamp || new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' });
         const dateStr = msg.date || 'Bugün';
         const createdAt = msg.createdAt || new Date().toISOString();
@@ -954,15 +1007,25 @@ class DatabaseManager {
             await this.mysqlPool.query(
                 `INSERT INTO messages (id, convo_key, sender, recipient, text, file_json, timestamp, date_str, created_at, is_read)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                 ON DUPLICATE KEY UPDATE is_read = VALUES(is_read)`,
-                [id, convoKey, msg.sender, msg.recipient, msg.text || '', fileJson, timestamp, dateStr, createdAt, isRead]
+                 ON DUPLICATE KEY UPDATE
+                     is_read = GREATEST(is_read, VALUES(is_read)),
+                     text = IF(VALUES(file_json) IS NOT NULL AND file_json IS NULL, VALUES(text), IF(text LIKE 'e2ee1:%' AND VALUES(text) NOT LIKE 'e2ee1:%', VALUES(text), text)),
+                     file_json = COALESCE(VALUES(file_json), file_json)`,
+                [id, convoKey, msg.sender, msg.recipient, cleanText, fileJson, timestamp, dateStr, createdAt, isRead]
             );
         } else {
             this.sqliteDb.prepare(`
                 INSERT INTO messages (id, convo_key, sender, recipient, text, file_json, timestamp, date_str, created_at, is_read)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET is_read = excluded.is_read
-            `).run(id, convoKey, msg.sender, msg.recipient, msg.text || '', fileJson, timestamp, dateStr, createdAt, isRead);
+                ON CONFLICT(id) DO UPDATE SET
+                    is_read = MAX(messages.is_read, excluded.is_read),
+                    text = CASE
+                        WHEN excluded.file_json IS NOT NULL AND messages.file_json IS NULL THEN excluded.text
+                        WHEN messages.text LIKE 'e2ee1:%' AND excluded.text NOT LIKE 'e2ee1:%' THEN excluded.text
+                        ELSE messages.text
+                    END,
+                    file_json = COALESCE(excluded.file_json, messages.file_json)
+            `).run(id, convoKey, msg.sender, msg.recipient, cleanText, fileJson, timestamp, dateStr, createdAt, isRead);
         }
     }
 
@@ -970,6 +1033,10 @@ class DatabaseManager {
         const convoKey = getConvoKey(msg.sender, msg.recipient);
         const id = msg.id || ('msg_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6));
         const fileJson = msg.file ? JSON.stringify(msg.file) : null;
+        let cleanText = decryptE2EETextIfNeeded(msg.text || '', msg.sender, msg.recipient);
+        if (msg.file && cleanText === '📎 Dosya / Fotoğraf paylaştı') {
+            cleanText = '';
+        }
         const timestamp = msg.timestamp || new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' });
         const dateStr = msg.date || 'Bugün';
         const createdAt = msg.createdAt || new Date().toISOString();
@@ -979,13 +1046,13 @@ class DatabaseManager {
             await this.mysqlPool.query(
                 `INSERT INTO messages (id, convo_key, sender, recipient, text, file_json, timestamp, date_str, created_at, is_read)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [id, convoKey, msg.sender, msg.recipient, msg.text || '', fileJson, timestamp, dateStr, createdAt, isRead]
+                [id, convoKey, msg.sender, msg.recipient, cleanText, fileJson, timestamp, dateStr, createdAt, isRead]
             );
         } else {
             this.sqliteDb.prepare(`
                 INSERT INTO messages (id, convo_key, sender, recipient, text, file_json, timestamp, date_str, created_at, is_read)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            `).run(id, convoKey, msg.sender, msg.recipient, msg.text || '', fileJson, timestamp, dateStr, createdAt, isRead);
+            `).run(id, convoKey, msg.sender, msg.recipient, cleanText, fileJson, timestamp, dateStr, createdAt, isRead);
             this.checkpointSqlite();
         }
 
@@ -994,7 +1061,7 @@ class DatabaseManager {
             convoKey,
             sender: msg.sender,
             recipient: msg.recipient,
-            text: msg.text || '',
+            text: cleanText,
             file: msg.file || null,
             timestamp,
             date: dateStr,
@@ -1251,12 +1318,17 @@ class DatabaseManager {
             try { fileObj = JSON.parse(row.file_json); } catch (e) {}
         }
 
+        let cleanText = decryptE2EETextIfNeeded(row.text || '', row.sender, row.recipient);
+        if (fileObj && cleanText === '📎 Dosya / Fotoğraf paylaştı') {
+            cleanText = '';
+        }
+
         return {
             id: row.id,
             convoKey: row.convo_key,
             sender: row.sender,
             recipient: row.recipient,
-            text: row.text || '',
+            text: cleanText,
             file: fileObj,
             timestamp: row.timestamp || '',
             date: row.date_str || 'Bugün',
@@ -1273,5 +1345,6 @@ module.exports = {
     normalizeKey,
     normalizePhone,
     isLikelyPhoneNumber,
-    getConvoKey
+    getConvoKey,
+    decryptE2EETextIfNeeded
 };

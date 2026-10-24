@@ -36,6 +36,37 @@ app.use((req, res, next) => {
     next();
 });
 app.use(express.static(publicDir));
+
+// ==========================================
+// UPLOADS KLASÖRÜ + BULUT (RENDER) OTOMATİK YEDEK İNDİRİCİ
+// Telefondan (bulut sunucudan) gönderilen fotoğraf/dosya yerel klasörde yoksa anında indirip sunar
+// ==========================================
+app.get('/uploads/:filename', async (req, res, next) => {
+    try {
+        const fileName = path.basename(req.params.filename || '');
+        if (!fileName) return next();
+        const localFilePath = path.join(uploadsDir, fileName);
+        if (fs.existsSync(localFilePath)) {
+            return res.sendFile(localFilePath);
+        }
+        const cloudBase = process.env.CLOUD_SYNC_URL || 'https://hiileti.onrender.com';
+        if (!process.env.PORT && typeof fetch === 'function') {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 10000);
+            const cloudRes = await fetch(`${cloudBase}/uploads/${encodeURIComponent(fileName)}`, {
+                signal: controller.signal
+            });
+            clearTimeout(timeoutId);
+            if (cloudRes && cloudRes.ok) {
+                const arrayBuf = await cloudRes.arrayBuffer();
+                fs.writeFileSync(localFilePath, Buffer.from(arrayBuf));
+                return res.sendFile(localFilePath);
+            }
+        }
+    } catch (e) {}
+    next();
+});
+
 app.use('/uploads', express.static(uploadsDir));
 
 // ==========================================
@@ -95,35 +126,10 @@ function deriveE2EEMasterKeyHex(u1, u2) {
 
 function encryptE2EETextServer(plainText, sender, recipient) {
     if (!plainText || typeof plainText !== 'string') return plainText || '';
-    if (plainText.startsWith('e2ee1:')) return plainText;
-    const masterKeyHex = deriveE2EEMasterKeyHex(sender, recipient);
-    if (!masterKeyHex) return plainText;
-
-    const ivHex = crypto.randomBytes(12).toString('hex');
-    const plainBuf = Buffer.from(plainText, 'utf8');
-    const cipherBuf = Buffer.alloc(plainBuf.length);
-
-    let offset = 0;
-    let blockIndex = 0;
-    while (offset < plainBuf.length) {
-        const keystream = crypto.createHash('sha256')
-            .update(`${masterKeyHex}:${ivHex}:${blockIndex}`, 'utf8')
-            .digest();
-        const chunkLen = Math.min(32, plainBuf.length - offset);
-        for (let i = 0; i < chunkLen; i++) {
-            cipherBuf[offset + i] = plainBuf[offset + i] ^ keystream[i];
-        }
-        offset += chunkLen;
-        blockIndex++;
+    if (plainText.startsWith('e2ee1:')) {
+        return decryptE2EETextServer(plainText, sender, recipient);
     }
-
-    const cipherHex = cipherBuf.toString('hex');
-    const tagHex = crypto.createHash('sha256')
-        .update(`${masterKeyHex}:MAC:${ivHex}:${cipherHex}`, 'utf8')
-        .digest('hex')
-        .slice(0, 16);
-
-    return `e2ee1:${ivHex}:${tagHex}:${cipherHex}`;
+    return plainText;
 }
 
 function decryptE2EETextServer(payload, sender, recipient) {
@@ -132,16 +138,16 @@ function decryptE2EETextServer(payload, sender, recipient) {
     }
     try {
         const parts = payload.split(':');
-        if (parts.length !== 4) return '🔒 Şifreli Mesaj';
+        if (parts.length !== 4) return payload;
         const [, ivHex, tagHex, cipherHex] = parts;
         const masterKeyHex = deriveE2EEMasterKeyHex(sender, recipient);
-        if (!masterKeyHex) return '🔒 Şifreli Mesaj';
+        if (!masterKeyHex) return payload;
 
         const expectedTag = crypto.createHash('sha256')
             .update(`${masterKeyHex}:MAC:${ivHex}:${cipherHex}`, 'utf8')
             .digest('hex')
             .slice(0, 16);
-        if (expectedTag !== tagHex) return '🔒 Şifreli Mesaj';
+        if (expectedTag !== tagHex) return payload;
 
         const cipherBuf = Buffer.from(cipherHex, 'hex');
         const plainBuf = Buffer.alloc(cipherBuf.length);
@@ -160,7 +166,7 @@ function decryptE2EETextServer(payload, sender, recipient) {
         }
         return plainBuf.toString('utf8');
     } catch (e) {
-        return '🔒 Şifreli Mesaj';
+        return payload;
     }
 }
 
@@ -765,6 +771,10 @@ app.get('/api/messages/:contact', authenticateToken, async (req, res) => {
         const currentUsername = req.user.username;
         const contactUsername = req.params.contact;
 
+        if (!IS_CLOUD) {
+            await syncConversationWithCloud(currentUsername, contactUsername);
+        }
+
         const msgs = await db.getConversationMessages(currentUsername, contactUsername);
         await db.markMessagesAsRead(contactUsername, currentUsername);
 
@@ -1200,6 +1210,13 @@ app.post('/api/messages/sync', async (req, res) => {
         if (Array.isArray(messages)) {
             for (const m of messages) {
                 if (!m || !m.id || !m.sender || !m.recipient) continue;
+                m.text = decryptE2EETextServer(m.text || '', m.sender, m.recipient);
+                if (m.file && m.text === '📎 Dosya / Fotoğraf paylaştı') {
+                    m.text = '';
+                }
+                if (m.file && m.file.url && m.file.url.startsWith('/uploads/')) {
+                    await downloadCloudFileIfNeeded(m.file.url);
+                }
                 await db.ensureUserExists(m.sender);
                 await db.ensureUserExists(m.recipient);
                 await db.insertMessageToDbIfNotExists(m);
@@ -1216,6 +1233,7 @@ app.post('/api/messages/sync', async (req, res) => {
                             sender: m.sender,
                             recipient: m.recipient,
                             text: m.text || (m.file ? '📎 Dosya / Fotoğraf paylaştı' : 'Yeni bir mesaj gönderdi'),
+                            file: m.file || null,
                             isTargetOnline: isRecOnline
                         });
                         if (globalIo) {
@@ -1320,17 +1338,202 @@ const CLOUD_SERVER_URL = process.env.CLOUD_SYNC_URL || 'https://hiileti.onrender
 let isCloudSyncing = false;
 let cloudLastNotifId = 0;
 let isCloudNotifPolling = false;
+const cloudTokenCache = new Map();
+
+async function getCloudAuthToken(username) {
+    if (!username || typeof fetch !== 'function') return '';
+    const uKey = normalizeKey(username);
+    if (cloudTokenCache.has(uKey)) return cloudTokenCache.get(uKey);
+    try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 6000);
+        const res = await fetch(`${CLOUD_SERVER_URL}/api/auth/auto_login`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username }),
+            signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+        if (res && res.ok) {
+            const data = await res.json();
+            if (data && data.token) {
+                cloudTokenCache.set(uKey, data.token);
+                return data.token;
+            }
+        }
+    } catch (e) {}
+    return '';
+}
+
+async function downloadCloudFileIfNeeded(fileUrl) {
+    if (!fileUrl || typeof fileUrl !== 'string' || !fileUrl.startsWith('/uploads/') || typeof fetch !== 'function') {
+        return;
+    }
+    try {
+        const fileName = path.basename(fileUrl);
+        if (!fileName) return;
+        const localFilePath = path.join(uploadsDir, fileName);
+        if (fs.existsSync(localFilePath)) return;
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 12000);
+        const res = await fetch(`${CLOUD_SERVER_URL}/uploads/${encodeURIComponent(fileName)}`, {
+            signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+        if (res && res.ok) {
+            const arrayBuf = await res.arrayBuffer();
+            fs.writeFileSync(localFilePath, Buffer.from(arrayBuf));
+        }
+    } catch (e) {}
+}
+
+async function fetchCloudMessageDetails(sender, recipient, msgId) {
+    if (!sender || !recipient || typeof fetch !== 'function') return null;
+    try {
+        const token = await getCloudAuthToken(recipient);
+        if (!token) return null;
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 7000);
+        const res = await fetch(`${CLOUD_SERVER_URL}/api/messages/${encodeURIComponent(sender)}`, {
+            headers: { 'x-auth-token': token },
+            signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+        if (res && res.ok) {
+            const data = await res.json();
+            if (data && Array.isArray(data.messages)) {
+                if (msgId) {
+                    const exact = data.messages.find(m => m && m.id === msgId);
+                    if (exact) return exact;
+                }
+                return data.messages[data.messages.length - 1] || null;
+            }
+        }
+    } catch (e) {}
+    return null;
+}
+
+async function syncConversationWithCloud(u1, u2) {
+    if (IS_CLOUD || !u1 || !u2 || typeof fetch !== 'function') return;
+    try {
+        const token = await getCloudAuthToken(u1);
+        if (!token) return;
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000);
+        const res = await fetch(`${CLOUD_SERVER_URL}/api/messages/${encodeURIComponent(u2)}`, {
+            headers: { 'x-auth-token': token },
+            signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+        if (res && res.ok) {
+            const data = await res.json();
+            if (data && Array.isArray(data.messages)) {
+                for (const cm of data.messages) {
+                    if (!cm || !cm.id || !cm.sender || !cm.recipient) continue;
+                    seenSyncedMessageIds.add(cm.id);
+                    if (cm.file && cm.file.url && cm.file.url.startsWith('/uploads/')) {
+                        await downloadCloudFileIfNeeded(cm.file.url);
+                    }
+                    const cleanText = decryptE2EETextServer(cm.text || '', cm.sender, cm.recipient);
+                    if (cm.text && String(cm.text).startsWith('e2ee1:')) {
+                        replaceCloudEncryptedMessageWithPlain(cm, cleanText).catch(() => {});
+                    }
+                    await db.insertMessageToDbIfNotExists({
+                        ...cm,
+                        text: (cm.file && cleanText === '📎 Dosya / Fotoğraf paylaştı') ? '' : cleanText
+                    });
+                }
+            }
+        }
+    } catch (e) {}
+}
+
+async function replaceCloudEncryptedMessageWithPlain(cloudMsg, plainText) {
+    if (!cloudMsg || !cloudMsg.id || !cloudMsg.text || !String(cloudMsg.text).startsWith('e2ee1:')) return;
+    try {
+        const token = await getCloudAuthToken(cloudMsg.sender);
+        if (!token) return;
+        await fetch(`${CLOUD_SERVER_URL}/api/messages/${encodeURIComponent(cloudMsg.id)}`, {
+            method: 'DELETE',
+            headers: { 'x-auth-token': token }
+        });
+        const cleanMsg = {
+            ...cloudMsg,
+            text: plainText
+        };
+        await fetch(`${CLOUD_SERVER_URL}/api/messages/sync`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ messages: [cleanMsg] })
+        });
+    } catch (e) {}
+}
 
 async function forwardMessageToCloud(savedMsg) {
     if (IS_CLOUD || !savedMsg || typeof fetch !== 'function') return;
     try {
         seenSyncedMessageIds.add(savedMsg.id);
+        const msgToSend = {
+            ...savedMsg,
+            text: decryptE2EETextServer(savedMsg.text || '', savedMsg.sender, savedMsg.recipient),
+            file: savedMsg.file ? { ...savedMsg.file } : null
+        };
+
+        // Eğer mesajda fotoğraf veya dosya varsa önce bulut sunucusuna (/api/upload) yükle ki cep telefonunda da anında açılsın!
+        if (msgToSend.file && msgToSend.file.url && msgToSend.file.url.startsWith('/uploads/')) {
+            const localFileName = path.basename(msgToSend.file.url);
+            const localFilePath = path.join(uploadsDir, localFileName);
+            if (fs.existsSync(localFilePath)) {
+                try {
+                    const fileBuf = fs.readFileSync(localFilePath);
+                    const mime = msgToSend.file.mimetype || 'application/octet-stream';
+                    const origName = msgToSend.file.filename || localFileName;
+                    const formData = new FormData();
+                    formData.append('file', new Blob([fileBuf], { type: mime }), origName);
+
+                    const upController = new AbortController();
+                    const upTimeout = setTimeout(() => upController.abort(), 20000);
+                    const upRes = await fetch(`${CLOUD_SERVER_URL}/api/upload`, {
+                        method: 'POST',
+                        body: formData,
+                        signal: upController.signal
+                    });
+                    clearTimeout(upTimeout);
+
+                    if (upRes && upRes.ok) {
+                        const cloudFile = await upRes.json();
+                        if (cloudFile && cloudFile.url) {
+                            msgToSend.file.url = cloudFile.url;
+                            if (cloudFile.storedName) msgToSend.file.storedName = cloudFile.storedName;
+                            // Buluttaki dosya adıyla yerel klasöre de kopyala ki her iki URL de çalışsın
+                            const cloudFileName = path.basename(cloudFile.url);
+                            const aliasLocalPath = path.join(uploadsDir, cloudFileName);
+                            if (!fs.existsSync(aliasLocalPath)) {
+                                try { fs.copyFileSync(localFilePath, aliasLocalPath); } catch (e) {}
+                            }
+                        }
+                    } else if (mime.startsWith('image/') && fileBuf.length < 4 * 1024 * 1024) {
+                        msgToSend.file.url = `data:${mime};base64,${fileBuf.toString('base64')}`;
+                    }
+                } catch (upErr) {
+                    try {
+                        const fileBuf = fs.readFileSync(localFilePath);
+                        const mime = msgToSend.file.mimetype || 'image/jpeg';
+                        if (mime.startsWith('image/') && fileBuf.length < 4 * 1024 * 1024) {
+                            msgToSend.file.url = `data:${mime};base64,${fileBuf.toString('base64')}`;
+                        }
+                    } catch (e2) {}
+                }
+            }
+        }
+
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 8000);
+        const timeoutId = setTimeout(() => controller.abort(), 10000);
         await fetch(`${CLOUD_SERVER_URL}/api/messages/sync`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ messages: [savedMsg] }),
+            body: JSON.stringify({ messages: [msgToSend] }),
             signal: controller.signal
         });
         clearTimeout(timeoutId);
@@ -1354,7 +1557,8 @@ async function pollCloudNotificationsAndMessages() {
                 if (typeof data.lastId === 'number' && data.lastId < cloudLastNotifId) {
                     cloudLastNotifId = 0;
                 }
-                if (cloudLastNotifId > 0 && Array.isArray(data.notifications) && data.notifications.length > 0) {
+                const isInitialSync = (cloudLastNotifId === 0);
+                if (Array.isArray(data.notifications) && data.notifications.length > 0) {
                     for (const item of data.notifications) {
                         if (!item || !item.type) continue;
                         if (item.type === 'message') {
@@ -1364,43 +1568,65 @@ async function pollCloudNotificationsAndMessages() {
 
                             await db.ensureUserExists(item.sender);
                             await db.ensureUserExists(item.recipient);
-                            const encText = encryptE2EETextServer(item.text || '', item.sender, item.recipient);
+
+                            // Bulut sunucudan mesajın tam detayını (fotoğraf/dosya bilgisi dahil) çek
+                            const cloudMsg = await fetchCloudMessageDetails(item.sender, item.recipient, item.msgId);
+                            let fileObj = (cloudMsg && cloudMsg.file) ? cloudMsg.file : (item.file || null);
+                            if (fileObj && fileObj.url && fileObj.url.startsWith('/uploads/')) {
+                                await downloadCloudFileIfNeeded(fileObj.url);
+                            }
+
+                            let rawText = (cloudMsg && typeof cloudMsg.text === 'string') ? cloudMsg.text : (item.text || '');
+                            let cleanText = decryptE2EETextServer(rawText, item.sender, item.recipient);
+                            if (fileObj && cleanText === '📎 Dosya / Fotoğraf paylaştı') {
+                                cleanText = '';
+                            }
+
+                            if (cloudMsg && cloudMsg.text && String(cloudMsg.text).startsWith('e2ee1:')) {
+                                replaceCloudEncryptedMessageWithPlain(cloudMsg, cleanText).catch(() => {});
+                            }
+
                             const savedMsg = {
                                 id: msgId,
                                 sender: item.sender,
                                 recipient: item.recipient,
-                                text: encText,
-                                file: null,
-                                timestamp: new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }),
-                                date: 'Bugün',
-                                createdAt: new Date().toISOString(),
+                                text: cleanText,
+                                file: fileObj,
+                                timestamp: (cloudMsg && cloudMsg.timestamp) || new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }),
+                                date: (cloudMsg && cloudMsg.date) || 'Bugün',
+                                createdAt: (cloudMsg && cloudMsg.createdAt) || new Date().toISOString(),
                                 read: false
                             };
                             await db.insertMessageToDbIfNotExists(savedMsg);
 
-                            const recKey = normalizeKey(item.recipient);
-                            const isRecOnline = onlineUserSockets.has(recKey) && onlineUserSockets.get(recKey).size > 0;
-                            addSystemNotification({
-                                type: 'message',
-                                msgId: savedMsg.id,
-                                sender: item.sender,
-                                recipient: item.recipient,
-                                text: encText || 'Yeni bir mesaj gönderdi',
-                                isTargetOnline: isRecOnline
-                            });
-
-                            if (globalIo) {
-                                globalIo.to('user:' + recKey).emit('chat:message', savedMsg);
-                                emitWakeupForRecipient(item.recipient, {
+                            const isRecent = !item.timestamp || (Date.now() - item.timestamp < 90000);
+                            if (!isInitialSync || isRecent) {
+                                const recKey = normalizeKey(item.recipient);
+                                const isRecOnline = onlineUserSockets.has(recKey) && onlineUserSockets.get(recKey).size > 0;
+                                addSystemNotification({
                                     type: 'message',
+                                    msgId: savedMsg.id,
                                     sender: item.sender,
-                                    targetUsername: item.recipient,
                                     recipient: item.recipient,
-                                    text: encText,
-                                    message: savedMsg
+                                    text: cleanText || (fileObj ? '📎 Dosya / Fotoğraf paylaştı' : 'Yeni bir mesaj gönderdi'),
+                                    file: fileObj,
+                                    isTargetOnline: isRecOnline
                                 });
+
+                                if (globalIo) {
+                                    globalIo.to('user:' + recKey).emit('chat:message', savedMsg);
+                                    globalIo.to('user:' + normalizeKey(item.sender)).emit('chat:message', savedMsg);
+                                    emitWakeupForRecipient(item.recipient, {
+                                        type: 'message',
+                                        sender: item.sender,
+                                        targetUsername: item.recipient,
+                                        recipient: item.recipient,
+                                        text: cleanText,
+                                        message: savedMsg
+                                    });
+                                }
                             }
-                        } else if (item.type === 'call') {
+                        } else if (item.type === 'call' && (!isInitialSync || (item.timestamp && Date.now() - item.timestamp < 45000))) {
                             const recKey = normalizeKey(item.recipient);
                             const isRecOnline = onlineUserSockets.has(recKey) && onlineUserSockets.get(recKey).size > 0;
                             addSystemNotification({
@@ -1740,6 +1966,7 @@ async function startServer() {
                 sender: sender.username,
                 recipient: recipient,
                 text: storedText || (msg.file ? '📎 Dosya / Fotoğraf paylaştı' : 'Yeni bir mesaj gönderdi'),
+                file: savedMsg.file || null,
                 isTargetOnline: isRecipientOnline
             });
 
@@ -1798,6 +2025,10 @@ async function startServer() {
             if (!sender) {
                 if (callback) callback({ success: false, messages: [] });
                 return;
+            }
+
+            if (!IS_CLOUD && contactUsername) {
+                await syncConversationWithCloud(sender.username, contactUsername);
             }
 
             const msgs = await db.getConversationMessages(sender.username, contactUsername);

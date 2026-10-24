@@ -1,5 +1,5 @@
 // MSJ Service Worker - Arka Plan Mesaj ve Arama Bildirimleri (Kullanıcı İzolasyonlu & Ağ-Öncelikli)
-const CACHE_NAME = 'msj-cache-v16';
+const CACHE_NAME = 'msj-cache-v18';
 
 let swLastNotificationId = 0;
 let swCurrentUser = '';

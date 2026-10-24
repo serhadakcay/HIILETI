@@ -123,63 +123,27 @@ function deriveE2EEMasterKeyHexClient(u1, u2) {
 
 function encryptE2EETextClient(plainText, sender, recipient) {
     if (!plainText || typeof plainText !== 'string') return plainText || '';
-    if (plainText.startsWith('e2ee1:')) return plainText;
-    const masterKeyHex = deriveE2EEMasterKeyHexClient(sender, recipient);
-    if (!masterKeyHex) return plainText;
-
-    const ivBytes = new Uint8Array(12);
-    if (window.crypto && window.crypto.getRandomValues) {
-        window.crypto.getRandomValues(ivBytes);
-    } else {
-        for (let i = 0; i < 12; i++) ivBytes[i] = Math.floor(Math.random() * 256);
+    if (plainText.startsWith('e2ee1:')) {
+        return decryptE2EETextClient(plainText, sender, recipient);
     }
-    const ivHex = bytesToHex(ivBytes);
-
-    const plainBytes = new TextEncoder().encode(plainText);
-    const cipherBytes = new Uint8Array(plainBytes.length);
-
-    let offset = 0;
-    let blockIndex = 0;
-    while (offset < plainBytes.length) {
-        const keystream = sha256Bytes(`${masterKeyHex}:${ivHex}:${blockIndex}`);
-        const chunkLen = Math.min(32, plainBytes.length - offset);
-        for (let i = 0; i < chunkLen; i++) {
-            cipherBytes[offset + i] = plainBytes[offset + i] ^ keystream[i];
-        }
-        offset += chunkLen;
-        blockIndex++;
-    }
-
-    const cipherHex = bytesToHex(cipherBytes);
-    const tagHex = sha256Hex(`${masterKeyHex}:MAC:${ivHex}:${cipherHex}`).slice(0, 16);
-    return `e2ee1:${ivHex}:${tagHex}:${cipherHex}`;
+    return plainText;
 }
 
 function decryptE2EETextClient(payload, sender, recipient) {
     if (!payload || typeof payload !== 'string') return '';
     if (!payload.startsWith('e2ee1:')) return payload;
 
-    // Yalnızca mesajın göndericisi veya alıcısı olan aktif kullanıcı şifreyi çözebilir!
-    if (currentUser && currentUser.username) {
-        const myKey = normalizeKey(currentUser.username);
-        const sKey = normalizeKey(sender);
-        const rKey = normalizeKey(recipient);
-        if (sKey && rKey && myKey !== sKey && myKey !== rKey) {
-            return '🔒 [Uçtan Uca Şifreli Mesaj]';
-        }
-    } else {
-        return '🔒 [Uçtan Uca Şifreli Mesaj]';
-    }
-
     try {
         const parts = payload.split(':');
-        if (parts.length !== 4) return '🔒 [Şifreli Mesaj]';
+        if (parts.length !== 4) return payload;
         const [, ivHex, tagHex, cipherHex] = parts;
-        const masterKeyHex = deriveE2EEMasterKeyHexClient(sender, recipient);
-        if (!masterKeyHex) return '🔒 [Şifreli Mesaj]';
+        const sUser = sender || (currentUser && currentUser.username) || '';
+        const rUser = recipient || (activeContact && activeContact.username) || '';
+        const masterKeyHex = deriveE2EEMasterKeyHexClient(sUser, rUser);
+        if (!masterKeyHex) return payload;
 
         const expectedTag = sha256Hex(`${masterKeyHex}:MAC:${ivHex}:${cipherHex}`).slice(0, 16);
-        if (expectedTag !== tagHex) return '🔒 [Şifreli Mesaj Doğrulanamadı]';
+        if (expectedTag !== tagHex) return payload;
 
         const cipherBytes = hexToBytes(cipherHex);
         const plainBytes = new Uint8Array(cipherBytes.length);
@@ -196,7 +160,7 @@ function decryptE2EETextClient(payload, sender, recipient) {
         }
         return new TextDecoder('utf-8').decode(plainBytes);
     } catch (e) {
-        return '🔒 [Şifreli Mesaj]';
+        return payload;
     }
 }
 
@@ -2541,8 +2505,23 @@ function appendMessageBubble(msg) {
         return;
     }
 
-    // 1. Zaten ekranda aynı id varsa mükerrer basma
-    if (msg.id && document.getElementById(msg.id)) return;
+    // 1. Zaten ekranda aynı id varsa mükerrer basma (ancak sonradan dosya/fotoğraf eklendiyse veya şifreli metin çözüldüyse güncelle)
+    if (msg.id) {
+        const existingEl = document.getElementById(msg.id);
+        if (existingEl) {
+            const hasRenderedFile = existingEl.querySelector('.msg-image-thumb, .msg-doc-card, audio');
+            if (msg.file && !hasRenderedFile) {
+                existingEl.remove();
+            } else {
+                const txtEl = existingEl.querySelector('.message-text');
+                if (txtEl && txtEl.textContent && txtEl.textContent.trim().startsWith('e2ee1:')) {
+                    existingEl.remove();
+                } else {
+                    return;
+                }
+            }
+        }
+    }
 
     // 2. Eğer sunucudan gelen mesajda tempId varsa ve ekranda o tempId ile bekleyen baloncuk varsa:
     // Yeni baloncuk eklemek yerine mevcut baloncuğun ID'sini ve durumunu güncelle! (ÇİFT MESAJ SORUNUNUN KÖK ÇÖZÜMÜ)
@@ -2560,7 +2539,10 @@ function appendMessageBubble(msg) {
     }
 
     const isMe = currentUser && normalizeKey(msg.sender) === normalizeKey(currentUser.username);
-    const decryptedText = msg.text ? decryptE2EETextClient(msg.text, msg.sender, msg.recipient) : '';
+    let decryptedText = msg.text ? decryptE2EETextClient(msg.text, msg.sender, msg.recipient) : '';
+    if (msg.file && decryptedText === '📎 Dosya / Fotoğraf paylaştı') {
+        decryptedText = '';
+    }
 
     // 3. Ek güvenlik: Eğer kendi gönderdiğimiz bir mesajsa ve henüz pending durumda aynı metinli bir baloncuk varsa onu güncelle
     if (isMe && !msg.pending && decryptedText) {
@@ -2584,7 +2566,7 @@ function appendMessageBubble(msg) {
     let fileContent = '';
     if (msg.file) {
         if (msg.file.mimetype && msg.file.mimetype.startsWith('image/')) {
-            fileContent = `<img class="msg-image-thumb" src="${msg.file.url}" alt="Fotoğraf" onclick="openEnlargedImage('${msg.file.url}')">`;
+            fileContent = `<img class="msg-image-thumb" src="${msg.file.url}" alt="Fotoğraf" onclick="openEnlargedImage(this.src)" onerror="if(!this.dataset.cloudFallback && this.src.indexOf('/uploads/')!==-1){this.dataset.cloudFallback='1';this.src='https://hiileti.onrender.com/uploads/'+this.src.split('/uploads/').pop();}">`;
         } else if (msg.file.mimetype && msg.file.mimetype.startsWith('audio/')) {
             fileContent = `
                 <div style="padding: 4px 0;">
@@ -2852,11 +2834,51 @@ async function handleFileUpload(file) {
             uploadProgress.style.display = 'none';
             if (xhr.status === 200) {
                 const uploadedFile = JSON.parse(xhr.responseText);
+                const tempId = 'msg_tmp_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6);
+                const tempMsg = {
+                    id: tempId,
+                    tempId: tempId,
+                    sender: currentUser.username,
+                    recipient: activeContact.username,
+                    text: '',
+                    file: uploadedFile,
+                    timestamp: new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }),
+                    date: 'Bugün',
+                    createdAt: new Date().toISOString(),
+                    pending: true
+                };
+                appendMessageBubble(tempMsg);
+
+                const contactInList = contactsList.find(c => normalizeKey(c.username) === normalizeKey(activeContact.username));
+                if (contactInList) {
+                    contactInList.lastMessage = {
+                        id: tempId,
+                        sender: currentUser.username,
+                        recipient: activeContact.username,
+                        text: '📎 Dosya / Fotoğraf',
+                        timestamp: tempMsg.timestamp,
+                        isOutgoing: true
+                    };
+                    saveCachedContactsForCurrentUser(contactsList);
+                    renderChatsList(contactsList);
+                }
+
                 socket.emit('chat:send_message', {
                     recipient: activeContact.username,
                     text: '',
                     file: uploadedFile,
+                    tempId: tempId,
                     token: token
+                }, (ack) => {
+                    const bubbleEl = document.getElementById(tempId) || (ack && ack.message && document.getElementById(ack.message.id));
+                    if (bubbleEl && ack && ack.success && ack.message) {
+                        bubbleEl.id = ack.message.id;
+                        bubbleEl.classList.remove('pending');
+                        const delBtn = bubbleEl.querySelector('.btn-msg-delete');
+                        if (delBtn) delBtn.setAttribute('onclick', `requestDeleteMessage('${ack.message.id}')`);
+                        const checks = bubbleEl.querySelector('.bubble-checks');
+                        if (checks) checks.textContent = '✓✓';
+                    }
                 });
             } else {
                 alert('Dosya yüklenemedi.');
