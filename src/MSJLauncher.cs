@@ -389,7 +389,6 @@ namespace MSJ
 
         private static int lastNotificationId = 0;
         private static Thread notificationThread = null;
-        private static System.Collections.Generic.HashSet<string> handledCallIds = new System.Collections.Generic.HashSet<string>();
 
         static void StartBackgroundNotificationListener()
         {
@@ -430,21 +429,6 @@ namespace MSJ
                             string url = "http://127.0.0.1:3000/api/system/notifications/poll?since=" + lastNotificationId;
                             string res = wc.DownloadString(url);
 
-                            // 1. Bekleyen aktif arama varsa (activeCalls) hemen yakala ve ekrana getir
-                            foreach (string callBlock in ExtractJsonArrayBlocks(res, "activeCalls"))
-                            {
-                                string callId = UnescapeJson(Regex.Match(callBlock, "\"callId\"\\s*:\\s*\"([^\"]*)\"").Groups[1].Value);
-                                string caller = UnescapeJson(Regex.Match(callBlock, "\"callerUsername\"\\s*:\\s*\"([^\"]*)\"").Groups[1].Value);
-                                string recipient = UnescapeJson(Regex.Match(callBlock, "\"recipient\"\\s*:\\s*\"([^\"]*)\"").Groups[1].Value);
-                                string callType = UnescapeJson(Regex.Match(callBlock, "\"callType\"\\s*:\\s*\"([^\"]*)\"").Groups[1].Value);
-                                string dedupKey = !string.IsNullOrEmpty(callId) ? callId : (caller + "_" + recipient);
-                                if (!string.IsNullOrEmpty(caller) && !handledCallIds.Contains(dedupKey))
-                                {
-                                    handledCallIds.Add(dedupKey);
-                                    HandleIncomingCallEvent(caller, recipient, string.IsNullOrEmpty(callType) ? "voice" : callType, false);
-                                }
-                            }
-
                             var lastIdMatch = Regex.Match(res, "\"lastId\"\\s*:\\s*(\\d+)");
                             if (lastIdMatch.Success)
                             {
@@ -465,17 +449,11 @@ namespace MSJ
                                             string recipient = UnescapeJson(Regex.Match(block, "\"recipient\"\\s*:\\s*\"([^\"]*)\"").Groups[1].Value);
                                             string text = UnescapeJson(Regex.Match(block, "\"text\"\\s*:\\s*\"([^\"]*)\"").Groups[1].Value);
                                             string callType = UnescapeJson(Regex.Match(block, "\"callType\"\\s*:\\s*\"([^\"]*)\"").Groups[1].Value);
-                                            string callId = UnescapeJson(Regex.Match(block, "\"callId\"\\s*:\\s*\"([^\"]*)\"").Groups[1].Value);
                                             bool isTargetOnline = Regex.Match(block, "\"isTargetOnline\"\\s*:\\s*true").Success;
 
                                             if (type == "call")
                                             {
-                                                string dedupKey = !string.IsNullOrEmpty(callId) ? callId : (sender + "_" + recipient);
-                                                if (!handledCallIds.Contains(dedupKey))
-                                                {
-                                                    handledCallIds.Add(dedupKey);
-                                                    HandleIncomingCallEvent(sender, recipient, callType, isTargetOnline);
-                                                }
+                                                HandleIncomingCallEvent(sender, recipient, callType, isTargetOnline);
                                             }
                                             else if (type == "call_ended")
                                             {
@@ -501,20 +479,10 @@ namespace MSJ
 
         static System.Collections.Generic.List<string> ExtractNotificationItemBlocks(string json)
         {
-            var list = ExtractJsonArrayBlocks(json, "notifications");
-            if (list.Count == 0)
-            {
-                list = ExtractJsonArrayBlocks(json, "items");
-            }
-            return list;
-        }
-
-        static System.Collections.Generic.List<string> ExtractJsonArrayBlocks(string json, string fieldName)
-        {
             var results = new System.Collections.Generic.List<string>();
-            if (string.IsNullOrEmpty(json) || string.IsNullOrEmpty(fieldName)) return results;
+            if (string.IsNullOrEmpty(json)) return results;
 
-            int itemsIdx = json.IndexOf("\"" + fieldName + "\"");
+            int itemsIdx = json.IndexOf("\"items\"");
             int startBracket = itemsIdx >= 0 ? json.IndexOf('[', itemsIdx) : -1;
             if (startBracket < 0) return results;
 
@@ -785,15 +753,6 @@ namespace MSJ
                 if (!File.Exists(lnk))
                 {
                     CreateStartupShortcut(lnk);
-                }
-
-                string exePath = Path.Combine(appDir, "MSJ.exe");
-                using (Microsoft.Win32.RegistryKey runKey = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", true))
-                {
-                    if (runKey != null)
-                    {
-                        runKey.SetValue("HIHaberlesme", "\"" + exePath + "\" --background");
-                    }
                 }
             }
             catch { }

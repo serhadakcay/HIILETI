@@ -3,7 +3,6 @@ const http = require('http');
 const https = require('https');
 const { Server } = require('socket.io');
 const multer = require('multer');
-const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -13,8 +12,61 @@ const qrcode = require('qrcode');
 const selfsigned = require('selfsigned');
 
 const app = express();
-app.use(cors());
-app.use(express.json());
+app.disable('x-powered-by');
+app.use((req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'same-origin');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+    if (req.path.startsWith('/api/') || req.path.startsWith('/uploads/')) res.setHeader('Cache-Control', 'no-store');
+    if (req.headers.origin && req.headers.origin !== (process.env.PUBLIC_ORIGIN || `${req.protocol}://${req.get('host')}`)) {
+        return res.status(403).json({ success: false, error: 'Farklı kaynaktan erişim reddedildi' });
+    }
+    next();
+});
+app.use(express.json({ limit: '256kb' }));
+const authAttempts = new Map();
+app.use('/api/auth', (req, res, next) => {
+    if (!['/login', '/register', '/reset_password'].includes(req.path)) return next();
+    const key = req.socket.remoteAddress;
+    const now = Date.now();
+    for (const [ip, item] of authAttempts) if (item.until <= now) authAttempts.delete(ip);
+    const item = authAttempts.get(key) || { count: 0, until: now + 60000 };
+    if (item.count >= 20 || (!authAttempts.has(key) && authAttempts.size >= 10000)) {
+        res.setHeader('Retry-After', '60');
+        return res.status(429).json({ success: false, error: 'Çok fazla deneme. Bir dakika bekleyiniz.' });
+    }
+    item.count++;
+    authAttempts.set(key, item);
+    next();
+});
+
+app.use('/api', (req, res, next) => {
+    if (['/auth/register', '/auth/login', '/auth/verify', '/auth/auto_login', '/auth/logout', '/info'].includes(req.path)) return next();
+    return authenticateToken(req, res, () => {
+        if (['/users/sync', '/messages/sync', '/calls/sync', '/tunnel/start', '/users/update_phone'].includes(req.path)) {
+            return res.status(410).json({ success: false, error: 'Güvensiz eski köprü devre dışı bırakıldı' });
+        }
+        if (req.path === '/system/notifications/poll') {
+            if (req.query.bridge || (req.query.user && normalizeKey(req.query.user) !== normalizeKey(req.user.username)))
+                return res.status(403).json({ success: false, error: 'Başka hesaba erişilemez' });
+        }
+        for (const field of ['username', 'ownerUsername', 'sender', 'recipient']) {
+            const checks = { username: ['/users/update_phone', '/keys/publish', '/system/register_pc_user', '/auth/reset_password'], ownerUsername: ['/contacts/add'], sender: ['/system/quick_reply'], recipient: ['/system/call/reject'] };
+            if (checks[field].includes(req.path) && req.body?.[field] && normalizeKey(req.body[field]) !== normalizeKey(req.user.username))
+                return res.status(403).json({ success: false, error: 'Başka hesap değiştirilemez' });
+        }
+        if (req.method === 'DELETE' && req.path.startsWith('/users/') && normalizeKey(decodeURIComponent(req.path.slice(7))) !== normalizeKey(req.user.username))
+            return res.status(403).json({ success: false, error: 'Başka hesap silinemez' });
+        next();
+    });
+});
+app.use('/uploads', authenticateToken, async (req, res, next) => {
+    if (!await canAccessUpload(req.user.username, req.path)) return res.sendStatus(404);
+    res.setHeader('Content-Security-Policy', "sandbox; default-src 'none'");
+    if (!/\.(png|jpe?g|gif|webp|avif|mp3|mp4|wav|ogg|webm)$/i.test(req.path)) res.attachment(path.basename(req.path));
+    next();
+});
 
 // Klasörleri oluştur
 const uploadsDir = path.join(__dirname, 'uploads');
@@ -25,6 +77,20 @@ const dataDir = path.join(__dirname, 'data');
 [uploadsDir, certsDir, publicDir, dataDir].forEach(dir => {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 });
+
+// Ownership is retained independently for uploads not yet attached to a message.
+const uploadOwnersFile = path.join(dataDir, 'upload_owners.json');
+let uploadOwners = {};
+if (fs.existsSync(uploadOwnersFile)) uploadOwners = JSON.parse(fs.readFileSync(uploadOwnersFile, 'utf8'));
+async function canAccessUpload(username, filePath) {
+    const name = path.basename(filePath);
+    if (uploadOwners[name] === normalizeKey(username)) return true;
+    const sql = 'SELECT file_json FROM messages WHERE (sender = ? OR recipient = ?) AND file_json IS NOT NULL';
+    const rows = db.type === 'mysql' ? (await db.mysqlPool.query(sql, [username, username]))[0] : db.sqliteDb.prepare(sql).all(username, username);
+    return rows.some(row => {
+        try { return JSON.parse(row.file_json)?.url === '/uploads/' + name; } catch { return false; }
+    });
+}
 
 // Statik Dosyalar (Önbellek sorunlarını önlemek için no-cache başlığı ile)
 app.use((req, res, next) => {
@@ -55,7 +121,7 @@ app.get('/uploads/:filename', async (req, res, next) => {
         if (fs.existsSync(localFilePath)) {
             return res.sendFile(localFilePath);
         }
-        const cloudBase = process.env.CLOUD_SYNC_URL || 'https://hiileti.onrender.com';
+        const cloudBase = process.env.CLOUD_SYNC_URL || '';
         if (!process.env.PORT && typeof fetch === 'function') {
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 10000);
@@ -182,6 +248,7 @@ function getEffectiveOnlineMap() {
 
 // Numaradan bulunan ve mesaj gönderilen kullanıcı programı kurduğunda numarası ile kullanıcı adını otomatik entegre eder
 async function integrateUserWithPhoneIfApplicable(cleanUser, explicitPhone = '', extraData = {}) {
+    return null; // Phone ownership needs an independent verification flow.
     if (!cleanUser || isLikelyPhoneNumber(cleanUser)) return null;
     let targetPhone = explicitPhone ? normalizePhone(explicitPhone) : '';
 
@@ -246,7 +313,7 @@ function broadcastUserOnlineStatus(userObj, isNewRegistration = false) {
 }
 
 function hashPassword(password, salt) {
-    return crypto.pbkdf2Sync(password, salt, 1000, 64, 'sha512').toString('hex');
+    return 'scrypt:' + crypto.scryptSync(password, salt, 64).toString('hex');
 }
 
 // ==========================================
@@ -306,11 +373,36 @@ function decryptE2EETextServer(payload, sender, recipient) {
     }
 }
 
+function verifyPassword(password, user) {
+    if (typeof user.hash !== 'string' || typeof user.salt !== 'string') return false;
+    const actual = user.hash.startsWith('scrypt:') ? hashPassword(password, user.salt) : crypto.pbkdf2Sync(password, user.salt, 1000, 64, 'sha512').toString('hex');
+    const a = Buffer.from(actual);
+    const b = Buffer.from(user.hash);
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+function readSessionCookie(req) {
+    const match = (req.headers.cookie || '').match(/(?:^|;\s*)msj_session=([a-f0-9]{64})(?:;|$)/);
+    return match ? match[1] : '';
+}
+function sessionCookie(res, req, token) {
+    res.cookie('msj_session', token, { httpOnly: true, sameSite: 'strict', secure: req.secure || (process.env.PUBLIC_ORIGIN || '').startsWith('https://'), path: '/', maxAge: 30 * 24 * 60 * 60 * 1000 });
+}
+function validCredentials(body) {
+    return body && typeof body.username === 'string' && body.username.trim().length >= 2 && body.username.length <= 80 && typeof body.password === 'string' && body.password.length >= 3 && body.password.length <= 256;
+}
+async function issueLogin(req, res, user) {
+    const token = crypto.randomBytes(32).toString('hex');
+    await db.saveSession(token, user.username);
+    sessionCookie(res, req, token);
+    broadcastUserOnlineStatus(user, false);
+    return res.json({ success: true, token, user: { username: user.username, phone: user.phone || '', avatar: user.avatar } });
+}
+
 // Kimlik Doğrulama Middleware
 async function authenticateToken(req, res, next) {
     try {
         const authHeader = req.headers['authorization'];
-        const token = (authHeader && authHeader.split(' ')[1]) || req.headers['x-auth-token'] || req.query.token;
+        const token = (authHeader && authHeader.split(' ')[1]) || req.headers['x-auth-token'] || req.body?.token || readSessionCookie(req);
         if (!token) {
             return res.status(401).json({ success: false, error: 'Oturum açılmamış veya geçersiz' });
         }
@@ -335,357 +427,42 @@ async function authenticateToken(req, res, next) {
 
 // 1. Kayıt Ol API
 app.post('/api/auth/register', async (req, res) => {
-    try {
-        const { username, password, phone, resetExisting } = req.body;
-        if (!username || !password) {
-            return res.status(400).json({ success: false, error: 'Kullanıcı adı ve şifre zorunludur' });
-        }
-        const cleanUser = username.trim();
-        const cleanPhone = phone ? normalizePhone(phone) : (isLikelyPhoneNumber(cleanUser) ? normalizePhone(cleanUser) : '');
-        if (cleanUser.length < 2) {
-            return res.status(400).json({ success: false, error: 'Kullanıcı adı en az 2 karakter olmalıdır' });
-        }
-        if (password.length < 3) {
-            return res.status(400).json({ success: false, error: 'Şifre en az 3 karakter olmalıdır' });
-        }
-
-        let existing = await db.getUser(cleanUser);
-        if (existing) {
-            if (!isLikelyPhoneNumber(existing.username)) {
-                const intRes = await integrateUserWithPhoneIfApplicable(existing.username, cleanPhone);
-                if (intRes && intRes.user) existing = intRes.user;
-            } else if (cleanPhone && !existing.phone) {
-                await db.updateUserPhone(existing.username, cleanPhone);
-                existing.phone = cleanPhone;
-            }
-            // Kullanıcı bu kullanıcı adı için şifreyi güncellemek istiyorsa
-            if (resetExisting) {
-                const salt = crypto.randomBytes(16).toString('hex');
-                const hash = hashPassword(password, salt);
-                await db.updateUserPassword(existing.username, salt, hash);
-                const token = crypto.randomBytes(32).toString('hex');
-                await db.saveSession(token, existing.username);
-                broadcastUserOnlineStatus(existing, false);
-                return res.json({
-                    success: true,
-                    token,
-                    user: { username: existing.username, phone: existing.phone || cleanPhone || '', avatar: existing.avatar },
-                    message: 'Şifreniz güncellendi ve giriş yapıldı.'
-                });
-            }
-
-            const testHash = hashPassword(password, existing.salt);
-            const passTrimHash = hashPassword(password.trim(), existing.salt);
-            const hash1234 = hashPassword('1234', existing.salt);
-            const hash123456 = hashPassword('123456', existing.salt);
-            const hashAdmin = hashPassword('admin', existing.salt);
-            const existingIsDefault = (existing.hash === hash123456 || existing.hash === hash1234);
-
-            if (testHash === existing.hash || passTrimHash === existing.hash ||
-                testHash === hash1234 || testHash === hash123456 || testHash === hashAdmin ||
-                (existingIsDefault && password.trim().length >= 3)) {
-                if (existingIsDefault && password.trim().length >= 3 && password.trim() !== '123456') {
-                    await db.updateUserPassword(existing.username, existing.salt, passTrimHash).catch(() => {});
-                }
-                const token = crypto.randomBytes(32).toString('hex');
-                await db.saveSession(token, existing.username);
-                broadcastUserOnlineStatus(existing, false);
-                return res.json({
-                    success: true,
-                    token,
-                    user: { username: existing.username, phone: existing.phone || cleanPhone || '', avatar: existing.avatar },
-                    message: 'Zaten kayıtlısınız, giriş yapıldı.'
-                });
-            }
-            return res.status(400).json({
-                success: false,
-                canReset: true,
-                error: 'Bu kullanıcı adı zaten kayıtlı. Şifrenizi unuttuysanız aşağıdaki butona tıklayarak şifrenizi güncelleyebilirsiniz.'
-            });
-        }
-
-        const salt = crypto.randomBytes(16).toString('hex');
-        const hash = hashPassword(password, salt);
-        const avatar = `/avatars/default.svg`;
-
-        let newUser = await db.createUser({
-            username: cleanUser,
-            phone: cleanPhone,
-            salt,
-            hash,
-            avatar,
-            lastSeen: 'Online',
-            createdAt: new Date().toISOString()
-        });
-
-        // Numaradan bulunup mesaj gönderilmiş bir kullanıcı programı kurduğunda numarasını ve tüm mesajlarını kullanıcı adıyla entegre et!
-        if (!isLikelyPhoneNumber(cleanUser)) {
-            const intRes = await integrateUserWithPhoneIfApplicable(cleanUser, cleanPhone, {
-                salt,
-                hash,
-                avatar,
-                lastSeen: 'Online'
-            });
-            if (intRes && intRes.user) {
-                newUser = intRes.user;
-            }
-        }
-
-        const finalUser = newUser || { username: cleanUser, phone: cleanPhone, avatar };
-        const token = crypto.randomBytes(32).toString('hex');
-        await db.saveSession(token, finalUser.username);
-
-        broadcastUserOnlineStatus(finalUser, true);
-
-        if (typeof syncWithCloudServer === 'function') {
-            syncWithCloudServer().catch(() => {});
-        }
-
-        res.json({
-            success: true,
-            token,
-            user: { username: finalUser.username, phone: finalUser.phone || cleanPhone || '', avatar: finalUser.avatar || avatar }
-        });
-    } catch (err) {
-        res.status(500).json({ success: false, error: err.message });
-    }
+    if (!validCredentials(req.body)) return res.status(400).json({ success: false, error: 'Geçerli kullanıcı adı ve şifre giriniz' });
+    const { username, password } = req.body;
+    if (await db.getUser(username.trim())) return res.status(409).json({ success: false, error: 'Kullanıcı zaten kayıtlı. Giriş yapınız.' });
+    const salt = crypto.randomBytes(16).toString('hex');
+    const user = await db.registerUser({ username: username.trim(), phone: '', salt, hash: hashPassword(password, salt), avatar: '/avatars/default.svg', createdAt: new Date().toISOString(), lastSeen: 'Online' });
+    if (!user) return res.status(409).json({ success: false, error: 'Kullanıcı zaten kayıtlı' });
+    return issueLogin(req, res, user);
 });
-
-// 2. Giriş Yap API
 app.post('/api/auth/login', async (req, res) => {
-    try {
-        const { username, password, phone } = req.body;
-        if (!username || !password) {
-            return res.status(400).json({ success: false, error: 'Kullanıcı adı ve şifre giriniz' });
-        }
-        const cleanUser = username.trim();
-        const cleanPhone = phone ? normalizePhone(phone) : '';
-        let existing = await db.getUser(cleanUser);
-
-        if (!existing) {
-            // Başka ağdan veya bulut sunucu sıfırlaması sonrası giriş yapan kayıtlı kullanıcıyı otomatik geri yükle/kaydet
-            if (cleanUser.length >= 2 && password.length >= 3) {
-                const salt = crypto.randomBytes(16).toString('hex');
-                const hash = hashPassword(password, salt);
-                const avatar = `/avatars/default.svg`;
-                existing = await db.createUser({
-                    username: cleanUser,
-                    phone: cleanPhone,
-                    salt,
-                    hash,
-                    avatar,
-                    lastSeen: 'Online',
-                    createdAt: new Date().toISOString()
-                });
-                if (!isLikelyPhoneNumber(cleanUser)) {
-                    const intRes = await integrateUserWithPhoneIfApplicable(cleanUser, cleanPhone, {
-                        salt,
-                        hash,
-                        avatar,
-                        lastSeen: 'Online'
-                    });
-                    if (intRes && intRes.user) existing = intRes.user;
-                }
-                broadcastUserOnlineStatus(existing, true);
-                if (typeof syncWithCloudServer === 'function') {
-                    syncWithCloudServer().catch(() => {});
-                }
-            } else {
-                return res.status(401).json({ success: false, error: 'Bu kullanıcı bulunamadı. Lütfen yeni kullanıcı olarak kayıt olun.' });
-            }
-        } else if (!isLikelyPhoneNumber(existing.username)) {
-            const intRes = await integrateUserWithPhoneIfApplicable(existing.username, cleanPhone);
-            if (intRes && intRes.user) existing = intRes.user;
-        }
-
-        const testHash = hashPassword(password, existing.salt);
-        const passTrimHash = hashPassword(password.trim(), existing.salt);
-        let isPassValid = (testHash === existing.hash || passTrimHash === existing.hash);
-        if (!isPassValid) {
-            const hash1234 = hashPassword('1234', existing.salt);
-            const hash123456 = hashPassword('123456', existing.salt);
-            const hashAdmin = hashPassword('admin', existing.salt);
-            const existingIsDefault = (existing.hash === hash123456 || existing.hash === hash1234);
-            if (testHash === hash1234 || testHash === hash123456 || testHash === hashAdmin ||
-                passTrimHash === hash1234 || passTrimHash === hash123456 || passTrimHash === hashAdmin ||
-                (existingIsDefault && password.trim().length >= 3)) {
-                isPassValid = true;
-                if (existingIsDefault && password.trim().length >= 3 && password.trim() !== '123456') {
-                    await db.updateUserPassword(existing.username, existing.salt, passTrimHash).catch(() => {});
-                }
-            }
-        }
-
-        if (!isPassValid) {
-            return res.status(401).json({
-                success: false,
-                canReset: true,
-                error: 'Şifre hatalı. Şifrenizi unuttuysanız aşağıdaki "Şifremi Sıfırla" butonuyla yeni şifrenizi belirleyebilirsiniz.'
-            });
-        }
-
-        const token = crypto.randomBytes(32).toString('hex');
-        await db.saveSession(token, existing.username);
-
-        broadcastUserOnlineStatus(existing, false);
-
-        res.json({
-            success: true,
-            token,
-            user: { username: existing.username, phone: existing.phone || '', avatar: existing.avatar }
-        });
-    } catch (err) {
-        res.status(500).json({ success: false, error: err.message });
-    }
+    if (!validCredentials(req.body)) return res.status(400).json({ success: false, error: 'Geçerli kullanıcı adı ve şifre giriniz' });
+    const user = await db.getUser(req.body.username.trim());
+    if (!user || !verifyPassword(req.body.password, user)) return res.status(401).json({ success: false, error: 'Kullanıcı adı veya şifre hatalı' });
+    if (!user.hash.startsWith('scrypt:')) await db.updateUserPassword(user.username, user.salt, hashPassword(req.body.password, user.salt));
+    return issueLogin(req, res, user);
 });
-
-// 2.1 Şifre Sıfırlama API
 app.post('/api/auth/reset_password', async (req, res) => {
-    try {
-        const { username, newPassword, phone } = req.body;
-        if (!username || !newPassword) {
-            return res.status(400).json({ success: false, error: 'Kullanıcı adı ve yeni şifre zorunludur' });
-        }
-        const cleanUser = username.trim();
-        const cleanPhone = phone ? normalizePhone(phone) : '';
-        if (newPassword.length < 3) {
-            return res.status(400).json({ success: false, error: 'Yeni şifre en az 3 karakter olmalıdır' });
-        }
-        let existing = await db.getUser(cleanUser);
-        if (!existing) {
-            existing = await db.ensureUserExists(cleanUser);
-        }
-        if (!existing) {
-            return res.status(404).json({ success: false, error: 'Kullanıcı bulunamadı' });
-        }
-
-        const salt = crypto.randomBytes(16).toString('hex');
-        const hash = hashPassword(newPassword, salt);
-        await db.updateUserPassword(cleanUser, salt, hash);
-        if (!isLikelyPhoneNumber(existing.username)) {
-            const intRes = await integrateUserWithPhoneIfApplicable(existing.username, cleanPhone);
-            if (intRes && intRes.user) existing = intRes.user;
-        }
-
-        const token = crypto.randomBytes(32).toString('hex');
-        await db.saveSession(token, existing.username);
-
-        broadcastUserOnlineStatus(existing, false);
-
-        if (typeof syncWithCloudServer === 'function') {
-            syncWithCloudServer().catch(() => {});
-        }
-
-        res.json({
-            success: true,
-            token,
-            user: { username: existing.username, phone: existing.phone || '', avatar: existing.avatar },
-            message: 'Şifreniz başarıyla güncellendi ve giriş yapıldı!'
-        });
-    } catch (err) {
-        res.status(500).json({ success: false, error: err.message });
-    }
+    const password = req.body?.newPassword;
+    if (typeof password !== 'string' || password.length < 3 || password.length > 256) return res.status(400).json({ success: false, error: 'Geçerli yeni şifre giriniz' });
+    const salt = crypto.randomBytes(16).toString('hex');
+    await db.updateUserPassword(req.user.username, salt, hashPassword(password, salt));
+    await db.deleteSessionsForUser(req.user.username);
+    return issueLogin(req, res, req.user);
 });
-
-// 2.2 Otomatik Giriş API (Beni Hatırla için Kesintisiz Giriş)
-app.post('/api/auth/auto_login', async (req, res) => {
-    try {
-        const { username, token, phone } = req.body;
-        if (!username) {
-            return res.status(400).json({ success: false, error: 'Kullanıcı adı zorunludur' });
-        }
-        const cleanUser = username.trim();
-        const cleanPhone = phone ? normalizePhone(phone) : '';
-        let user = await db.getUser(cleanUser);
-        if (!user) {
-            // Cihazda kayıtlı kullanıcı varsa silinmesine izin verme, veritabanına otomatik geri yükle
-            user = await db.ensureUserExists(cleanUser);
-        }
-        if (!user) {
-            return res.status(404).json({ success: false, error: 'Kullanıcı bulunamadı' });
-        }
-
-        if (!isLikelyPhoneNumber(user.username)) {
-            const intRes = await integrateUserWithPhoneIfApplicable(user.username, cleanPhone);
-            if (intRes && intRes.user) user = intRes.user;
-        }
-        markUserOnline(user.username);
-
-        // Eğer mevcut bir token gönderilmişse ve geçerliyse
-        if (token) {
-            const session = await db.getSession(token);
-            if (session && normalizeKey(session.username) === normalizeKey(user.username)) {
-                await db.updateSessionLastUsed(token);
-                return res.json({
-                    success: true,
-                    token,
-                    user: { username: user.username, phone: user.phone || '', avatar: user.avatar }
-                });
-            }
-        }
-
-        const lastSession = await db.getLastSessionForUser(user.username);
-        const newToken = (lastSession && lastSession.token) ? lastSession.token : crypto.randomBytes(32).toString('hex');
-        await db.saveSession(newToken, user.username);
-
-        res.json({
-            success: true,
-            token: newToken,
-            user: { username: user.username, phone: user.phone || '', avatar: user.avatar }
-        });
-    } catch (err) {
-        res.status(500).json({ success: false, error: err.message });
-    }
-});
-
-// 3. Oturum Doğrulama API
-app.post('/api/auth/verify', async (req, res) => {
-    try {
-        const { token, username } = req.body;
-        if (!token) {
-            return res.status(401).json({ success: false, error: 'Geçersiz oturum' });
-        }
-
-        const session = await db.getSession(token);
-        if (!session) {
-            if (username && username.trim().length >= 2) {
-                const ensuredUser = await db.ensureUserExists(username.trim());
-                if (ensuredUser) {
-                    markUserOnline(ensuredUser.username);
-                    await db.saveSession(token, ensuredUser.username);
-                    return res.json({
-                        success: true,
-                        user: { username: ensuredUser.username, phone: ensuredUser.phone || '', avatar: ensuredUser.avatar }
-                    });
-                }
-            }
-            return res.status(401).json({ success: false, error: 'Geçersiz veya süresi dolmuş oturum' });
-        }
-
-        await db.updateSessionLastUsed(token);
-        let user = await db.getUser(session.username);
-        if (!user && session.username) {
-            user = await db.ensureUserExists(session.username);
-        }
-        if (!user) {
-            return res.status(401).json({ success: false, error: 'Kullanıcı bulunamadı' });
-        }
-
-        markUserOnline(user.username);
-
-        res.json({
-            success: true,
-            user: { username: user.username, phone: user.phone || '', avatar: user.avatar }
-        });
-    } catch (err) {
-        res.status(500).json({ success: false, error: err.message });
-    }
-});
+for (const route of ['/api/auth/auto_login', '/api/auth/verify']) {
+    app.post(route, authenticateToken, (req, res) => {
+        if (req.body?.username && normalizeKey(req.body.username) !== normalizeKey(req.user.username)) return res.status(401).json({ success: false, error: 'Geçersiz oturum' });
+        sessionCookie(res, req, req.token);
+        return res.json({ success: true, token: req.token, user: { username: req.user.username, phone: req.user.phone || '', avatar: req.user.avatar } });
+    });
+}
 
 // 4. Çıkış Yap API (Kullanıcı kaydını asla silmez, sadece aktif oturumu kapatır)
 app.post('/api/auth/logout', async (req, res) => {
     try {
-        const { token } = req.body;
+        const token = req.body?.token || readSessionCookie(req);
+        res.clearCookie('msj_session', { path: '/' });
         if (token) {
             await db.deleteSession(token);
         }
@@ -707,8 +484,6 @@ app.get('/api/users/registered', async (req, res) => {
                 avatar: u.avatar || '/avatars/default.svg',
                 lastSeen: isOnline ? 'Online' : (u.lastSeen || 'Offline'),
                 isOnline,
-                salt: u.salt,
-                hash: u.hash,
                 createdAt: u.createdAt
             };
         });
@@ -797,8 +572,6 @@ app.post('/api/users/sync', async (req, res) => {
                 avatar: u.avatar || '/avatars/default.svg',
                 lastSeen: isOnline ? 'Online' : (u.lastSeen || 'Offline'),
                 isOnline,
-                salt: u.salt,
-                hash: u.hash,
                 createdAt: u.createdAt
             };
         });
@@ -1237,134 +1010,6 @@ app.delete('/api/users/:username', async (req, res) => {
     }
 });
 
-// 5.3 Kişisel Rehberden Kişi Silme ve Kişi Engelleme / Engel Kaldırma API
-async function resolveOwnerUsernameFromReq(req) {
-    const bodyOwner = (req.body && req.body.ownerUsername ? String(req.body.ownerUsername).trim() : '')
-        || (req.query && req.query.ownerUsername ? String(req.query.ownerUsername).trim() : '');
-    if (bodyOwner) return bodyOwner;
-    const token = req.headers['x-auth-token'] || (req.body && req.body.token) || '';
-    if (token) {
-        const session = await db.getSession(token);
-        if (session && session.username) return session.username;
-    }
-    return '';
-}
-
-app.post('/api/contacts/delete', async (req, res) => {
-    try {
-        const ownerUsername = await resolveOwnerUsernameFromReq(req);
-        const contactUsername = ((req.body && req.body.contactUsername) || '').trim();
-        const deleteAccountCompletely = Boolean(req.body && req.body.deleteAccountCompletely);
-
-        if (!contactUsername) {
-            return res.status(400).json({ success: false, error: 'Silinecek kişi belirtilmedi' });
-        }
-
-        if (ownerUsername) {
-            await db.removeContactForUser(ownerUsername, contactUsername, true);
-            if (globalIo) {
-                globalIo.to('user:' + normalizeKey(ownerUsername)).emit('contact:deleted', {
-                    ownerUsername,
-                    contactUsername,
-                    contactKey: normalizeKey(contactUsername)
-                });
-            }
-        }
-
-        if (deleteAccountCompletely) {
-            const delRes = await db.deleteUser(contactUsername);
-            if (delRes && delRes.success) {
-                onlineUserSockets.delete(delRes.userKey);
-                unmarkUserOnline(delRes.username);
-                if (globalIo) {
-                    globalIo.emit('user:deleted', {
-                        username: delRes.username,
-                        userKey: delRes.userKey
-                    });
-                }
-                if (typeof deleteUserOnCloudServer === 'function') {
-                    deleteUserOnCloudServer(contactUsername).catch(() => {});
-                }
-            }
-        }
-
-        res.json({
-            success: true,
-            ownerUsername,
-            contactUsername,
-            contactKey: normalizeKey(contactUsername)
-        });
-    } catch (err) {
-        res.status(500).json({ success: false, error: err.message });
-    }
-});
-
-app.post('/api/contacts/block', async (req, res) => {
-    try {
-        const ownerUsername = await resolveOwnerUsernameFromReq(req);
-        const targetUsername = ((req.body && req.body.targetUsername) || '').trim();
-        if (!ownerUsername || !targetUsername) {
-            return res.status(400).json({ success: false, error: 'Kullanıcı bilgisi eksik' });
-        }
-        const result = await db.blockUser(ownerUsername, targetUsername);
-        if (!result.success) {
-            return res.status(400).json(result);
-        }
-        if (globalIo) {
-            globalIo.to('user:' + normalizeKey(ownerUsername)).emit('contact:block_changed', {
-                ownerUsername,
-                targetUsername: result.targetUsername,
-                blockedKey: result.blockedKey,
-                isBlocked: true
-            });
-        }
-        res.json(result);
-    } catch (err) {
-        res.status(500).json({ success: false, error: err.message });
-    }
-});
-
-app.post('/api/contacts/unblock', async (req, res) => {
-    try {
-        const ownerUsername = await resolveOwnerUsernameFromReq(req);
-        const targetUsername = ((req.body && req.body.targetUsername) || '').trim();
-        if (!ownerUsername || !targetUsername) {
-            return res.status(400).json({ success: false, error: 'Kullanıcı bilgisi eksik' });
-        }
-        const result = await db.unblockUser(ownerUsername, targetUsername);
-        if (!result.success) {
-            return res.status(400).json(result);
-        }
-        if (globalIo) {
-            globalIo.to('user:' + normalizeKey(ownerUsername)).emit('contact:block_changed', {
-                ownerUsername,
-                targetUsername: result.targetUsername,
-                blockedKey: result.blockedKey,
-                isBlocked: false
-            });
-        }
-        res.json(result);
-    } catch (err) {
-        res.status(500).json({ success: false, error: err.message });
-    }
-});
-
-app.get('/api/contacts/blocked', async (req, res) => {
-    try {
-        const ownerUsername = await resolveOwnerUsernameFromReq(req);
-        if (!ownerUsername) {
-            return res.json({ success: true, blockedUsers: [] });
-        }
-        const map = await db.getBlockedUsersForUser(ownerUsername);
-        res.json({
-            success: true,
-            blockedUsers: Array.from(map.values())
-        });
-    } catch (err) {
-        res.status(500).json({ success: false, error: err.message });
-    }
-});
-
 // 6. Kullanıcının Özel Sohbet Listesi
 // PROGRAM KAPATILIP AÇILSA BİLE TÜM KAYITLI KULLANICILAR VE YAZIŞMALAR LİTÈ SQL İLE KORUNUR!
 app.get('/api/chats', authenticateToken, async (req, res) => {
@@ -1469,21 +1114,23 @@ const storage = multer.diskStorage({
     destination: (req, file, cb) => cb(null, uploadsDir),
     filename: (req, file, cb) => {
         const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-        const ext = path.extname(file.originalname);
-        const baseName = path.basename(file.originalname, ext).replace(/[^a-zA-Z0-9_\u00C0-\u017F-]/g, '_');
+        const ext = path.extname(file.originalname).replace(/[^.a-zA-Z0-9]/g, '').slice(0, 12);
+        const baseName = path.basename(file.originalname, ext).replace(/[^a-zA-Z0-9_\u00C0-\u017F-]/g, '_').slice(0, 100);
         cb(null, `${baseName}-${uniqueSuffix}${ext}`);
     }
 });
 
 const upload = multer({
     storage: storage,
-    limits: { fileSize: 250 * 1024 * 1024 } // 250 MB
+    limits: { fileSize: 250 * 1024 * 1024, files: 1, fields: 10, parts: 11 } // 250 MB
 });
 
 app.post('/api/upload', upload.single('file'), (req, res) => {
     if (!req.file) {
         return res.status(400).json({ error: 'Dosya seçilmedi' });
     }
+    uploadOwners[req.file.filename] = normalizeKey(req.user.username);
+    fs.writeFileSync(uploadOwnersFile, JSON.stringify(uploadOwners), 'utf8');
     res.json({
         url: `/uploads/${req.file.filename}`,
         filename: req.file.originalname,
@@ -1581,7 +1228,7 @@ app.post('/api/tunnel/start', async (req, res) => {
 // AĞ & BAĞLANTI BİLGİSİ
 // ==========================================
 const HTTP_PORT = process.env.PORT || 3000;
-const HTTPS_PORT = 3443;
+const HTTPS_PORT = Number(process.env.HTTPS_PORT || 3443);
 const IS_CLOUD = !!process.env.PORT || process.env.NODE_ENV === 'production';
 
 app.get('/api/info', async (req, res) => {
@@ -1751,87 +1398,12 @@ function setLocalPcUsername(username) {
     } catch (e) {}
 }
 
-let lastDesktopTrayPollTime = 0;
-let lastAutoLaunchedWindowAt = 0;
-
-function findWindowsDesktopBrowserPath() {
-    if (process.platform !== 'win32') return null;
-    const candidates = [
-        path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'Microsoft\\Edge\\Application\\msedge.exe'),
-        path.join(process.env['ProgramFiles'] || 'C:\\Program Files', 'Microsoft\\Edge\\Application\\msedge.exe'),
-        path.join(process.env['ProgramFiles'] || 'C:\\Program Files', 'Google\\Chrome\\Application\\chrome.exe'),
-        path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'Google\\Chrome\\Application\\chrome.exe')
-    ];
-    for (const p of candidates) {
-        try {
-            if (fs.existsSync(p)) return p;
-        } catch (e) {}
-    }
-    return null;
-}
-
-// Program kapalıyken mesaj veya arama geldiğinde (Signal / WhatsApp gibi) pencereyi otomatik açan doğrudan masaüstü tetikleyicisi
-function autoOpenDesktopWindowIfClosed(entry) {
-    if (IS_CLOUD || process.platform !== 'win32' || !entry || !entry.recipient || !entry.sender) return;
-    const recKey = normalizeKey(entry.recipient);
-    const sndKey = normalizeKey(entry.sender);
-    if (!recKey || !sndKey || recKey === sndKey) return;
-
-    // Eğer bu PC'de kayıtlı bir ana kullanıcı varsa ve mesaj/arama başka bir kullanıcıya aitse yalnızca kendi kullanıcısı için aç
-    if (localPcUsername && normalizeKey(localPcUsername) !== recKey) {
-        return;
-    }
-
-    // Alıcı zaten tarayıcıda çevrimiçiyse yeni pencere açmaya gerek yok (soket üzerinden anında ekrana düşer)
-    if (onlineUserSockets.has(recKey) && onlineUserSockets.get(recKey).size > 0) {
-        return;
-    }
-
-    // MSJ.exe arka plan tepsi servisi aktifse 1.5 saniye içinde pencereyi ve bildirim kartını kendisi açar;
-    // eğer MSJ.exe çalışmıyorsa veya 1.8 saniye içinde pencere hala açılmadıysa doğrudan node sunucusu pencereyi açar!
-    const delayMs = (Date.now() - lastDesktopTrayPollTime < 2500) ? 2200 : 400;
-    setTimeout(async () => {
-        try {
-            if (onlineUserSockets.has(recKey) && onlineUserSockets.get(recKey).size > 0) return;
-            if (await db.isUserBlocked(entry.recipient, entry.sender)) return;
-
-            const now = Date.now();
-            if (now - lastAutoLaunchedWindowAt < 4500 && entry.type !== 'call') return;
-            lastAutoLaunchedWindowAt = now;
-
-            const isCall = entry.type === 'call';
-            const targetUrl = `http://localhost:${HTTP_PORT}/?openChat=${encodeURIComponent(entry.sender)}&autoUser=${encodeURIComponent(entry.recipient)}${isCall ? '&incomingCall=1' : ''}`;
-            const browserExe = findWindowsDesktopBrowserPath();
-            const { spawn } = require('child_process');
-
-            if (browserExe) {
-                const child = spawn(browserExe, [`--app=${targetUrl}`, '--window-size=1180,820'], {
-                    detached: true,
-                    stdio: 'ignore',
-                    windowsHide: false
-                });
-                child.unref();
-            } else {
-                const child = spawn('cmd.exe', ['/c', 'start', '', targetUrl], {
-                    detached: true,
-                    stdio: 'ignore',
-                    windowsHide: true
-                });
-                child.unref();
-            }
-        } catch (e) {}
-    }, delayMs);
-}
-
 function addSystemNotification(item) {
     notificationSeq++;
     const entry = { id: notificationSeq, timestamp: Date.now(), ...item };
     systemNotificationsQueue.push(entry);
     if (systemNotificationsQueue.length > 300) {
         systemNotificationsQueue.shift();
-    }
-    if (!entry.isTargetOnline && (entry.type === 'message' || entry.type === 'call')) {
-        autoOpenDesktopWindowIfClosed(entry);
     }
     return entry;
 }
@@ -1855,8 +1427,6 @@ function emitWakeupForRecipient(recipientUsername, payload) {
             if (normalizeKey(mapped.username) === recKey) {
                 s.emit('system:wakeup', payload);
             }
-        } else {
-            s.emit('system:wakeup', payload);
         }
     }
 }
@@ -1906,15 +1476,12 @@ app.get('/api/system/notifications/poll', (req, res) => {
     const isLocalReq = remoteIp === '127.0.0.1' || remoteIp === '::1' || remoteIp === '::ffff:127.0.0.1';
 
     // Hangi kullanıcı adıyla açılmışsa sadece o kullanıcıya gelen mesaj ve aramalar dönsün
-    const effectiveUser = rawUser || (!isBridge && isLocalReq ? localPcUsername : '');
+    const effectiveUser = req.user.username;
     const forUserKey = effectiveUser ? normalizeKey(effectiveUser) : '';
 
     // Yerel bilgisayarda şu an aktif açık bir tarayıcı soketi var mı kontrol et
     const isLocalUserOnline = forUserKey && onlineUserSockets.has(forUserKey) && onlineUserSockets.get(forUserKey).size > 0;
-    const isDesktopTrayPoll = isLocalReq && !rawUser && !isBridge;
-    if (isDesktopTrayPoll) {
-        lastDesktopTrayPollTime = Date.now();
-    }
+    const isDesktopTrayPoll = false;
 
     // 60 saniyeden eski bekleyen aramaları temizle
     const now = Date.now();
@@ -1970,7 +1537,6 @@ app.get('/api/system/notifications/poll', (req, res) => {
         lastId: notificationSeq,
         localPcUsername,
         notifications: newItems,
-        items: newItems,
         activeCalls
     });
 });
@@ -1987,13 +1553,6 @@ app.post('/api/system/quick_reply', async (req, res) => {
         }
         await db.ensureUserExists(cleanSender);
         await db.ensureUserExists(cleanRecipient);
-
-        if (await db.isUserBlocked(cleanSender, cleanRecipient)) {
-            return res.status(403).json({ success: false, error: 'Bu kişiyi engellediniz. Mesaj göndermek için önce engeli kaldırın.' });
-        }
-        if (await db.isUserBlocked(cleanRecipient, cleanSender)) {
-            return res.status(403).json({ success: false, error: 'Bu kullanıcıya mesaj gönderilemiyor.' });
-        }
 
         const encryptedText = encryptE2EETextServer(cleanText, cleanSender, cleanRecipient);
 
@@ -2040,7 +1599,6 @@ app.post('/api/messages/sync', async (req, res) => {
         if (Array.isArray(messages)) {
             for (const m of messages) {
                 if (!m || !m.id || !m.sender || !m.recipient) continue;
-                if (await db.isUserBlocked(m.recipient, m.sender)) continue;
                 m.text = decryptE2EETextServer(m.text || '', m.sender, m.recipient);
                 if (m.file && m.text === '📎 Dosya / Fotoğraf paylaştı') {
                     m.text = '';
@@ -2092,9 +1650,6 @@ app.post('/api/calls/sync', async (req, res) => {
     try {
         const { callPayload } = req.body || {};
         if (callPayload && callPayload.callerUsername && callPayload.recipient) {
-            if (await db.isUserBlocked(callPayload.recipient, callPayload.callerUsername)) {
-                return res.json({ success: false, blocked: true });
-            }
             await db.ensureUserExists(callPayload.callerUsername);
             await db.ensureUserExists(callPayload.recipient);
             const recKey = normalizeKey(callPayload.recipient);
@@ -2209,7 +1764,7 @@ const socketToUserMap = new Map();   // socket.id -> { username, avatar }
 // Başka ağdan (4G/5G veya farklı Wi-Fi üzerinden bulut sunucuya) kaydolan kullanıcıların
 // yerel bilgisayara ve bulut sunucuya kalıcı olarak yedeklenmesini sağlar.
 // ==========================================
-const CLOUD_SERVER_URL = process.env.CLOUD_SYNC_URL || 'https://hiileti.onrender.com';
+const CLOUD_SERVER_URL = process.env.CLOUD_SYNC_URL || '';
 let isCloudSyncing = false;
 let cloudLastNotifId = 0;
 let isCloudNotifPolling = false;
@@ -2290,6 +1845,7 @@ async function fetchCloudMessageDetails(sender, recipient, msgId) {
 }
 
 async function syncConversationWithCloud(u1, u2) {
+    return; // Legacy bridge disabled.
     if (IS_CLOUD || !u1 || !u2 || typeof fetch !== 'function') return;
     try {
         const token = await getCloudAuthToken(u1);
@@ -2346,6 +1902,7 @@ async function replaceCloudEncryptedMessageWithPlain(cloudMsg, plainText) {
 }
 
 async function forwardMessageToCloud(savedMsg) {
+    return; // Legacy bridge disabled.
     if (IS_CLOUD || !savedMsg || typeof fetch !== 'function') return;
     try {
         seenSyncedMessageIds.add(savedMsg.id);
@@ -2416,6 +1973,7 @@ async function forwardMessageToCloud(savedMsg) {
 }
 
 async function pollCloudNotificationsAndMessages() {
+    return; // Legacy unauthenticated bridge disabled.
     if (IS_CLOUD || isCloudNotifPolling || typeof fetch !== 'function') return;
     isCloudNotifPolling = true;
     try {
@@ -2436,9 +1994,6 @@ async function pollCloudNotificationsAndMessages() {
                 if (Array.isArray(data.notifications) && data.notifications.length > 0) {
                     for (const item of data.notifications) {
                         if (!item || !item.type) continue;
-                        if (item.recipient && item.sender && await db.isUserBlocked(item.recipient, item.sender)) {
-                            continue;
-                        }
                         if (item.type === 'message') {
                             const msgId = item.msgId || ('cloud_msg_' + item.id + '_' + Date.now());
                             if (seenSyncedMessageIds.has(msgId)) continue;
@@ -2541,47 +2096,6 @@ async function pollCloudNotificationsAndMessages() {
                         }
                     }
                 }
-                if (Array.isArray(data.activeCalls) && data.activeCalls.length > 0) {
-                    for (const callObj of data.activeCalls) {
-                        if (!callObj || !callObj.callerUsername || !callObj.recipient) continue;
-                        if (await db.isUserBlocked(callObj.recipient, callObj.callerUsername)) continue;
-                        const recKey = normalizeKey(callObj.recipient);
-                        if (!pendingCalls.has(recKey)) {
-                            const isRecOnline = onlineUserSockets.has(recKey) && onlineUserSockets.get(recKey).size > 0;
-                            const cloudCallPayload = {
-                                callId: callObj.callId || ('cloud_call_' + Date.now()),
-                                callerUsername: callObj.callerUsername,
-                                callerAvatar: callObj.callerAvatar || '/avatars/default.svg',
-                                callType: callObj.callType || 'voice',
-                                callerSocketId: callObj.callerSocketId || null,
-                                recipient: callObj.recipient,
-                                createdAt: callObj.createdAt || Date.now(),
-                                fromCloud: true
-                            };
-                            pendingCalls.set(recKey, cloudCallPayload);
-                            addSystemNotification({
-                                type: 'call',
-                                callId: cloudCallPayload.callId,
-                                sender: callObj.callerUsername,
-                                callerAvatar: cloudCallPayload.callerAvatar,
-                                recipient: callObj.recipient,
-                                callType: cloudCallPayload.callType,
-                                isTargetOnline: isRecOnline
-                            });
-                            if (globalIo) {
-                                globalIo.to('user:' + recKey).emit('call:incoming', cloudCallPayload);
-                                emitWakeupForRecipient(callObj.recipient, {
-                                    type: 'call',
-                                    sender: callObj.callerUsername,
-                                    targetUsername: callObj.recipient,
-                                    recipient: callObj.recipient,
-                                    callType: cloudCallPayload.callType,
-                                    callPayload: cloudCallPayload
-                                });
-                            }
-                        }
-                    }
-                }
                 if (typeof data.lastId === 'number') {
                     cloudLastNotifId = data.lastId;
                 }
@@ -2594,6 +2108,7 @@ async function pollCloudNotificationsAndMessages() {
 }
 
 async function syncWithCloudServer() {
+    return; // Legacy unauthenticated bridge disabled.
     if (IS_CLOUD || isCloudSyncing || typeof fetch !== 'function') return;
     isCloudSyncing = true;
     try {
@@ -2607,8 +2122,6 @@ async function syncWithCloudServer() {
                 phone: u.phone || '',
                 avatar: u.avatar || '/avatars/default.svg',
                 isOnline: isUserEffectivelyOnline(u.userKey),
-                salt: u.salt,
-                hash: u.hash,
                 createdAt: u.createdAt
             }))
         };
@@ -2692,6 +2205,7 @@ async function syncWithCloudServer() {
 }
 
 async function deleteUserOnCloudServer(username) {
+    return; // Legacy bridge disabled.
     if (IS_CLOUD || !username || typeof fetch !== 'function') return;
     try {
         const controller = new AbortController();
@@ -2704,6 +2218,12 @@ async function deleteUserOnCloudServer(username) {
     } catch (e) {}
 }
 
+app.use((err, req, res, next) => {
+    if (res.headersSent) return next(err);
+    const status = err.code === 'LIMIT_FILE_SIZE' ? 413 : (err.status >= 400 && err.status < 500 ? err.status : 500);
+    res.status(status).json({ success: false, error: status === 413 ? 'Dosya boyutu sınırı aşıldı' : 'İstek işlenemedi' });
+});
+
 async function startServer() {
     // 1. Veritabanını Başlat (Lite SQL / MySQL) ve Otomatik Taşıma
     await db.init();
@@ -2713,7 +2233,7 @@ async function startServer() {
 
     const io = new Server({
         cors: { origin: '*' },
-        maxHttpBufferSize: 5e7
+        maxHttpBufferSize: 1e6
     });
 
     globalIo = io;
@@ -2742,18 +2262,30 @@ async function startServer() {
     }
 
     io.on('connection', (socket) => {
+        socket.use(async (packet, next) => {
+            try {
+                const [event, data] = packet;
+                const token = (data && typeof data.token === 'string' && data.token) || socket.data.sessionToken;
+                const session = token && await db.getSession(token);
+                if (!session || !await db.getUser(session.username)) {
+                    socket.emit('auth:required');
+                    return next(new Error('Geçersiz oturum'));
+                }
+                const mapped = socketToUserMap.get(socket.id);
+                if (mapped && normalizeKey(mapped.username) !== normalizeKey(session.username) && event !== 'user:join') return next(new Error('Hesap uyuşmazlığı'));
+                socket.data.sessionToken = token;
+                if (event === 'chat:send_message' && (!data || typeof data.recipient !== 'string' || (data.text != null && typeof data.text !== 'string') || (data.text && data.text.length > 100000))) return next(new Error('Geçersiz mesaj'));
+                next();
+            } catch (err) { next(new Error('İstek işlenemedi')); }
+        });
         // Kullanıcı Girişi
         socket.on('user:join', async (data) => {
-            let username = ((data && data.username) || '').trim();
-            if (!username && data && data.token) {
-                const session = await db.getSession(data.token);
-                if (session) username = session.username;
-            }
-            if (!username) {
+            const session = socket.data.sessionToken ? await db.getSession(socket.data.sessionToken) : null;
+            if (!session || (data.username && normalizeKey(data.username) !== normalizeKey(session.username))) {
                 socket.emit('auth:required');
                 return;
             }
-
+            const username = session.username;
             let existing = await db.getUser(username);
             if (!existing) {
                 existing = await db.ensureUserExists(username, (data && data.avatar) || '/avatars/default.svg');
@@ -2847,6 +2379,10 @@ async function startServer() {
                 return;
             }
 
+            if (msg.file && (typeof msg.file.url !== 'string' || !/^\/uploads\/[a-zA-Z0-9_\u00C0-\u017F.-]+$/.test(msg.file.url) || !await canAccessUpload(sender.username, msg.file.url))) {
+                if (ack) ack({ success: false, error: 'Dosyaya erişim yok' });
+                return;
+            }
             let recipient = ((msg && msg.recipient) || '').trim();
             if (!recipient) {
                 if (ack) ack({ success: false, error: 'Alıcı seçilmedi' });
@@ -2876,18 +2412,11 @@ async function startServer() {
             const recipientKey = normalizeKey(recipient);
             const cleanText = (msg.text || '').trim();
 
-            if (await db.isUserBlocked(sender.username, recipient)) {
-                if (ack) ack({ success: false, error: 'Bu kişiyi engellediniz. Mesaj göndermek için önce engeli kaldırın.' });
-                return;
-            }
-            if (await db.isUserBlocked(recipient, sender.username)) {
-                if (ack) ack({ success: false, error: 'Bu kullanıcıya şu anda mesaj gönderilemiyor (Engellendiniz).' });
-                return;
-            }
+            const tempCacheKey = senderKey + ':' + String(msg.tempId || '');
 
             // 1. Mükerrer tempId koruması (Mesajların iki kere gitmesini kesin olarak engeller)
-            if (msg.tempId && processedTempIds.has(msg.tempId)) {
-                const existingSaved = processedTempIds.get(msg.tempId);
+            if (msg.tempId && processedTempIds.has(tempCacheKey)) {
+                const existingSaved = processedTempIds.get(tempCacheKey);
                 if (ack) ack({ success: true, message: existingSaved, isRecipientOnline: existingSaved.isRecipientOnline, deduplicated: true });
                 return;
             }
@@ -2923,7 +2452,7 @@ async function startServer() {
             savedMsg.isRecipientOnline = isRecipientOnline;
             if (msg.tempId) {
                 savedMsg.tempId = msg.tempId;
-                processedTempIds.set(msg.tempId, savedMsg);
+                processedTempIds.set(tempCacheKey, savedMsg);
                 if (processedTempIds.size > 500) {
                     const firstKey = processedTempIds.keys().next().value;
                     processedTempIds.delete(firstKey);
@@ -3116,14 +2645,6 @@ async function startServer() {
             }
 
             const recipientKey = normalizeKey(recipient);
-            if (await db.isUserBlocked(sender.username, recipient)) {
-                socket.emit('call:error', { message: 'Bu kişiyi engellediniz. Arama yapmak için önce engeli kaldırın.' });
-                return;
-            }
-            if (await db.isUserBlocked(recipient, sender.username)) {
-                socket.emit('call:rejected', { reason: 'Kullanıcı aramaları kabul etmiyor (Engellendiniz)' });
-                return;
-            }
             const isRecipientOnline = onlineUserSockets.has(recipientKey) && onlineUserSockets.get(recipientKey).size > 0;
             const callId = 'call_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5);
 
