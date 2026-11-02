@@ -1,15 +1,3 @@
-// Attach the active session only to this application's requests.
-const nativeFetch = window.fetch.bind(window);
-window.fetch = (input, init = {}) => {
-    const url = new URL(input instanceof Request ? input.url : input, location.href);
-    if (url.origin === location.origin && url.pathname.startsWith('/api/')) {
-        const headers = new Headers(init.headers || (input instanceof Request ? input.headers : undefined));
-        const token = sessionStorage.getItem('msj_token') || localStorage.getItem('msj_token');
-        if (token) headers.set('x-auth-token', token);
-        init = { ...init, headers };
-    }
-    return nativeFetch(input, init);
-};
 // ==========================================================
 // HIHABERLEŞME WEB / MOBILE SPA - CLIENT LOGIC
 // ==========================================================
@@ -490,10 +478,13 @@ const chatContactName = document.getElementById('chatContactName');
 const chatContactStatus = document.getElementById('chatContactStatus');
 const btnVideoCall = document.getElementById('btnVideoCall');
 const btnVoiceCall = document.getElementById('btnVoiceCall');
+const btnBlockContact = document.getElementById('btnBlockContact');
+const btnDeleteContact = document.getElementById('btnDeleteContact');
 const btnChatMenu = document.getElementById('btnChatMenu');
 const chatDropdownMenu = document.getElementById('chatDropdownMenu');
 const menuItemChatAudioSettings = document.getElementById('menuItemChatAudioSettings');
 const menuItemClearChat = document.getElementById('menuItemClearChat');
+const menuItemBlockUser = document.getElementById('menuItemBlockUser');
 const menuItemDeleteUser = document.getElementById('menuItemDeleteUser');
 const menuItemContactInfo = document.getElementById('menuItemContactInfo');
 const menuItemCloseChat = document.getElementById('menuItemCloseChat');
@@ -960,7 +951,6 @@ let notifyToastTimer = null;
 let lastNotifySender = null;
 
 function showMessageNotificationToast(msg) {
-    if (msg && window.MSJPlus?.muted(msg.sender)) return;
     if (!messageNotifyToast || !notifySender || !notifyText) return;
     if (!currentUser || !msg) return;
 
@@ -1497,8 +1487,7 @@ function removePermanentLocalUser(usernameToRemove) {
     } catch (e) {}
     if (normalizeKey(localStorage.getItem('msj_saved_username') || '') === key) {
         localStorage.removeItem('msj_saved_username');
-        navigator.serviceWorker?.controller?.postMessage({ type: 'LOGOUT' });
-    localStorage.removeItem('msj_token');
+        localStorage.removeItem('msj_token');
         sessionStorage.removeItem('msj_token');
         localStorage.removeItem('msj_user');
     }
@@ -1543,37 +1532,174 @@ async function syncPermanentUsersWithServer() {
     return null;
 }
 
-// Kullanıcı kendi isteğiyle bir kaydı silmek istediğinde çağrılır
-window.requestDeleteUser = async function(usernameToDelete) {
-    if (!usernameToDelete) return;
-    const confirmed = confirm(`"${usernameToDelete}" adlı kayıtlı kullanıcıyı kalıcı olarak silmek istediğinize emin misiniz?\n\n(İptal derseniz kullanıcı kayıtlı kalmaya devam eder.)`);
+// Kullanıcıya özel engellenen kişiler önbelleği (LocalStorage)
+function getLocalBlockedUserKeys() {
+    if (!currentUser || !currentUser.username) return [];
+    try {
+        const raw = localStorage.getItem('msj_blocked_users_' + normalizeKey(currentUser.username));
+        if (raw) {
+            const parsed = JSON.parse(raw);
+            if (Array.isArray(parsed)) return parsed;
+        }
+    } catch (e) {}
+    return [];
+}
+
+function setContactBlockedLocally(targetUsername, isBlocked) {
+    if (!currentUser || !currentUser.username || !targetUsername) return;
+    const tKey = normalizeKey(targetUsername);
+    try {
+        const set = new Set(getLocalBlockedUserKeys());
+        if (isBlocked) set.add(tKey);
+        else set.delete(tKey);
+        localStorage.setItem('msj_blocked_users_' + normalizeKey(currentUser.username), JSON.stringify(Array.from(set)));
+    } catch (e) {}
+}
+
+function isContactBlockedLocally(targetUsername) {
+    const tKey = normalizeKey(targetUsername);
+    if (!tKey) return false;
+    return getLocalBlockedUserKeys().includes(tKey);
+}
+
+function updateActiveContactBlockHeaderUi() {
+    if (!activeContact) return;
+    const isBlocked = Boolean(activeContact.isBlocked || isContactBlockedLocally(activeContact.username));
+    activeContact.isBlocked = isBlocked;
+    if (btnBlockContact) {
+        btnBlockContact.textContent = isBlocked ? '🔓' : '🚫';
+        btnBlockContact.title = isBlocked ? 'Engeli Kaldır' : 'Bu Kişiyi Engelle';
+    }
+    if (menuItemBlockUser) {
+        menuItemBlockUser.textContent = isBlocked ? '🔓 Bu Kişinin Engelini Kaldır' : '🚫 Bu Kişiyi Engelle';
+    }
+    if (chatContactStatus) {
+        if (isBlocked) {
+            chatContactStatus.textContent = '🚫 Engellendi';
+            chatContactStatus.style.color = '#ff6b81';
+        } else {
+            chatContactStatus.textContent = activeContact.isOnline ? 'Online' : 'Offline';
+            chatContactStatus.style.color = '';
+        }
+    }
+}
+
+// Kişiyi Engelle / Engeli Kaldır
+window.toggleBlockContact = async function(targetUsername) {
+    if (!targetUsername || !currentUser || !currentUser.username) return;
+    const tKey = normalizeKey(targetUsername);
+    const contactObj = contactsList.find(c => normalizeKey(c.username) === tKey);
+    const currentlyBlocked = Boolean((contactObj && contactObj.isBlocked) || isContactBlockedLocally(targetUsername));
+    const actionLabel = currentlyBlocked ? 'engelini kaldırmak' : 'engellemek';
+
+    const confirmed = confirm(
+        currentlyBlocked
+            ? `"${targetUsername}" adlı kişinin engelini kaldırmak istediğinize emin misiniz?`
+            : `"${targetUsername}" adlı kişiyi engellemek istediğinize emin misiniz?\n\nEngellenen kişi size mesaj gönderemez ve sizi arayamaz.`
+    );
     if (!confirmed) return;
 
+    const endpoint = currentlyBlocked ? '/api/contacts/unblock' : '/api/contacts/block';
+    const token = localStorage.getItem('msj_token') || sessionStorage.getItem('msj_token') || '';
     try {
-        const res = await fetch('/api/users/' + encodeURIComponent(usernameToDelete), {
-            method: 'DELETE'
+        const res = await fetch(endpoint, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'x-auth-token': token
+            },
+            body: JSON.stringify({
+                ownerUsername: currentUser.username,
+                targetUsername: targetUsername
+            })
         });
         const data = await res.json();
         if (data && data.success) {
-            removePermanentLocalUser(usernameToDelete);
-            contactsList = contactsList.filter(c => normalizeKey(c.username) !== normalizeKey(usernameToDelete));
+            const newBlocked = !currentlyBlocked;
+            setContactBlockedLocally(targetUsername, newBlocked);
+            contactsList.forEach(c => {
+                if (normalizeKey(c.username) === tKey) {
+                    c.isBlocked = newBlocked;
+                }
+            });
+            if (activeContact && normalizeKey(activeContact.username) === tKey) {
+                activeContact.isBlocked = newBlocked;
+                updateActiveContactBlockHeaderUi();
+            }
+            saveCachedContactsForCurrentUser(contactsList);
             renderChatsList(contactsList);
-
-            if (activeContact && normalizeKey(activeContact.username) === normalizeKey(usernameToDelete)) {
-                closeActiveChat();
+            if (newChatModal && newChatModal.style.display === 'flex') {
+                renderNewChatUsers(contactsList);
             }
-
-            if (currentUser && normalizeKey(currentUser.username) === normalizeKey(usernameToDelete)) {
-                currentUser = null;
-                closeProfileModal();
-                await loadRegisteredUsersDropdown();
-                showPasswordPrompt('');
-            } else {
-                await loadRegisteredUsersDropdown();
-                showStatusToast(`${usernameToDelete} kayıtlardan silindi`, false);
-            }
+            showStatusToast(
+                newBlocked ? `🚫 ${targetUsername} engellendi` : `🔓 ${targetUsername} engeli kaldırıldı`,
+                !newBlocked
+            );
         } else {
-            alert((data && data.error) || 'Kullanıcı silinemedi.');
+            alert((data && data.error) || `Kişinin ${actionLabel} işlemi yapılamadı.`);
+        }
+    } catch (e) {
+        alert('Sunucuya bağlanılamadı.');
+    }
+};
+
+// Kullanıcı kendi isteğiyle bir kaydı silmek istediğinde çağrılır
+window.requestDeleteUser = async function(usernameToDelete) {
+    if (!usernameToDelete) return;
+    const isDeletingSelf = currentUser && normalizeKey(currentUser.username) === normalizeKey(usernameToDelete);
+    const confirmed = confirm(
+        isDeletingSelf
+            ? `"${usernameToDelete}" adlı kullanıcı hesabınızı kalıcı olarak silmek istediğinize emin misiniz?`
+            : `"${usernameToDelete}" adlı kayıtlı kişiyi ve sohbet geçmişini silmek istediğinize emin misiniz?\n\n(İptal derseniz kişi kayıtlı kalmaya devam eder.)`
+    );
+    if (!confirmed) return;
+
+    try {
+        const token = localStorage.getItem('msj_token') || sessionStorage.getItem('msj_token') || '';
+        if (!isDeletingSelf && currentUser && currentUser.username) {
+            await fetch('/api/contacts/delete', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-auth-token': token
+                },
+                body: JSON.stringify({
+                    ownerUsername: currentUser.username,
+                    contactUsername: usernameToDelete,
+                    deleteAccountCompletely: false
+                })
+            }).catch(() => {});
+        } else {
+            await fetch('/api/users/' + encodeURIComponent(usernameToDelete), {
+                method: 'DELETE'
+            }).catch(() => {});
+        }
+
+        removePermanentLocalUser(usernameToDelete);
+        try {
+            const pb = getPersonalPhoneBookForCurrentUser().filter(item => normalizeKey(item.username) !== normalizeKey(usernameToDelete));
+            savePersonalPhoneBookForCurrentUser(pb);
+        } catch (e) {}
+
+        contactsList = contactsList.filter(c => normalizeKey(c.username) !== normalizeKey(usernameToDelete));
+        saveCachedContactsForCurrentUser(contactsList);
+        renderChatsList(contactsList);
+        if (newChatModal && newChatModal.style.display === 'flex') {
+            renderNewChatUsers(contactsList);
+        }
+
+        if (activeContact && normalizeKey(activeContact.username) === normalizeKey(usernameToDelete)) {
+            closeActiveChat();
+        }
+
+        if (isDeletingSelf) {
+            currentUser = null;
+            closeProfileModal();
+            await loadRegisteredUsersDropdown();
+            showPasswordPrompt('');
+        } else {
+            await loadRegisteredUsersDropdown();
+            showStatusToast(`🗑️ ${usernameToDelete} rehberden ve kayıtlardan silindi`, false);
         }
     } catch (e) {
         alert('Sunucuya bağlanılamadı.');
@@ -1607,9 +1733,20 @@ async function quickLoginAsRegisteredUser(username) {
 }
 
 async function initAuth() {
-    // Eski ortak önbelleği temizle (diğer kullanıcıların mesajlarının karışmasını %100 engeller)
+    // Eski ortak önbelleği ve yanlışlıkla silinenler listesine girmiş telefon numaralarını temizle
     try {
         localStorage.removeItem('msj_cached_contacts');
+        const delSet = getDeletedLocalUserKeys();
+        let delChanged = false;
+        for (const k of Array.from(delSet)) {
+            if (isPhoneQueryClient(k)) {
+                delSet.delete(k);
+                delChanged = true;
+            }
+        }
+        if (delChanged) {
+            localStorage.setItem('msj_deleted_users', JSON.stringify(Array.from(delSet)));
+        }
     } catch (e) {}
 
     // Kalıcı kullanıcıları sunucuyla senkronize et (hiçbir kayıtlı kullanıcı kaybolmasın - AWAIT ile yarış durumunu önle)
@@ -1620,16 +1757,32 @@ async function initAuth() {
 
     const token = localStorage.getItem('msj_token') || sessionStorage.getItem('msj_token');
     const savedUserStr = localStorage.getItem('msj_user');
-    let savedUsername = autoUserParam || localStorage.getItem('msj_saved_username') || '';
+    let savedUsername = localStorage.getItem('msj_saved_username') || '';
     if (!savedUsername && savedUserStr) {
         try { savedUsername = JSON.parse(savedUserStr).username || ''; } catch (e) {}
+    }
+
+    // Eğer bu cihaz yerel bilgisayar (localhost) ise ve önceki hatadan dolayı "ENER OSMAN AKÇAY" kalmışsa gerçek PC kullanıcısını yükle
+    if ((window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') && (!savedUsername || normalizeKey(savedUsername) === normalizeKey('ENER OSMAN AKÇAY'))) {
+        try {
+            const pcRes = await fetch('/api/system/notifications/poll?since=0');
+            const pcData = await pcRes.json();
+            if (pcData && pcData.localPcUsername && normalizeKey(pcData.localPcUsername) !== normalizeKey('ENER OSMAN AKÇAY')) {
+                savedUsername = pcData.localPcUsername;
+                localStorage.setItem('msj_saved_username', savedUsername);
+            }
+        } catch (e) {}
+    }
+
+    if (!savedUsername && autoUserParam) {
+        savedUsername = autoUserParam;
     }
 
     // Varsayılan olarak kayıtlı kullanıcı varsa otomatik girişi açık tut (Böylece mesaj/arama geldiğinde anında Online olur)
     const isAutoLogin = localStorage.getItem('msj_auto_login') !== 'false' || Boolean(autoUserParam);
 
-    // Eğer URL'de autoUser parametresiyle uyandırılmışsa (ör. arama veya mesaj geldiğinde) doğrudan o kullanıcıyla giriş yap
-    if (autoUserParam) {
+    // Eğer URL'de autoUser parametresiyle uyandırılmışsa ve cihazda başka bir kullanıcı kayıtlı değilse o kullanıcıyla giriş yap
+    if (autoUserParam && (!savedUsername || normalizeKey(savedUsername) === normalizeKey(autoUserParam))) {
         const loggedIn = await quickLoginAsRegisteredUser(autoUserParam);
         if (loggedIn) return;
     }
@@ -2052,6 +2205,8 @@ function onUserAuthenticated(user, token) {
     localStorage.setItem('msj_auto_login', 'true');
     if (user.phone) {
         localStorage.setItem('msj_my_phone_' + normalizeKey(user.username), user.phone);
+    } else {
+        localStorage.removeItem('msj_my_phone_' + normalizeKey(user.username));
     }
 
     // Signal X3DH / Double Ratchet & Donanım Anahtar Paketi (IndexedDB Non-Extractable) ve AKD kaydını oluştur
@@ -2075,8 +2230,7 @@ function onUserAuthenticated(user, token) {
     renderChatsList(contactsList);
 
     // Soket sunucusuna kendi oturumunu bildir (Anında Online durumuna geçer)
-    const mySavedPhone = user.phone || localStorage.getItem('msj_my_phone_' + normalizeKey(user.username)) || '';
-    socket.emit('user:join', { token, username: user.username, phone: mySavedPhone });
+    socket.emit('user:join', { token, username: user.username, phone: user.phone || '' });
 
     // Service Worker'a aktif kullanıcıyı bildir (Arka planda SADECE bu kullanıcının bildirimlerini sorgulaması için)
     if ('serviceWorker' in navigator) {
@@ -2112,19 +2266,29 @@ function checkUrlDeepLinkActions() {
         const autoAcceptCall = params.get('autoAcceptCall') === '1';
         const incomingCall = params.get('incomingCall') === '1';
         if (openChatUser) {
-            setTimeout(() => {
+            setTimeout(async () => {
                 openChatForSender(openChatUser);
                 if (incomingCall || autoAcceptCall) {
                     if (currentUser) {
                         const token = localStorage.getItem('msj_token') || sessionStorage.getItem('msj_token') || '';
                         socket.emit('user:join', { token, username: currentUser.username });
                     }
+                    let activeCallFromServer = null;
+                    try {
+                        const pollUser = (currentUser && currentUser.username) || localStorage.getItem('msj_saved_username') || '';
+                        const pollRes = await fetch(`/api/system/notifications/poll?since=0&user=${encodeURIComponent(pollUser)}`, { cache: 'no-store' });
+                        const pollData = await pollRes.json();
+                        if (pollData && Array.isArray(pollData.activeCalls)) {
+                            activeCallFromServer = pollData.activeCalls.find(c => normalizeKey(c.callerUsername) === normalizeKey(openChatUser)) || pollData.activeCalls[0];
+                        }
+                    } catch (e) {}
+
                     const contactObj = contactsList.find(c => normalizeKey(c.username) === normalizeKey(openChatUser));
                     triggerIncomingCallUi({
-                        callerUsername: openChatUser,
-                        callerAvatar: (contactObj && contactObj.avatar) || '/avatars/default.svg',
-                        callType: 'voice',
-                        callerSocketId: currentTargetSocketId
+                        callerUsername: (activeCallFromServer && activeCallFromServer.callerUsername) || openChatUser,
+                        callerAvatar: (activeCallFromServer && activeCallFromServer.callerAvatar) || (contactObj && contactObj.avatar) || '/avatars/default.svg',
+                        callType: (activeCallFromServer && activeCallFromServer.callType) || 'voice',
+                        callerSocketId: (activeCallFromServer && activeCallFromServer.callerSocketId) || currentTargetSocketId
                     }, autoAcceptCall);
                 }
             }, 200);
@@ -2175,27 +2339,14 @@ window.findAndContactByPhone = async function(phoneStr, customName = '', actionT
         return;
     }
 
-    // Davet eden kullanıcının kendi telefon numarasını belirle (yoksa bir kez sorup kaydet)
+    removeDeletedLocalUserKey(cleanPhone);
+
+    // Davet eden kullanıcının kendi kullanıcı adı ve varsa kayıtlı telefon numarası (kafa karıştırıcı prompt sorma!)
     let myUsername = currentUser ? currentUser.username : (localStorage.getItem('msj_saved_username') || '');
     let myPhone = (currentUser && currentUser.phone)
-        || (myUsername ? localStorage.getItem('msj_my_phone_' + normalizeKey(myUsername)) : '')
         || (isPhoneQueryClient(myUsername) ? normalizePhoneClient(myUsername) : '');
-
-    if (!myPhone && myUsername) {
-        const enteredMyPhone = prompt(
-            'Karşı tarafa "…… Numaralı Kişi Sizi Bu Uygulamayı Kullanmaya Davet Ediyor" davet mesajı gönderilmesi için lütfen kendi telefon numaranızı girin:',
-            '05'
-        );
-        if (enteredMyPhone && normalizePhoneClient(enteredMyPhone).length >= 7) {
-            myPhone = normalizePhoneClient(enteredMyPhone);
-            if (currentUser) currentUser.phone = myPhone;
-            localStorage.setItem('msj_my_phone_' + normalizeKey(myUsername), myPhone);
-            fetch('/api/users/update_phone', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username: myUsername, phone: myPhone })
-            }).catch(() => {});
-        }
+    if (myPhone && normalizePhoneClient(myPhone) === cleanPhone) {
+        myPhone = '';
     }
 
     try {
@@ -2213,6 +2364,8 @@ window.findAndContactByPhone = async function(phoneStr, customName = '', actionT
         const data = await res.json();
         if (data && data.success && data.user) {
             const u = data.user;
+            removeDeletedLocalUserKey(u.username);
+            if (u.phone) removeDeletedLocalUserKey(u.phone);
 
             // Kişisel telefon rehberine kaydet (Madde 5: Kendi telefonunda kayıtlı olanları görsün)
             const myPhoneBook = getPersonalPhoneBookForCurrentUser();
@@ -2373,7 +2526,6 @@ function renderChatsList(chats, rawSearchQuery = '') {
 
     // Aktif filtreyi (Tümü / Online / Okunmamış) her yenilemede koru ki Online ekranında olan kullanıcılar anında görünsün!
     let effectiveList = Array.isArray(chats) ? chats.slice() : [];
-    effectiveList = window.MSJPlus?.filterChats(effectiveList) || effectiveList;
     if (!rawSearchQuery && chats === contactsList) {
         if (currentChatFilter === 'online') {
             effectiveList = effectiveList.filter(c => c && c.isOnline);
@@ -2432,15 +2584,19 @@ function renderChatsList(chats, rawSearchQuery = '') {
         item.style.cursor = 'pointer';
 
         const displayName = formatContactIntegratedDisplayName(contact);
+        const isBlocked = Boolean(contact.isBlocked || isContactBlockedLocally(contact.username));
+        contact.isBlocked = isBlocked;
 
-        let lastSnippet = contact.phone
-            ? `📱 ${formatPhonePretty(contact.phone)} • ${contact.isOnline ? '🟢 Online' : 'Özel sohbet'}`
-            : (contact.isOnline ? '🟢 Online • Özel sohbet' : 'Özel sohbet');
+        let lastSnippet = isBlocked
+            ? '🚫 Bu kişiyi engellediniz (Engeli kaldırmak için 🔓 butonuna dokunun)'
+            : (contact.phone
+                ? `📱 ${formatPhonePretty(contact.phone)} • ${contact.isOnline ? '🟢 Online' : '🔒 Signal E2EE şifreli sohbet'}`
+                : (contact.isOnline ? '🟢 Online • 🔒 Signal E2EE şifreli sohbet' : '🔒 Signal E2EE şifreli sohbet'));
         let isOutgoingLast = false;
         let isLastRead = false;
-        let timeLabel = contact.isOnline ? '🟢 Online' : '';
+        let timeLabel = isBlocked ? '🚫 Engellendi' : (contact.isOnline ? '🟢 Online' : '');
 
-        if (validLastMsg) {
+        if (validLastMsg && !isBlocked) {
             const decryptedPreview = validLastMsg.text
                 ? decryptE2EETextClient(validLastMsg.text, validLastMsg.sender, validLastMsg.recipient)
                 : '';
@@ -2459,33 +2615,44 @@ function renderChatsList(chats, rawSearchQuery = '') {
 
         item.innerHTML = `
             <div class="chat-avatar-wrap">
-                <img class="avatar" src="${escapeHtml(contact.avatar || '/avatars/default.svg')}" alt="${escapeHtml(displayName)}">
-                ${contact.isOnline ? '<span class="online-badge" title="Çevrimiçi (Online)"></span>' : ''}
+                <img class="avatar" src="${contact.avatar || '/avatars/default.svg'}" alt="${escapeHtml(displayName)}">
+                ${contact.isOnline && !isBlocked ? '<span class="online-badge" title="Çevrimiçi (Online)"></span>' : ''}
             </div>
             <div class="chat-content-wrap">
                 <div class="chat-top-line">
                     <span class="chat-title">
                         <strong class="wa-contact-name">${escapeHtml(displayName)}</strong>
                     </span>
-                    <span class="wa-chat-time ${hasUnread ? 'unread' : (contact.isOnline ? 'online-time' : '')}">${escapeHtml(timeLabel)}</span>
+                    <span class="wa-chat-time ${hasUnread ? 'unread' : (contact.isOnline && !isBlocked ? 'online-time' : '')}">${escapeHtml(timeLabel)}</span>
                 </div>
                 <div class="chat-bottom-line">
                     <div class="chat-last-msg-preview ${hasUnread ? 'unread' : ''}" title="${escapeHtml(lastSnippet)}">
                         ${outgoingChecksHtml}
                         <span>${escapeHtml(lastSnippet)}</span>
                     </div>
-                    <div class="wa-chat-badges">
+                    <div class="wa-chat-badges" style="display:flex;align-items:center;gap:6px;">
                         ${hasUnread ? `<span class="wa-unread-count-badge" title="${unreadCount} okunmamış mesaj">${unreadCount}</span>` : ''}
+                        <button type="button" class="btn-row-block" title="${isBlocked ? 'Engeli Kaldır' : 'Bu Kişiyi Engelle'}" style="border:none;background:rgba(255,165,2,0.14);color:${isBlocked ? '#25d366' : '#ffa502'};border-radius:6px;padding:3px 6px;font-size:12px;cursor:pointer;">${isBlocked ? '🔓' : '🚫'}</button>
+                        <button type="button" class="btn-row-delete" title="Bu Kişiyi Sil" style="border:none;background:rgba(234,0,56,0.15);color:#ff6b81;border-radius:6px;padding:3px 6px;font-size:12px;cursor:pointer;">🗑️</button>
                     </div>
                 </div>
             </div>
         `;
 
-        item.addEventListener('click', () => {
+        item.addEventListener('click', (e) => {
+            if (e.target.closest('.btn-row-block')) {
+                e.stopPropagation();
+                window.toggleBlockContact(contact.username);
+                return;
+            }
+            if (e.target.closest('.btn-row-delete')) {
+                e.stopPropagation();
+                window.requestDeleteUser(contact.username);
+                return;
+            }
             selectContact(contact);
         });
 
-        window.MSJPlus?.decorateChat(item, contact);
         chatListContainer.appendChild(item);
     });
 
@@ -2619,6 +2786,7 @@ function renderNewChatUsers(list, rawSearchQuery = '') {
         item.className = 'new-chat-user-item';
 
         const displayTitle = formatContactIntegratedDisplayName(contact);
+        const isBlocked = Boolean(contact.isBlocked || isContactBlockedLocally(contact.username));
         const phoneInfoHtml = contact.phone
             ? ` • 📱 ${escapeHtml(formatPhonePretty(contact.phone))}`
             : '';
@@ -2626,13 +2794,13 @@ function renderNewChatUsers(list, rawSearchQuery = '') {
         item.innerHTML = `
             <div class="new-chat-user-left">
                 <div class="chat-avatar-wrap" style="position:relative;">
-                    <img class="avatar" src="${escapeHtml(contact.avatar || '/avatars/default.svg')}" alt="${escapeHtml(displayTitle)}">
-                    ${contact.isOnline ? '<span class="online-badge" title="Online"></span>' : '<span class="offline-badge" title="Offline"></span>'}
+                    <img class="avatar" src="${contact.avatar || '/avatars/default.svg'}" alt="${escapeHtml(displayTitle)}">
+                    ${contact.isOnline && !isBlocked ? '<span class="online-badge" title="Online"></span>' : '<span class="offline-badge" title="Offline"></span>'}
                 </div>
                 <div class="new-chat-user-info">
                     <span class="new-chat-username">${escapeHtml(displayTitle)}</span>
-                    <span class="new-chat-status ${contact.isOnline ? 'online' : 'offline'}">
-                        ${contact.isOnline ? '🟢 Online' : '⚪ Offline (Mesaj & Arama Açık)'}${phoneInfoHtml}
+                    <span class="new-chat-status ${isBlocked ? 'offline' : (contact.isOnline ? 'online' : 'offline')}">
+                        ${isBlocked ? '🚫 Engellendi' : (contact.isOnline ? '🟢 Online' : '⚪ Offline (Mesaj & Arama Açık)')}${phoneInfoHtml}
                     </span>
                 </div>
             </div>
@@ -2646,7 +2814,10 @@ function renderNewChatUsers(list, rawSearchQuery = '') {
                 <button type="button" class="btn-new-chat-action call" title="Görüntülü Ara" data-action="video">
                     📹
                 </button>
-                <button type="button" class="btn-new-chat-action delete" title="Bu Kullanıcıyı Sil" data-action="delete" style="background: rgba(234, 0, 56, 0.16); color: #ff6b81;">
+                <button type="button" class="btn-new-chat-action block" title="${isBlocked ? 'Engeli Kaldır' : 'Bu Kişiyi Engelle'}" data-action="block" style="background: rgba(255, 165, 2, 0.16); color: ${isBlocked ? '#25d366' : '#ffa502'};">
+                    ${isBlocked ? '🔓' : '🚫'}
+                </button>
+                <button type="button" class="btn-new-chat-action delete" title="Bu Kişiyi Sil" data-action="delete" style="background: rgba(234, 0, 56, 0.16); color: #ff6b81;">
                     🗑️
                 </button>
             </div>
@@ -2654,6 +2825,12 @@ function renderNewChatUsers(list, rawSearchQuery = '') {
 
         // Satıra veya butonlara basıldığında doğrudan o kullanıcı seçilip yazışma ekranı açılsın
         item.addEventListener('click', (e) => {
+            const blockBtn = e.target.closest('.btn-new-chat-action.block');
+            if (blockBtn) {
+                e.stopPropagation();
+                window.toggleBlockContact(contact.username);
+                return;
+            }
             const delBtn = e.target.closest('.btn-new-chat-action.delete');
             if (delBtn) {
                 e.stopPropagation();
@@ -2752,8 +2929,10 @@ if (btnCloseNewChat) {
 
 if (btnActionCreateNewUser) {
     btnActionCreateNewUser.addEventListener('click', () => {
-        closeNewChatModal();
-        showRegisterPrompt();
+        if (inputLookupPhone) {
+            inputLookupPhone.focus();
+            inputLookupPhone.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
     });
 }
 
@@ -2775,7 +2954,6 @@ btnFabNewChat.addEventListener('click', () => {
 // ==========================================================
 
 function selectContact(contact) {
-    window.MSJPlus?.select(contact);
     activeContact = contact;
 
     // Okunmamış mesajları sıfırla ve sunucuya bildir
@@ -2794,6 +2972,7 @@ function selectContact(contact) {
         chatContactStatus.textContent = 'Offline';
         headerOnlineDot.style.display = 'none';
     }
+    updateActiveContactBlockHeaderUi();
 
     // Aktif öğeyi listede vurgula ve rozetleri temizle
     document.querySelectorAll('.chat-list-item').forEach(el => {
@@ -2926,7 +3105,6 @@ function appendMessageBubble(msg) {
         const existingTemp = document.getElementById(msg.tempId);
         if (existingTemp) {
             existingTemp.id = msg.id;
-            window.MSJPlus?.messageTools(existingTemp, msg);
             existingTemp.classList.remove('pending');
             const checks = existingTemp.querySelector('.bubble-checks');
             if (checks) checks.textContent = '✓✓';
@@ -2961,23 +3139,19 @@ function appendMessageBubble(msg) {
     if (msg.id) bubble.id = msg.id;
     bubble.className = `message-bubble ${isMe ? 'out' : 'in'} ${msg.pending ? 'pending' : ''}`;
 
-    if (msg.file) {
-        const url = typeof msg.file.url === 'string' ? msg.file.url : '';
-        if (!/^\/uploads\/[a-zA-Z0-9_\u00C0-\u017F.%~-]+$/.test(url)) msg = { ...msg, file: null };
-    }
     let fileContent = '';
     if (msg.file) {
         if (msg.file.mimetype && msg.file.mimetype.startsWith('image/')) {
-            fileContent = `<img class="msg-image-thumb" src="${escapeHtml(msg.file.url)}" alt="Fotoğraf" onclick="openEnlargedImage(this.src)" onerror="if(!this.dataset.cloudFallback && this.src.indexOf('/uploads/')!==-1){this.dataset.cloudFallback='1';this.alt='Dosya bu sunucuda bulunamadı';}">`;
+            fileContent = `<img class="msg-image-thumb" src="${msg.file.url}" alt="Fotoğraf" onclick="openEnlargedImage(this.src)" onerror="if(!this.dataset.cloudFallback && this.src.indexOf('/uploads/')!==-1){this.dataset.cloudFallback='1';this.src='https://hiileti.onrender.com/uploads/'+this.src.split('/uploads/').pop();}">`;
         } else if (msg.file.mimetype && msg.file.mimetype.startsWith('audio/')) {
             fileContent = `
                 <div style="padding: 4px 0;">
-                    <audio controls src="${escapeHtml(msg.file.url)}" style="max-width: 100%; height: 38px;"></audio>
+                    <audio controls src="${msg.file.url}" style="max-width: 100%; height: 38px;"></audio>
                 </div>
             `;
         } else {
             fileContent = `
-                <a href="${escapeHtml(msg.file.url)}" download="${escapeHtml(msg.file.filename)}" class="msg-doc-card">
+                <a href="${msg.file.url}" download="${escapeHtml(msg.file.filename)}" class="msg-doc-card">
                     <span class="doc-icon">📄</span>
                     <div class="doc-info">
                         <div class="doc-name">${escapeHtml(msg.file.filename)}</div>
@@ -3001,7 +3175,6 @@ function appendMessageBubble(msg) {
         </div>
     `;
 
-    window.MSJPlus?.messageTools(bubble, msg);
     messagesContainer.appendChild(bubble);
     scrollToBottom();
 }
@@ -3127,8 +3300,6 @@ function sendTextMessage(text) {
         return;
     }
 
-    text = window.MSJPlus?.prepareText(text) ?? text;
-
     // Giriş kutusunu ANINDA temizle (ikinci bir Enter veya tıklamada aynı metnin tekrar gitmesini %100 engeller)
     messageInput.value = '';
     iconMic.style.display = 'block';
@@ -3190,7 +3361,6 @@ function sendTextMessage(text) {
         } else {
             if (bubbleEl && ack.message) {
                 bubbleEl.id = ack.message.id;
-                window.MSJPlus?.messageTools(bubbleEl, ack.message);
                 bubbleEl.classList.remove('pending');
                 const delBtn = bubbleEl.querySelector('.btn-msg-delete');
                 if (delBtn) delBtn.setAttribute('onclick', `requestDeleteMessage('${ack.message.id}')`);
@@ -3279,7 +3449,6 @@ async function handleFileUpload(file) {
                     const bubbleEl = document.getElementById(tempId) || (ack && ack.message && document.getElementById(ack.message.id));
                     if (bubbleEl && ack && ack.success && ack.message) {
                         bubbleEl.id = ack.message.id;
-                window.MSJPlus?.messageTools(bubbleEl, ack.message);
                         bubbleEl.classList.remove('pending');
                         const delBtn = bubbleEl.querySelector('.btn-msg-delete');
                         if (delBtn) delBtn.setAttribute('onclick', `requestDeleteMessage('${ack.message.id}')`);
@@ -3334,6 +3503,11 @@ socket.on('chat:message', (msg) => {
         return;
     }
 
+    // Engellenen kişiden gelen mesajları yoksay
+    if (recipientKey === myKey && isContactBlockedLocally(msg.sender)) {
+        return;
+    }
+
     if (msg.sender) {
         savePermanentLocalUsers([{ username: msg.sender, avatar: '/avatars/default.svg' }]);
     }
@@ -3353,7 +3527,7 @@ socket.on('chat:message', (msg) => {
     }
 
     // 2. Eğer mesaj bize geldiyse:
-    if (isIncoming && !window.MSJPlus?.muted(msg.sender)) {
+    if (isIncoming) {
         // A) Bildirim sesi çal (WhatsApp tarzı net ve tatlı ses)
         playIncomingMessageSound();
         try { window.focus(); } catch (e) {}
@@ -3422,7 +3596,7 @@ socket.on('chat:offline_messages', (data) => {
         }
     });
 
-    if (hasUnreadForOther && myMessages.some(m => !window.MSJPlus?.muted(m.sender))) {
+    if (hasUnreadForOther) {
         playIncomingMessageSound();
         const latestMsg = myMessages[myMessages.length - 1];
         if (latestMsg) {
@@ -3650,6 +3824,40 @@ socket.on('user:deleted', (data) => {
     loadRegisteredUsersDropdown();
 });
 
+socket.on('contact:deleted', (data) => {
+    if (!data || !data.contactUsername) return;
+    removePermanentLocalUser(data.contactUsername);
+    contactsList = contactsList.filter(c => normalizeKey(c.username) !== normalizeKey(data.contactUsername));
+    saveCachedContactsForCurrentUser(contactsList);
+    renderChatsList(contactsList);
+    if (newChatModal && newChatModal.style.display === 'flex') {
+        renderNewChatUsers(contactsList);
+    }
+    if (activeContact && normalizeKey(activeContact.username) === normalizeKey(data.contactUsername)) {
+        closeActiveChat();
+    }
+});
+
+socket.on('contact:block_changed', (data) => {
+    if (!data || !data.targetUsername) return;
+    const tKey = normalizeKey(data.targetUsername);
+    const isBlocked = Boolean(data.isBlocked);
+    setContactBlockedLocally(data.targetUsername, isBlocked);
+    contactsList.forEach(c => {
+        if (normalizeKey(c.username) === tKey) {
+            c.isBlocked = isBlocked;
+        }
+    });
+    if (activeContact && normalizeKey(activeContact.username) === tKey) {
+        activeContact.isBlocked = isBlocked;
+        updateActiveContactBlockHeaderUi();
+    }
+    renderChatsList(contactsList);
+    if (newChatModal && newChatModal.style.display === 'flex') {
+        renderNewChatUsers(contactsList);
+    }
+});
+
 // CEP TELEFONU GİBİ OTOMATİK UYANMA VE ONLINE OLMA SİSTEMİ (KULLANICI İZOLASYONLU):
 // Yalnızca bu cihazda oturum açmış olan (veya kaydedilmiş) kullanıcıya mesaj/arama geldiğinde çalışır.
 // Başka kullanıcılara gelen mesaj veya aramalar bu ekranda gösterilmez ve hesabı değiştirmez!
@@ -3659,6 +3867,9 @@ socket.on('system:wakeup', async (data) => {
 
     // Eğer gönderen kişi bizzat bu sekmedeki aktif kullanıcıysa işlem yapma
     if (currentUser && normalizeKey(currentUser.username) === normalizeKey(data.sender)) {
+        return;
+    }
+    if (data.sender && isContactBlockedLocally(data.sender)) {
         return;
     }
 
@@ -4699,9 +4910,6 @@ btnRejectCall.addEventListener('click', () => {
             reason: 'Arama reddedildi'
         });
     }
-    if (currentUser) {
-        socket.emit('call:missed', { recipient: currentUser.username });
-    }
     playCallEndedSound();
     currentTargetSocketId = null;
 });
@@ -5035,8 +5243,31 @@ if (menuItemClearChat) {
     });
 }
 
+if (btnBlockContact) {
+    btnBlockContact.addEventListener('click', () => {
+        if (!activeContact) return;
+        window.toggleBlockContact(activeContact.username);
+    });
+}
+
+if (btnDeleteContact) {
+    btnDeleteContact.addEventListener('click', () => {
+        if (!activeContact) return;
+        window.requestDeleteUser(activeContact.username);
+    });
+}
+
+if (menuItemBlockUser) {
+    menuItemBlockUser.addEventListener('click', () => {
+        if (chatDropdownMenu) chatDropdownMenu.style.display = 'none';
+        if (!activeContact) return;
+        window.toggleBlockContact(activeContact.username);
+    });
+}
+
 if (menuItemDeleteUser) {
     menuItemDeleteUser.addEventListener('click', () => {
+        if (chatDropdownMenu) chatDropdownMenu.style.display = 'none';
         if (!activeContact) return;
         window.requestDeleteUser(activeContact.username);
     });
@@ -5078,7 +5309,6 @@ async function performLogout() {
 
     // Oturumu kapatırken kayıtlı kullanıcıları ve kişi listesini ASLA SİLME!
     localStorage.setItem('msj_auto_login', 'false');
-    navigator.serviceWorker?.controller?.postMessage({ type: 'LOGOUT' });
     localStorage.removeItem('msj_token');
     sessionStorage.removeItem('msj_token');
     currentUser = null;
@@ -5481,7 +5711,7 @@ btnCloseImageModal.addEventListener('click', () => {
 
 function escapeHtml(str) {
     if (!str) return '';
-    return String(str).replace(/[&<>"']/g, function(m) {
+    return str.replace(/[&<>"']/g, function(m) {
         return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[m];
     });
 }
@@ -5964,9 +6194,12 @@ setInterval(async () => {
         });
     }
 
-    [menuItemImportContacts, btnImportPhoneContactsModal, btnAddFilter].forEach(btn => {
+    [menuItemImportContacts, btnImportPhoneContactsModal].forEach(btn => {
         if (btn) btn.addEventListener('click', triggerDeviceContactsImport);
     });
+    if (btnAddFilter) {
+        btnAddFilter.addEventListener('click', () => openNewChatModal(true));
+    }
 })();
 
 // ==========================================================

@@ -173,5 +173,40 @@
       "createdAt": "2026-10-24T20:16:45.230Z",
       "read": false
     }
+  ],
+  "cozucem___serhad akçay": [
+    {
+      "id": "msg_1793633510248_igi98i",
+      "sender": "Serhad AKÇAY",
+      "recipient": "cozucem",
+      "text": "Ddd",
+      "file": null,
+      "timestamp": "15:31",
+      "date": "Bugün",
+      "createdAt": "2026-11-02T15:31:50.248Z",
+      "read": true
+    },
+    {
+      "id": "msg_1793633550331_6qcz87",
+      "sender": "Serhad AKÇAY",
+      "recipient": "cozucem",
+      "text": "Dd",
+      "file": null,
+      "timestamp": "15:32",
+      "date": "Bugün",
+      "createdAt": "2026-11-02T15:32:30.331Z",
+      "read": true
+    },
+    {
+      "id": "msg_1793635097517_rizhvr",
+      "sender": "Serhad AKÇAY",
+      "recipient": "cozucem",
+      "text": "Ddd",
+      "file": null,
+      "timestamp": "18:58",
+      "date": "Bugün",
+      "createdAt": "2026-11-02T15:58:20.203Z",
+      "read": true
+    }
   ]
 }

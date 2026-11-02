@@ -158,9 +158,11 @@ async function runSwPollCycle() {
         }
 
         // 2. Yeni mesaj ve arama bildirimleri
-        if (data.lastId > swLastNotificationId && swLastNotificationId > 0 && Array.isArray(data.notifications)) {
+        const isFirstPoll = swLastNotificationId === 0;
+        if (data.lastId > swLastNotificationId && Array.isArray(data.notifications)) {
             for (const item of data.notifications) {
                 if (!item || !item.recipient) continue;
+                if (isFirstPoll && item.timestamp && (Date.now() - item.timestamp > 90000)) continue;
                 if (item.recipient.toLowerCase() !== swCurrentUser.toLowerCase()) continue;
                 if (item.sender && item.sender.toLowerCase() === swCurrentUser.toLowerCase()) continue;
 
@@ -240,13 +242,7 @@ function startSwBackgroundPoll() {
 }
 
 self.addEventListener('message', (event) => {
-    if (event.data && event.data.type === 'LOGOUT') {
-        swCurrentUser = '';
-        swLastNotificationId = 0;
-        clearInterval(swPollTimer);
-        swPollTimer = null;
-        event.waitUntil(Promise.all([swSetKv('swCurrentUser', ''), swSetKv('swLastNotificationId', 0)]));
-    } else if (event.data && event.data.type === 'INIT_USER') {
+    if (event.data && event.data.type === 'INIT_USER') {
         const newU = (event.data.username || '').trim();
         if (newU) {
             swCurrentUser = newU;
@@ -272,7 +268,7 @@ self.addEventListener('periodicsync', (event) => {
 
 self.addEventListener('install', (event) => {
     event.waitUntil(
-        caches.keys().then((keys) => Promise.all(keys.filter(k => k.startsWith('msj-cache-')).map((k) => caches.delete(k))))
+        caches.keys().then((keys) => Promise.all(keys.map((k) => caches.delete(k))))
     );
     self.skipWaiting();
 });
@@ -280,7 +276,7 @@ self.addEventListener('install', (event) => {
 self.addEventListener('activate', (event) => {
     event.waitUntil(
         Promise.all([
-            caches.keys().then((keys) => Promise.all(keys.filter(k => k.startsWith('msj-cache-')).map((k) => caches.delete(k)))),
+            caches.keys().then((keys) => Promise.all(keys.map((k) => caches.delete(k)))),
             ensureSwUserLoaded()
         ])
     );
@@ -295,7 +291,7 @@ self.addEventListener('fetch', (event) => {
     const url = new URL(req.url);
     if (url.pathname.startsWith('/socket.io/') || url.pathname.startsWith('/api/')) return;
     event.respondWith(
-        fetch(req).catch(async () => (await caches.match(req)) || new Response('Bağlantı kurulamadı', { status: 503, headers: { 'Content-Type': 'text/plain; charset=utf-8' } }))
+        fetch(req).catch(() => caches.match(req))
     );
 });
 

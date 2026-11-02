@@ -389,30 +389,7 @@ namespace MSJ
 
         private static int lastNotificationId = 0;
         private static Thread notificationThread = null;
-
-        // The local browser creates this handoff only after successful authentication.
-        // No username-only login or security bypass is used.
-        static WebClient CreateAuthenticatedClient()
-        {
-            string file = Path.Combine(appDir, "data", "desktop-session.json");
-            string json = File.ReadAllText(file, Encoding.UTF8);
-            Match match = Regex.Match(json, @"""token""\s*:\s*""([a-f0-9]{64})""");
-            if (!match.Success) throw new InvalidOperationException("Önce yerel uygulamada giriş yapınız.");
-            WebClient client = new LocalWebClient();
-            client.Headers["x-auth-token"] = match.Groups[1].Value;
-            return client;
-        }
-
-        sealed class LocalWebClient : WebClient
-        {
-            protected override WebRequest GetWebRequest(Uri address)
-            {
-                if (!address.IsLoopback) throw new InvalidOperationException("Yalnızca yerel sunucuya erişilebilir.");
-                WebRequest request = base.GetWebRequest(address);
-                request.Timeout = 5000;
-                return request;
-            }
-        }
+        private static System.Collections.Generic.HashSet<string> handledCallIds = new System.Collections.Generic.HashSet<string>();
 
         static void StartBackgroundNotificationListener()
         {
@@ -420,6 +397,21 @@ namespace MSJ
 
             notificationThread = new Thread(() =>
             {
+                try
+                {
+                    using (WebClient wc = new WebClient())
+                    {
+                        wc.Encoding = Encoding.UTF8;
+                        string initJson = wc.DownloadString("http://127.0.0.1:3000/api/system/notifications/poll?since=0");
+                        var match = Regex.Match(initJson, "\"lastId\"\\s*:\\s*(\\d+)");
+                        if (match.Success)
+                        {
+                            int.TryParse(match.Groups[1].Value, out lastNotificationId);
+                        }
+                    }
+                }
+                catch { }
+
                 while (true)
                 {
                     try
@@ -432,11 +424,26 @@ namespace MSJ
                             EnsureServerRunning();
                         }
 
-                        using (WebClient wc = CreateAuthenticatedClient())
+                        using (WebClient wc = new WebClient())
                         {
                             wc.Encoding = Encoding.UTF8;
                             string url = "http://127.0.0.1:3000/api/system/notifications/poll?since=" + lastNotificationId;
                             string res = wc.DownloadString(url);
+
+                            // 1. Bekleyen aktif arama varsa (activeCalls) hemen yakala ve ekrana getir
+                            foreach (string callBlock in ExtractJsonArrayBlocks(res, "activeCalls"))
+                            {
+                                string callId = UnescapeJson(Regex.Match(callBlock, "\"callId\"\\s*:\\s*\"([^\"]*)\"").Groups[1].Value);
+                                string caller = UnescapeJson(Regex.Match(callBlock, "\"callerUsername\"\\s*:\\s*\"([^\"]*)\"").Groups[1].Value);
+                                string recipient = UnescapeJson(Regex.Match(callBlock, "\"recipient\"\\s*:\\s*\"([^\"]*)\"").Groups[1].Value);
+                                string callType = UnescapeJson(Regex.Match(callBlock, "\"callType\"\\s*:\\s*\"([^\"]*)\"").Groups[1].Value);
+                                string dedupKey = !string.IsNullOrEmpty(callId) ? callId : (caller + "_" + recipient);
+                                if (!string.IsNullOrEmpty(caller) && !handledCallIds.Contains(dedupKey))
+                                {
+                                    handledCallIds.Add(dedupKey);
+                                    HandleIncomingCallEvent(caller, recipient, string.IsNullOrEmpty(callType) ? "voice" : callType, false);
+                                }
+                            }
 
                             var lastIdMatch = Regex.Match(res, "\"lastId\"\\s*:\\s*(\\d+)");
                             if (lastIdMatch.Success)
@@ -458,11 +465,17 @@ namespace MSJ
                                             string recipient = UnescapeJson(Regex.Match(block, "\"recipient\"\\s*:\\s*\"([^\"]*)\"").Groups[1].Value);
                                             string text = UnescapeJson(Regex.Match(block, "\"text\"\\s*:\\s*\"([^\"]*)\"").Groups[1].Value);
                                             string callType = UnescapeJson(Regex.Match(block, "\"callType\"\\s*:\\s*\"([^\"]*)\"").Groups[1].Value);
+                                            string callId = UnescapeJson(Regex.Match(block, "\"callId\"\\s*:\\s*\"([^\"]*)\"").Groups[1].Value);
                                             bool isTargetOnline = Regex.Match(block, "\"isTargetOnline\"\\s*:\\s*true").Success;
 
                                             if (type == "call")
                                             {
-                                                HandleIncomingCallEvent(sender, recipient, callType, isTargetOnline);
+                                                string dedupKey = !string.IsNullOrEmpty(callId) ? callId : (sender + "_" + recipient);
+                                                if (!handledCallIds.Contains(dedupKey))
+                                                {
+                                                    handledCallIds.Add(dedupKey);
+                                                    HandleIncomingCallEvent(sender, recipient, callType, isTargetOnline);
+                                                }
                                             }
                                             else if (type == "call_ended")
                                             {
@@ -488,10 +501,20 @@ namespace MSJ
 
         static System.Collections.Generic.List<string> ExtractNotificationItemBlocks(string json)
         {
-            var results = new System.Collections.Generic.List<string>();
-            if (string.IsNullOrEmpty(json)) return results;
+            var list = ExtractJsonArrayBlocks(json, "notifications");
+            if (list.Count == 0)
+            {
+                list = ExtractJsonArrayBlocks(json, "items");
+            }
+            return list;
+        }
 
-            int itemsIdx = json.IndexOf("\"notifications\"");
+        static System.Collections.Generic.List<string> ExtractJsonArrayBlocks(string json, string fieldName)
+        {
+            var results = new System.Collections.Generic.List<string>();
+            if (string.IsNullOrEmpty(json) || string.IsNullOrEmpty(fieldName)) return results;
+
+            int itemsIdx = json.IndexOf("\"" + fieldName + "\"");
             int startBracket = itemsIdx >= 0 ? json.IndexOf('[', itemsIdx) : -1;
             if (startBracket < 0) return results;
 
@@ -572,10 +595,6 @@ namespace MSJ
                         if (existingWnd == IntPtr.Zero || !isTargetOnline)
                         {
                             string q = "?openChat=" + Uri.EscapeDataString(sender);
-                            if (!string.IsNullOrEmpty(recipient))
-                            {
-                                q += "&autoUser=" + Uri.EscapeDataString(recipient);
-                            }
                             OpenAppWindow(q);
                         }
                         else
@@ -618,10 +637,6 @@ namespace MSJ
                         if (existingWnd == IntPtr.Zero || !isTargetOnline)
                         {
                             string q = "?openChat=" + Uri.EscapeDataString(caller) + "&incomingCall=1";
-                            if (!string.IsNullOrEmpty(recipient))
-                            {
-                                q += "&autoUser=" + Uri.EscapeDataString(recipient);
-                            }
                             OpenAppWindow(q);
                         }
                         else
@@ -720,7 +735,7 @@ namespace MSJ
             {
                 try
                 {
-                    using (WebClient wc = CreateAuthenticatedClient())
+                    using (WebClient wc = new WebClient())
                     {
                         wc.Encoding = Encoding.UTF8;
                         wc.Headers[HttpRequestHeader.ContentType] = "application/json";
@@ -741,11 +756,11 @@ namespace MSJ
             {
                 try
                 {
-                    using (WebClient wc = CreateAuthenticatedClient())
+                    using (WebClient wc = new WebClient())
                     {
                         wc.Encoding = Encoding.UTF8;
                         wc.Headers[HttpRequestHeader.ContentType] = "application/json";
-                        string body = "{\"callerUsername\":\"" + caller.Replace("\"", "\\\"") + "\",\"recipient\":\"" + recipient.Replace("\"", "\\\"") + "\"}";
+                        string body = "{\"caller\":\"" + caller.Replace("\"", "\\\"") + "\",\"recipient\":\"" + recipient.Replace("\"", "\\\"") + "\"}";
                         wc.UploadString("http://127.0.0.1:3000/api/system/call/reject", "POST", body);
                     }
                 }
@@ -762,6 +777,15 @@ namespace MSJ
                 if (!File.Exists(lnk))
                 {
                     CreateStartupShortcut(lnk);
+                }
+
+                string exePath = Path.Combine(appDir, "MSJ.exe");
+                using (Microsoft.Win32.RegistryKey runKey = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", true))
+                {
+                    if (runKey != null)
+                    {
+                        runKey.SetValue("HIHaberlesme", "\"" + exePath + "\" --background");
+                    }
                 }
             }
             catch { }
@@ -835,6 +859,16 @@ namespace MSJ
             {
                 try { serverProcess.Kill(); } catch { }
             }
+
+            try
+            {
+                Process[] procs = Process.GetProcessesByName("node");
+                foreach (Process p in procs)
+                {
+                    try { p.Kill(); } catch { }
+                }
+            }
+            catch { }
 
             Application.Exit();
             Environment.Exit(0);

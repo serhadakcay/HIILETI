@@ -28,11 +28,47 @@
   },
   "cözücem": {
     "username": "cözücem",
-    "phone": "05320524648",
+    "phone": "",
     "salt": "32a82ec67342433f4a27730eaea27ff2",
     "hash": "4c8b9c057f30b84c6e54aa64a7a68be6aff1d3047676135a676f49941bee803859f6eee499530ebefc24a66a71461c47177baca61d8cc708378d29ff23c06789",
     "avatar": "/avatars/default.svg",
     "lastSeen": "Offline",
     "createdAt": "2026-10-17T18:29:41.862Z"
+  },
+  "serhad akçay": {
+    "username": "Serhad AKÇAY",
+    "phone": "",
+    "salt": "d9a374707dbeb6f7a0211b46b4271c15",
+    "hash": "5a6edba9c274b8f145b364547e20245328ddc8a53746bfc83f9a991d36eacf9b2c3b7afdd339b1d5b69bdadc8056303a54f6f980a96eaebdd3b995945d46088e",
+    "avatar": "/avatars/default.svg",
+    "lastSeen": "Online",
+    "createdAt": "2026-11-02T15:49:00.692Z"
+  },
+  "cozucem": {
+    "username": "cozucem",
+    "phone": "",
+    "salt": "240422302dde2f87170cd985ddd7a95e",
+    "hash": "e79a6e3007d2022da036fbf5ca8637453609bddd2d1557106e413d5d717d1a7b8c31f36ae64a8c239529aab1e248677179eb169fd8c35892f6b1cd188b03e7a3",
+    "avatar": "/avatars/default.svg",
+    "lastSeen": "Offline",
+    "createdAt": "2026-11-02T15:49:01.341Z"
+  },
+  "serhad1": {
+    "username": "serhad1",
+    "phone": "",
+    "salt": "d6686a3983b0a91ed21fdc5e12eaa1e0",
+    "hash": "65087f57772f37d8831f293775d67d33d30e9d6a819e538352bd2706b636fb059f418cc08c9037fd648d5bbec5077803bd6cff754189d8bf81c7d28a81f38b40",
+    "avatar": "/avatars/default.svg",
+    "lastSeen": "Offline",
+    "createdAt": "2026-11-02T15:59:00.963Z"
+  },
+  "ener osman akçay": {
+    "username": "ENER OSMAN AKÇAY",
+    "phone": "",
+    "salt": "5f0bb7ce6ddac13c26bbbd5b382c3f99",
+    "hash": "a06137b174b5927194ebc761d5d59c24dc38ba8212e446b19b221ee1b8814c8b671b464bb09ec5c07b8f45a8e330d831bf120ad432d2657e81fab1c77f8421fa",
+    "avatar": "/avatars/default.svg",
+    "lastSeen": "Offline",
+    "createdAt": "2026-11-02T16:00:37.293Z"
   }
 }

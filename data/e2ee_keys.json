@@ -1,0 +1,126 @@
+{
+  "serhad akçay": {
+    "userKey": "serhad akçay",
+    "username": "Serhad AKÇAY",
+    "protocolVersion": "Signal-X3DH-DoubleRatchet-v2",
+    "identityKey": "04617cbe8c3933d892fe76437f1ef83e3299c8d060090e1c5a909df474a40a336b1aa273ed491a2f035377ffefbddd4db948313686fed2409f6e529d3b0598607e",
+    "signingKey": "048f5291af8d21e7b22fa9c25d0b077a98b11de4b4f8bf6227118af98203db925595ea0c71c4f342128b3508434792109382d99d7db8867b4ace5a8b88c8084ffc",
+    "signedPreKey": "ac067742e7204b77088154f9d2c34c9e449986ac2fd1e61d1d4194cd0ff98993",
+    "spkSignature": "eb47e547704dd7c5544829a09cb47ab7c8c5d18b517b0d89c261e4adf02238e0",
+    "oneTimePreKeys": [
+      {
+        "keyId": 1,
+        "publicHex": "5f129da911b5587e15102140d1137592df7229c9f55aea40726a40b28c06f5e1"
+      },
+      {
+        "keyId": 2,
+        "publicHex": "e0a200431a07b2e3985cc1ba9deec4d23aab931b7da1dec4e1dd1d2f863413e4"
+      },
+      {
+        "keyId": 3,
+        "publicHex": "7615af88b56d2e69f1636b598c4f864ee43e947e11655545c728edf0bec06ec9"
+      },
+      {
+        "keyId": 4,
+        "publicHex": "d09c35d8e7a53427c7e99d1c6b3365298ad31f7134736fedc1a9f95f9e5c8c86"
+      }
+    ],
+    "akdSeq": 1,
+    "akdPrevHash": "GENESIS_AKD_ROOT_00000000",
+    "akdHash": "0862dec00492b9e898a1950852668cefa61ddce5ddbf3984207ae2c767f4a9a0",
+    "updatedAt": "2026-11-02T15:55:48.695Z"
+  },
+  "cozucem": {
+    "userKey": "cozucem",
+    "username": "cozucem",
+    "protocolVersion": "Signal-X3DH-DoubleRatchet-v2",
+    "identityKey": "042b3edf0ae3ed1eee874e4e94a8560b61925415dc0659feec68445452f2ce0b98f865bf6ef9d57b44a6795157afc1ec2b955ae6bdc07b39242bf9dc39b52068bf",
+    "signingKey": "04a7b1ebae848cb43fc8798b5ee3d5020d1e13a1137601cf19edc18f022ff3c5d335d2aa7ac4b7733d8585488af4c54eb6d6a420b042e12f87c8f93c47970e3ca3",
+    "signedPreKey": "786d843c0e7d54904596a10414a7cef512aca6153c7cb66b92513df663648f7a",
+    "spkSignature": "0f855dea20bc763888ef95c0f18ea65a108e31aeb6cbd3e947774ee5cfa7545f",
+    "oneTimePreKeys": [
+      {
+        "keyId": 1,
+        "publicHex": "1465f1246a466e4505f89a05e0ddf7a8f1acbd7970aa5c204254c3bd9cdcb949"
+      },
+      {
+        "keyId": 2,
+        "publicHex": "5d9a3d90bef8c44a76754d91fdbb54766509f176369d6c6f252b341d8a513542"
+      },
+      {
+        "keyId": 3,
+        "publicHex": "209bb8509d07fe141b8508c12ef13dd9c4ae29d7964e64e38f93e2a796d229fc"
+      },
+      {
+        "keyId": 4,
+        "publicHex": "11811428ed4805a575f4f686aef23f323742f2c275055533cdc2383f8e51f92e"
+      }
+    ],
+    "akdSeq": 4,
+    "akdPrevHash": "449d9b456c4f0496628d8b35b345a86d2ff783ca14b4e8ed79a69929fb0bc25e",
+    "akdHash": "cc95b31b0c0f79e825ec61b0fe70cd5aa65f2cca416c348bcf746d127a8f9498",
+    "updatedAt": "2026-11-02T15:59:38.661Z"
+  },
+  "serhad1": {
+    "userKey": "serhad1",
+    "username": "serhad1",
+    "protocolVersion": "Signal-X3DH-DoubleRatchet-v2",
+    "identityKey": "045002294892be7ffbf919e554ca0b206c0611f03dab5e50b2ed731ab7bf98c2fff5b74c5472e0171485f3cfed7569dfc9089763da5e9396e8650e7d080994e70f",
+    "signingKey": "04065fceb8f7f6f2511bad676a675ef73eac5351a04de5181d885c40521fb1d9d1b4cebb50f183aa3a115fd835d0db0eaf4a3d96d44e9b969bfd8594574e095e9f",
+    "signedPreKey": "396000f136d99596ca4133b71020b310071d5d89b5060a38b38853c73ceb295c",
+    "spkSignature": "e74f9b445267019f3cf817f7b617ad3b8bf5c84774606032535b28252c96d8d1",
+    "oneTimePreKeys": [
+      {
+        "keyId": 1,
+        "publicHex": "d527108598245fed73078ffe261f547604c2f09e6886e93988fb544a26fc1a2e"
+      },
+      {
+        "keyId": 2,
+        "publicHex": "fd20f43099851d5bfedafd127d4a4621a7e244a47d3be45949209b67e10d42bb"
+      },
+      {
+        "keyId": 3,
+        "publicHex": "9aa7472f0c54dd77909bca9e9145ca58aafb8a9180884d81b1bc69bbfd908af3"
+      },
+      {
+        "keyId": 4,
+        "publicHex": "8d5dd17330851e1f22d8e8dae07a470040685e508746a078e3800bf0d4fb99f1"
+      }
+    ],
+    "akdSeq": 1,
+    "akdPrevHash": "GENESIS_AKD_ROOT_00000000",
+    "akdHash": "f64333d756aea48c35308d4f241c8efc0c0583930ee7571db66da4e844a22787",
+    "updatedAt": "2026-11-02T15:59:01.542Z"
+  },
+  "ener osman akçay": {
+    "userKey": "ener osman akçay",
+    "username": "ENER OSMAN AKÇAY",
+    "protocolVersion": "Signal-X3DH-DoubleRatchet-v2",
+    "identityKey": "04708c2065b3844c2da5f9d21a208911457ecf019ae616bcfce3f3a6f73305a263a7d0824cea98268e597ffac059e2bef914f42809f7360d85dd311ce2eba9c676",
+    "signingKey": "046a188acc5af78880ffb3cda6a68538664c6483d25f75dc84c45f7b3ed9c3baaaf4f84f67d2fb104a1a9dd9eeb2b3bf16ddaccc7d2bda08a610bc58a852aa2698",
+    "signedPreKey": "7a2cb219f2e465802a8c0c9d4fad6552c249df32430f0e39ec05757ba00089cb",
+    "spkSignature": "dacaa6dd7b1fe8dab261d5aad092e4fa9fcd7b802432556ec04db8b4d562dfdc",
+    "oneTimePreKeys": [
+      {
+        "keyId": 1,
+        "publicHex": "fcfaa63368d5f56399371f8ebef274b36bd9ff83ddf1ede224154f00b097f3e7"
+      },
+      {
+        "keyId": 2,
+        "publicHex": "33c34409d207bd87c966e21bda617b83c81381394b91c39af194a113ef23fefe"
+      },
+      {
+        "keyId": 3,
+        "publicHex": "5a24626a0a21751474e6c1797d1b1c6690d4275d73a1a2d1018a2a822effd933"
+      },
+      {
+        "keyId": 4,
+        "publicHex": "5ff2906078c7d49c9cdb2a81c2ab7b3b020d8b8a283336378cd0033e21be6f87"
+      }
+    ],
+    "akdSeq": 2,
+    "akdPrevHash": "3b796522d533e1d5cb91d5f35edd3f33fa9b9aa31d1220ec3249217a1f6fd6ef",
+    "akdHash": "719a4512a4983eb496be42d955cf17ebca13f312b2fc1c5fe2b1d0acbc5497ba",
+    "updatedAt": "2026-11-02T16:00:44.431Z"
+  }
+}

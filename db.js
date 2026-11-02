@@ -81,6 +81,7 @@ const sessionsFile = path.join(dataDir, 'sessions.json');
 const messagesFile = path.join(dataDir, 'messages.json');
 const deletedUsersFile = path.join(dataDir, 'deleted_users.json');
 const userContactsFile = path.join(dataDir, 'user_contacts.json');
+const blockedUsersFile = path.join(dataDir, 'blocked_users.json');
 const e2eeKeysFile = path.join(dataDir, 'e2ee_keys.json');
 
 // SQLCipher / AES-256-GCM Yerel Veritabanı (At-Rest) Şifreleme Anahtarı Türetimi
@@ -140,7 +141,7 @@ function getDeletedUsersMap() {
 }
 
 function markUserDeletedInFile(userKey) {
-    if (!userKey) return;
+    if (!userKey || isLikelyPhoneNumber(userKey)) return;
     try {
         ensureDataDir();
         const map = getDeletedUsersMap();
@@ -265,6 +266,15 @@ class DatabaseManager {
             );
             CREATE INDEX IF NOT EXISTS idx_user_contacts_owner ON user_contacts(owner_key);
 
+            CREATE TABLE IF NOT EXISTS blocked_users (
+                owner_key TEXT NOT NULL COLLATE NOCASE,
+                blocked_key TEXT NOT NULL COLLATE NOCASE,
+                blocked_username TEXT NOT NULL COLLATE NOCASE,
+                created_at TEXT,
+                PRIMARY KEY (owner_key, blocked_key)
+            );
+            CREATE INDEX IF NOT EXISTS idx_blocked_users_owner ON blocked_users(owner_key);
+
             CREATE TABLE IF NOT EXISTS e2ee_keys (
                 user_key TEXT PRIMARY KEY COLLATE NOCASE,
                 username TEXT NOT NULL COLLATE NOCASE,
@@ -360,6 +370,17 @@ class DatabaseManager {
         `);
 
         await this.mysqlPool.query(`
+            CREATE TABLE IF NOT EXISTS blocked_users (
+                owner_key VARCHAR(100) NOT NULL,
+                blocked_key VARCHAR(100) NOT NULL,
+                blocked_username VARCHAR(100) NOT NULL,
+                created_at VARCHAR(50),
+                PRIMARY KEY (owner_key, blocked_key),
+                INDEX idx_blocked_users_owner (owner_key)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+        `);
+
+        await this.mysqlPool.query(`
             CREATE TABLE IF NOT EXISTS e2ee_keys (
                 user_key VARCHAR(100) PRIMARY KEY,
                 username VARCHAR(100) NOT NULL,
@@ -384,13 +405,13 @@ class DatabaseManager {
     // ========================================================
     isUserDeleted(usernameOrKey) {
         const key = normalizeKey(usernameOrKey);
-        if (!key) return false;
+        if (!key || isLikelyPhoneNumber(key)) return false;
         const map = getDeletedUsersMap();
         return Boolean(map[key]);
     }
 
     getDeletedUserKeys() {
-        return Object.keys(getDeletedUsersMap());
+        return Object.keys(getDeletedUsersMap()).filter(k => !isLikelyPhoneNumber(k));
     }
 
     async syncAllWithJson() {
@@ -444,7 +465,7 @@ class DatabaseManager {
                                     const ex = await this.getUser(uName.trim());
                                     if (!ex) {
                                         const salt = crypto.randomBytes(16).toString('hex');
-                                        const hash = crypto.pbkdf2Sync(crypto.randomBytes(32).toString('hex'), salt, 1000, 64, 'sha512').toString('hex');
+                                        const hash = crypto.pbkdf2Sync('123456', salt, 1000, 64, 'sha512').toString('hex');
                                         await this.insertUserToDb({
                                             username: uName.trim(),
                                             salt,
@@ -486,7 +507,7 @@ class DatabaseManager {
                         const exUser = await this.getUser(s.username);
                         if (!exUser) {
                             const salt = crypto.randomBytes(16).toString('hex');
-                            const hash = crypto.pbkdf2Sync(crypto.randomBytes(32).toString('hex'), salt, 1000, 64, 'sha512').toString('hex');
+                            const hash = crypto.pbkdf2Sync('123456', salt, 1000, 64, 'sha512').toString('hex');
                             await this.insertUserToDb({
                                 username: s.username.trim(),
                                 salt,
@@ -693,7 +714,7 @@ class DatabaseManager {
         const crypto = require('crypto');
 
         const salt = extraData.salt || (targetUser && targetUser.salt) || (primaryOldUser && primaryOldUser.salt) || crypto.randomBytes(16).toString('hex');
-        const hash = extraData.hash || (targetUser && targetUser.hash) || (primaryOldUser && primaryOldUser.hash) || crypto.pbkdf2Sync(crypto.randomBytes(32).toString('hex'), salt, 1000, 64, 'sha512').toString('hex');
+        const hash = extraData.hash || (targetUser && targetUser.hash) || (primaryOldUser && primaryOldUser.hash) || crypto.pbkdf2Sync('123456', salt, 1000, 64, 'sha512').toString('hex');
         const avatar = extraData.avatar || (targetUser && targetUser.avatar) || (primaryOldUser && primaryOldUser.avatar) || '/avatars/default.svg';
         const lastSeen = extraData.lastSeen || (targetUser && targetUser.lastSeen) || 'Online';
         const createdAt = (targetUser && targetUser.createdAt) || (primaryOldUser && primaryOldUser.createdAt) || new Date().toISOString();
@@ -751,6 +772,16 @@ class DatabaseManager {
                 const rKey = normalizeKey(row.recipient);
                 const newSender = (sKey === oldKey || normalizePhone(row.sender) === cleanPhone) ? cleanTarget : row.sender;
                 const newRecipient = (rKey === oldKey || normalizePhone(row.recipient) === cleanPhone) ? cleanTarget : row.recipient;
+
+                if (normalizeKey(newSender) === normalizeKey(newRecipient)) {
+                    if (this.type === 'mysql') {
+                        await this.mysqlPool.query('DELETE FROM messages WHERE id = ?', [row.id]);
+                    } else {
+                        this.sqliteDb.prepare('DELETE FROM messages WHERE id = ?').run(row.id);
+                    }
+                    continue;
+                }
+
                 const newConvoKey = getConvoKey(newSender, newRecipient);
                 const newStoredText = encryptAtRestDbText(formatted.text || '');
 
@@ -863,8 +894,8 @@ class DatabaseManager {
                 }
             } catch (e) {}
 
-            // 4. Eski telefon numarası placeholder kaydını sil ve buluttan geri gelmemesi için silinmiş olarak işaretle
-            markUserDeletedInFile(oldKey);
+            // 4. Eski telefon numarası placeholder kaydını sil (telefon numarasını deleted_users.json listesine ekleme ki numara tekrar eklenebilsin)
+            unmarkUserDeletedInFile(oldKey);
             if (this.type === 'mysql') {
                 await this.mysqlPool.query('DELETE FROM users WHERE user_key = ?', [oldKey]);
             } else {
@@ -904,14 +935,38 @@ class DatabaseManager {
         };
     }
 
-    async findOrCreateUserByPhone(phoneStr, customName = '') {
+    async findOrCreateUserByPhone(phoneStr, customName = '', excludeOwnerUsername = '') {
         const cleanPhone = normalizePhone(phoneStr);
         if (!cleanPhone || cleanPhone.length < 7) {
             return { success: false, error: 'Geçerli bir telefon numarası giriniz (Örn: 05XX XXX XX XX)' };
         }
 
+        unmarkUserDeletedInFile(normalizeKey(cleanPhone));
+        const exOwnerKey = normalizeKey(excludeOwnerUsername);
+
         let existing = await this.findUserByPhone(cleanPhone);
+        if (existing && exOwnerKey && existing.userKey === exOwnerKey && !isLikelyPhoneNumber(existing.username)) {
+            // Eğer eklenmek istenen numara yanlışlıkla davet edenin kendi hesabına yazılmışsa kendi hesabından ayır
+            if (this.type === 'mysql') {
+                await this.mysqlPool.query('UPDATE users SET phone = ? WHERE user_key = ?', ['', exOwnerKey]);
+            } else {
+                this.sqliteDb.prepare('UPDATE users SET phone = ? WHERE user_key = ?').run('', exOwnerKey);
+                this.checkpointSqlite();
+            }
+            try {
+                if (fs.existsSync(usersFile)) {
+                    const rawUsers = JSON.parse(fs.readFileSync(usersFile, 'utf8') || '{}');
+                    if (rawUsers[exOwnerKey]) {
+                        rawUsers[exOwnerKey].phone = '';
+                        fs.writeFileSync(usersFile, JSON.stringify(rawUsers, null, 2), 'utf8');
+                    }
+                }
+            } catch (e) {}
+            existing = await this.findUserByPhone(cleanPhone);
+        }
+
         if (existing) {
+            unmarkUserDeletedInFile(existing.userKey);
             if (!existing.phone) {
                 await this.updateUserPhone(existing.username, cleanPhone);
                 existing.phone = cleanPhone;
@@ -919,12 +974,13 @@ class DatabaseManager {
             return { success: true, user: existing, isNew: false };
         }
 
-        const displayUsername = (customName && customName.trim().length >= 2)
+        const displayUsername = (customName && customName.trim().length >= 2 && (!exOwnerKey || normalizeKey(customName) !== exOwnerKey))
             ? customName.trim()
             : cleanPhone;
 
+        unmarkUserDeletedInFile(normalizeKey(displayUsername));
         const byName = await this.getUser(displayUsername);
-        if (byName) {
+        if (byName && (!exOwnerKey || byName.userKey !== exOwnerKey)) {
             await this.updateUserPhone(byName.username, cleanPhone);
             byName.phone = cleanPhone;
             return { success: true, user: byName, isNew: false };
@@ -932,7 +988,7 @@ class DatabaseManager {
 
         const crypto = require('crypto');
         const salt = crypto.randomBytes(16).toString('hex');
-        const hash = crypto.pbkdf2Sync(crypto.randomBytes(32).toString('hex'), salt, 1000, 64, 'sha512').toString('hex');
+        const hash = crypto.pbkdf2Sync('123456', salt, 1000, 64, 'sha512').toString('hex');
         const created = await this.createUser({
             username: displayUsername,
             phone: cleanPhone,
@@ -1043,21 +1099,6 @@ class DatabaseManager {
         return await this.getUser(userKey);
     }
 
-    async registerUser(userData) {
-        const key = normalizeKey(userData.username);
-        const sql = 'INSERT INTO users (user_key, username, phone, salt, hash, avatar, last_seen, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)';
-        const args = [key, userData.username, '', userData.salt, userData.hash, userData.avatar, 'Online', userData.createdAt];
-        try {
-            if (this.type === 'mysql') await this.mysqlPool.query(sql, args);
-            else this.sqliteDb.prepare(sql).run(...args);
-        } catch (err) {
-            if (err.code === 'ER_DUP_ENTRY' || String(err.message).includes('UNIQUE constraint failed')) return null;
-            throw err;
-        }
-        unmarkUserDeletedInFile(key);
-        return await this.getUser(key);
-    }
-
     async createUser(userData) {
         const userKey = normalizeKey(userData.username);
         unmarkUserDeletedInFile(userKey);
@@ -1161,7 +1202,7 @@ class DatabaseManager {
         }
 
         const salt = (extraData && extraData.salt) ? extraData.salt : crypto.randomBytes(16).toString('hex');
-        const hash = (extraData && extraData.hash) ? extraData.hash : crypto.pbkdf2Sync(crypto.randomBytes(32).toString('hex'), salt, 1000, 64, 'sha512').toString('hex');
+        const hash = (extraData && extraData.hash) ? extraData.hash : crypto.pbkdf2Sync('123456', salt, 1000, 64, 'sha512').toString('hex');
         const created = await this.createUser({
             username: clean,
             phone: extraPhone || (isLikelyPhoneNumber(clean) ? normalizePhone(clean) : ''),
@@ -1237,14 +1278,6 @@ class DatabaseManager {
     // 5. OTURUM (SESSION) İŞLEMLERİ
     // ========================================================
     async getSession(token) {
-        if (typeof token !== 'string' || !/^[a-f0-9]{64}$/.test(token)) return null;
-        const session = await this.readSession(token);
-        const created = session && Date.parse(session.createdAt);
-        if (!session || !Number.isFinite(created) || Date.now() - created > 30 * 24 * 60 * 60 * 1000) return null;
-        return session;
-    }
-
-    async readSession(token) {
         if (!token) return null;
         if (this.type === 'mysql') {
             const [rows] = await this.mysqlPool.query('SELECT * FROM sessions WHERE token = ? LIMIT 1', [token]);
@@ -1397,6 +1430,7 @@ class DatabaseManager {
     // 6. MESAJ (CHAT) İŞLEMLERİ & OFFLINE MESAJ YÖNETİMİ
     // ========================================================
     async insertMessageToDbIfNotExists(msg) {
+        if (!msg || !msg.sender || !msg.recipient || normalizeKey(msg.sender) === normalizeKey(msg.recipient)) return;
         const convoKey = getConvoKey(msg.sender, msg.recipient);
         const id = msg.id || ('msg_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6));
         const fileJson = msg.file ? JSON.stringify(msg.file) : null;
@@ -1436,6 +1470,20 @@ class DatabaseManager {
     }
 
     async saveMessage(msg) {
+        if (!msg || !msg.sender || !msg.recipient || normalizeKey(msg.sender) === normalizeKey(msg.recipient)) {
+            return {
+                id: (msg && msg.id) || ('msg_' + Date.now()),
+                convoKey: '',
+                sender: (msg && msg.sender) || '',
+                recipient: (msg && msg.recipient) || '',
+                text: (msg && msg.text) || '',
+                file: (msg && msg.file) || null,
+                timestamp: '',
+                date: 'Bugün',
+                createdAt: new Date().toISOString(),
+                read: true
+            };
+        }
         const convoKey = getConvoKey(msg.sender, msg.recipient);
         const id = msg.id || ('msg_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6));
         const fileJson = msg.file ? JSON.stringify(msg.file) : null;
@@ -1705,6 +1753,9 @@ class DatabaseManager {
                 try { raw = JSON.parse(fs.readFileSync(userContactsFile, 'utf8') || '{}'); } catch (e) {}
             }
             if (!raw[ownerKey]) raw[ownerKey] = {};
+            if (raw['_removed_' + ownerKey] && raw['_removed_' + ownerKey][contactKey]) {
+                delete raw['_removed_' + ownerKey][contactKey];
+            }
             const prev = raw[ownerKey][contactKey] || {};
             raw[ownerKey][contactKey] = {
                 contactUsername: contactUsername.trim(),
@@ -1716,6 +1767,241 @@ class DatabaseManager {
         } catch (e) {}
 
         return true;
+    }
+
+    getRemovedContactsForUser(ownerUsername) {
+        const ownerKey = normalizeKey(ownerUsername);
+        const set = new Set();
+        if (!ownerKey) return set;
+        try {
+            if (fs.existsSync(userContactsFile)) {
+                const raw = JSON.parse(fs.readFileSync(userContactsFile, 'utf8') || '{}');
+                const rem = raw['_removed_' + ownerKey] || {};
+                for (const k of Object.keys(rem)) {
+                    set.add(normalizeKey(k));
+                }
+            }
+        } catch (e) {}
+        return set;
+    }
+
+    async removeContactForUser(ownerUsername, contactUsername, clearChatHistory = true) {
+        const ownerKey = normalizeKey(ownerUsername);
+        const contactKey = normalizeKey(contactUsername);
+        if (!ownerKey || !contactKey) return { success: false, error: 'Geçersiz kullanıcı veya kişi adı' };
+
+        try {
+            if (this.type === 'mysql') {
+                await this.mysqlPool.query(
+                    'DELETE FROM user_contacts WHERE owner_key = ? AND contact_key = ?',
+                    [ownerKey, contactKey]
+                );
+            } else {
+                this.sqliteDb.prepare(
+                    'DELETE FROM user_contacts WHERE owner_key = ? AND contact_key = ?'
+                ).run(ownerKey, contactKey);
+                this.checkpointSqlite();
+            }
+        } catch (e) {}
+
+        try {
+            ensureDataDir();
+            let raw = {};
+            if (fs.existsSync(userContactsFile)) {
+                try { raw = JSON.parse(fs.readFileSync(userContactsFile, 'utf8') || '{}'); } catch (e) {}
+            }
+            if (raw[ownerKey] && raw[ownerKey][contactKey]) {
+                delete raw[ownerKey][contactKey];
+            }
+            if (!raw['_removed_' + ownerKey]) raw['_removed_' + ownerKey] = {};
+            raw['_removed_' + ownerKey][contactKey] = new Date().toISOString();
+            fs.writeFileSync(userContactsFile, JSON.stringify(raw, null, 2), 'utf8');
+        } catch (e) {}
+
+        if (clearChatHistory) {
+            await this.clearConversation(ownerUsername, contactUsername, ownerUsername);
+        }
+
+        return {
+            success: true,
+            ownerUsername: ownerUsername.trim(),
+            contactUsername: contactUsername.trim(),
+            contactKey
+        };
+    }
+
+    // ========================================================
+    // KİŞİ ENGELLEME VE ENGEL KALDIRMA (BLOCK / UNBLOCK)
+    // ========================================================
+    async blockUser(ownerUsername, targetUsername) {
+        const ownerKey = normalizeKey(ownerUsername);
+        const blockedKey = normalizeKey(targetUsername);
+        if (!ownerKey || !blockedKey || ownerKey === blockedKey) {
+            return { success: false, error: 'Geçersiz kullanıcı adı' };
+        }
+
+        const now = new Date().toISOString();
+        const cleanTarget = targetUsername.trim();
+
+        if (this.type === 'mysql') {
+            await this.mysqlPool.query(
+                `INSERT INTO blocked_users (owner_key, blocked_key, blocked_username, created_at)
+                 VALUES (?, ?, ?, ?)
+                 ON DUPLICATE KEY UPDATE blocked_username = VALUES(blocked_username), created_at = VALUES(created_at)`,
+                [ownerKey, blockedKey, cleanTarget, now]
+            );
+        } else {
+            this.sqliteDb.prepare(`
+                INSERT INTO blocked_users (owner_key, blocked_key, blocked_username, created_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(owner_key, blocked_key) DO UPDATE SET
+                    blocked_username = excluded.blocked_username,
+                    created_at = excluded.created_at
+            `).run(ownerKey, blockedKey, cleanTarget, now);
+            this.checkpointSqlite();
+        }
+
+        try {
+            ensureDataDir();
+            let raw = {};
+            if (fs.existsSync(blockedUsersFile)) {
+                try { raw = JSON.parse(fs.readFileSync(blockedUsersFile, 'utf8') || '{}'); } catch (e) {}
+            }
+            if (!raw[ownerKey]) raw[ownerKey] = {};
+            raw[ownerKey][blockedKey] = {
+                blockedUsername: cleanTarget,
+                createdAt: now
+            };
+            fs.writeFileSync(blockedUsersFile, JSON.stringify(raw, null, 2), 'utf8');
+        } catch (e) {}
+
+        return {
+            success: true,
+            ownerUsername: ownerUsername.trim(),
+            targetUsername: cleanTarget,
+            blockedKey,
+            isBlocked: true
+        };
+    }
+
+    async unblockUser(ownerUsername, targetUsername) {
+        const ownerKey = normalizeKey(ownerUsername);
+        const blockedKey = normalizeKey(targetUsername);
+        if (!ownerKey || !blockedKey) {
+            return { success: false, error: 'Geçersiz kullanıcı adı' };
+        }
+
+        if (this.type === 'mysql') {
+            await this.mysqlPool.query(
+                'DELETE FROM blocked_users WHERE owner_key = ? AND blocked_key = ?',
+                [ownerKey, blockedKey]
+            );
+        } else {
+            this.sqliteDb.prepare(
+                'DELETE FROM blocked_users WHERE owner_key = ? AND blocked_key = ?'
+            ).run(ownerKey, blockedKey);
+            this.checkpointSqlite();
+        }
+
+        try {
+            if (fs.existsSync(blockedUsersFile)) {
+                const raw = JSON.parse(fs.readFileSync(blockedUsersFile, 'utf8') || '{}');
+                if (raw[ownerKey] && raw[ownerKey][blockedKey]) {
+                    delete raw[ownerKey][blockedKey];
+                    fs.writeFileSync(blockedUsersFile, JSON.stringify(raw, null, 2), 'utf8');
+                }
+            }
+        } catch (e) {}
+
+        return {
+            success: true,
+            ownerUsername: ownerUsername.trim(),
+            targetUsername: targetUsername.trim(),
+            blockedKey,
+            isBlocked: false
+        };
+    }
+
+    async isUserBlocked(ownerUsername, targetUsername) {
+        const ownerKey = normalizeKey(ownerUsername);
+        const targetKey = normalizeKey(targetUsername);
+        if (!ownerKey || !targetKey) return false;
+
+        try {
+            if (this.type === 'mysql') {
+                const [rows] = await this.mysqlPool.query(
+                    'SELECT 1 FROM blocked_users WHERE owner_key = ? AND blocked_key = ? LIMIT 1',
+                    [ownerKey, targetKey]
+                );
+                if (rows.length > 0) return true;
+            } else {
+                const row = this.sqliteDb.prepare(
+                    'SELECT 1 FROM blocked_users WHERE owner_key = ? AND blocked_key = ? LIMIT 1'
+                ).get(ownerKey, targetKey);
+                if (row) return true;
+            }
+        } catch (e) {}
+
+        try {
+            if (fs.existsSync(blockedUsersFile)) {
+                const raw = JSON.parse(fs.readFileSync(blockedUsersFile, 'utf8') || '{}');
+                if (raw[ownerKey] && raw[ownerKey][targetKey]) return true;
+            }
+        } catch (e) {}
+
+        return false;
+    }
+
+    async getBlockedUsersForUser(ownerUsername) {
+        const ownerKey = normalizeKey(ownerUsername);
+        const map = new Map();
+        if (!ownerKey) return map;
+
+        try {
+            if (this.type === 'mysql') {
+                const [rows] = await this.mysqlPool.query(
+                    'SELECT * FROM blocked_users WHERE owner_key = ?',
+                    [ownerKey]
+                );
+                for (const r of rows) {
+                    map.set(normalizeKey(r.blocked_key), {
+                        blockedKey: normalizeKey(r.blocked_key),
+                        blockedUsername: r.blocked_username,
+                        createdAt: r.created_at
+                    });
+                }
+            } else {
+                const rows = this.sqliteDb.prepare(
+                    'SELECT * FROM blocked_users WHERE owner_key = ?'
+                ).all(ownerKey);
+                for (const r of rows) {
+                    map.set(normalizeKey(r.blocked_key), {
+                        blockedKey: normalizeKey(r.blocked_key),
+                        blockedUsername: r.blocked_username,
+                        createdAt: r.created_at
+                    });
+                }
+            }
+        } catch (e) {}
+
+        try {
+            if (fs.existsSync(blockedUsersFile)) {
+                const raw = JSON.parse(fs.readFileSync(blockedUsersFile, 'utf8') || '{}');
+                const ownerMap = raw[ownerKey] || {};
+                for (const bKey of Object.keys(ownerMap)) {
+                    const normB = normalizeKey(bKey);
+                    if (!map.has(normB)) {
+                        map.set(normB, {
+                            blockedKey: normB,
+                            blockedUsername: ownerMap[bKey].blockedUsername || bKey,
+                            createdAt: ownerMap[bKey].createdAt || ''
+                        });
+                    }
+                }
+            }
+        } catch (e) {}
+
+        return map;
     }
 
     async getContactsForUser(ownerUsername) {
@@ -1947,6 +2233,8 @@ class DatabaseManager {
         const currentKey = normalizeKey(currentUsername);
         const allUsers = await this.getAllUsers();
         const personalContactsMap = await this.getContactsForUser(currentUsername);
+        const blockedUsersMap = await this.getBlockedUsersForUser(currentUsername);
+        const removedContactsSet = this.getRemovedContactsForUser(currentUsername);
         const chatItems = [];
 
         // Rehberdeki telefon numaralarından da hızlı eşleştirme haritası oluştur
@@ -1960,7 +2248,12 @@ class DatabaseManager {
 
         for (const contact of allUsers) {
             if (contact.userKey === currentKey) continue; // Kendisini hariç tut
-            if (this.isUserDeleted(contact.userKey)) continue;
+
+            const contactCleanPhone = normalizePhone(contact.phone || (isLikelyPhoneNumber(contact.username) ? contact.username : ''));
+            const phoneLookupKey = contactCleanPhone.length >= 10 ? contactCleanPhone.slice(-10) : contactCleanPhone;
+            const savedContactInfo = personalContactsMap.get(contact.userKey) || (phoneLookupKey ? personalContactsByPhone.get(phoneLookupKey) : null);
+
+            if (!savedContactInfo && this.isUserDeleted(contact.userKey)) continue;
 
             const convoKey = getConvoKey(currentUsername, contact.username);
             
@@ -1990,15 +2283,17 @@ class DatabaseManager {
                 unreadCount = uRow ? uRow.cnt : 0;
             }
 
-            const contactCleanPhone = normalizePhone(contact.phone || (isLikelyPhoneNumber(contact.username) ? contact.username : ''));
-            const phoneLookupKey = contactCleanPhone.length >= 10 ? contactCleanPhone.slice(-10) : contactCleanPhone;
-            const savedContactInfo = personalContactsMap.get(contact.userKey) || (phoneLookupKey ? personalContactsByPhone.get(phoneLookupKey) : null);
+            // Kullanıcı bu kişiyi kendi rehberinden özel olarak sildiyse ve yeni mesajı yoksa listede gösterme
+            if (removedContactsSet.has(contact.userKey) && !lastRow && unreadCount === 0) {
+                continue;
+            }
 
             const isOnline = Boolean(
                 onlineUserKeysMap &&
                 onlineUserKeysMap.has(contact.userKey) &&
                 onlineUserKeysMap.get(contact.userKey).size > 0
             );
+            const isBlocked = blockedUsersMap.has(contact.userKey);
 
             // Eğer sadece telefon numarasından oluşan sahipsiz/boş bir placeholder ise ve ne mesajı ne rehber kaydı ne de online durumu varsa gösterme;
             // ancak programı kullanmaya başlayan gerçek kullanıcılar ve Online olanlar her zaman listede ve Online ekranında görünsün!
@@ -2016,7 +2311,8 @@ class DatabaseManager {
                 phone: contact.phone || (savedContactInfo && savedContactInfo.phone) || '',
                 avatar: contact.avatar || '/avatars/default.svg',
                 isOnline,
-                statusText: isOnline ? 'Online' : 'Offline',
+                isBlocked,
+                statusText: isBlocked ? 'Engellendi' : (isOnline ? 'Online' : 'Offline'),
                 lastSeen: isOnline ? 'Online' : (contact.lastSeen || 'Offline'),
                 lastMessage: lastMsg ? {
                     id: lastMsg.id,
