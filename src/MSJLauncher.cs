@@ -34,10 +34,23 @@ namespace MSJ
         [DllImport("user32.dll")]
         private static extern bool IsWindowVisible(IntPtr hWnd);
 
+        [DllImport("user32.dll")]
+        private static extern bool IsIconic(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern bool BringWindowToTop(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+
         private const int SW_RESTORE = 9;
+        private const int SW_SHOW = 5;
+        private const byte VK_MENU = 0x12;
+        private const uint KEYEVENTF_EXTENDEDKEY = 0x0001;
+        private const uint KEYEVENTF_KEYUP = 0x0002;
         private static Process lastAppBrowserProcess = null;
 
-        public static bool IsAppWindowVisible()
+        public static IntPtr FindExistingAppWindowHandle()
         {
             try
             {
@@ -46,7 +59,11 @@ namespace MSJ
                     lastAppBrowserProcess.Refresh();
                     if (lastAppBrowserProcess.MainWindowHandle != IntPtr.Zero && IsWindowVisible(lastAppBrowserProcess.MainWindowHandle))
                     {
-                        return true;
+                        string t = lastAppBrowserProcess.MainWindowTitle ?? "";
+                        if (string.IsNullOrEmpty(t) || t.IndexOf("HIHaberle", StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            return lastAppBrowserProcess.MainWindowHandle;
+                        }
                     }
                 }
 
@@ -63,7 +80,7 @@ namespace MSJ
                                 string title = p.MainWindowTitle ?? "";
                                 if (title.IndexOf("HIHaberle", StringComparison.OrdinalIgnoreCase) >= 0)
                                 {
-                                    return true;
+                                    return p.MainWindowHandle;
                                 }
                             }
                         }
@@ -72,7 +89,39 @@ namespace MSJ
                 }
             }
             catch { }
-            return false;
+            return IntPtr.Zero;
+        }
+
+        public static void ForceForegroundWindow(IntPtr hWnd)
+        {
+            if (hWnd == IntPtr.Zero) return;
+            try
+            {
+                // Alt tuşu simülasyonu ile Windows'un arka plan odak kilidini aş
+                keybd_event(VK_MENU, 0, KEYEVENTF_EXTENDEDKEY, UIntPtr.Zero);
+                keybd_event(VK_MENU, 0, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP, UIntPtr.Zero);
+                if (IsIconic(hWnd))
+                {
+                    ShowWindow(hWnd, SW_RESTORE);
+                }
+                else
+                {
+                    ShowWindow(hWnd, SW_SHOW);
+                }
+                BringWindowToTop(hWnd);
+                SetForegroundWindow(hWnd);
+            }
+            catch { }
+        }
+
+        public static void RestoreAndFocusWindow(IntPtr hWnd)
+        {
+            ForceForegroundWindow(hWnd);
+        }
+
+        public static bool IsAppWindowVisible()
+        {
+            return FindExistingAppWindowHandle() != IntPtr.Zero;
         }
 
         [STAThread]
@@ -215,10 +264,7 @@ namespace MSJ
                 {
                     Path.Combine(defaultDir, "Cache"),
                     Path.Combine(defaultDir, "Code Cache"),
-                    Path.Combine(defaultDir, "GPUCache"),
-                    Path.Combine(defaultDir, "Service Worker", "CacheStorage"),
-                    Path.Combine(defaultDir, "Service Worker", "ScriptCache"),
-                    Path.Combine(defaultDir, "Service Worker")
+                    Path.Combine(defaultDir, "GPUCache")
                 };
 
                 foreach (string d in cacheDirs)
@@ -396,10 +442,8 @@ namespace MSJ
                                     }
                                     else if (newLastId > lastNotificationId)
                                     {
-                                        var itemMatches = Regex.Matches(res, "\\{[^\\{\\}]*\"type\"\\s*:\\s*\"([^\"]+)\"[^\\{\\}]*\\}");
-                                        foreach (Match im in itemMatches)
+                                        foreach (string block in ExtractNotificationItemBlocks(res))
                                         {
-                                            string block = im.Value;
                                             string type = UnescapeJson(Regex.Match(block, "\"type\"\\s*:\\s*\"([^\"]+)\"").Groups[1].Value);
                                             string sender = UnescapeJson(Regex.Match(block, "\"sender\"\\s*:\\s*\"([^\"]*)\"").Groups[1].Value);
                                             string recipient = UnescapeJson(Regex.Match(block, "\"recipient\"\\s*:\\s*\"([^\"]*)\"").Groups[1].Value);
@@ -433,6 +477,62 @@ namespace MSJ
             notificationThread.Start();
         }
 
+        static System.Collections.Generic.List<string> ExtractNotificationItemBlocks(string json)
+        {
+            var results = new System.Collections.Generic.List<string>();
+            if (string.IsNullOrEmpty(json)) return results;
+
+            int itemsIdx = json.IndexOf("\"items\"");
+            int startBracket = itemsIdx >= 0 ? json.IndexOf('[', itemsIdx) : -1;
+            if (startBracket < 0) return results;
+
+            int depth = 0;
+            int objStart = -1;
+            bool inStr = false;
+            bool escape = false;
+
+            for (int i = startBracket + 1; i < json.Length; i++)
+            {
+                char c = json[i];
+                if (escape)
+                {
+                    escape = false;
+                    continue;
+                }
+                if (c == '\\')
+                {
+                    escape = true;
+                    continue;
+                }
+                if (c == '"')
+                {
+                    inStr = !inStr;
+                    continue;
+                }
+                if (inStr) continue;
+
+                if (c == '{')
+                {
+                    if (depth == 0) objStart = i;
+                    depth++;
+                }
+                else if (c == '}')
+                {
+                    depth--;
+                    if (depth == 0 && objStart >= 0)
+                    {
+                        results.Add(json.Substring(objStart, i - objStart + 1));
+                        objStart = -1;
+                    }
+                }
+                else if (c == ']' && depth == 0)
+                {
+                    break;
+                }
+            }
+            return results;
+        }
+
         static string UnescapeJson(string s)
         {
             if (string.IsNullOrEmpty(s)) return "";
@@ -450,27 +550,17 @@ namespace MSJ
                 trayIcon.ShowBalloonTip(6000, "💬 Yeni Mesaj: " + sender, msgPreview, ToolTipIcon.Info);
             }
 
-            // Program penceresi kapalı olsa bile Masaüstü Bildirim Kartını (Hızlı Yanıtlı) ekrana düşür ve pencere kapalıysa otomatik aç
+            // Program penceresi kapalı veya kullanıcı offline olsa bile Masaüstü Bildirim Kartını ekrana düşür ve pencereyi otomatik aç
             if (uiSyncControl != null && uiSyncControl.IsHandleCreated)
             {
                 uiSyncControl.BeginInvoke(new Action(() =>
                 {
                     try
                     {
-                        bool appWindowVisible = IsAppWindowVisible();
+                        IntPtr existingWnd = FindExistingAppWindowHandle();
 
-                        MessagePopupForm popup = new MessagePopupForm(sender, recipient, msgPreview);
-                        popup.Show();
-                        try
-                        {
-                            ShowWindow(popup.Handle, SW_RESTORE);
-                            SetForegroundWindow(popup.Handle);
-                        }
-                        catch { }
-
-                        // Yalnızca program penceresi kapalıysa (!appWindowVisible) pencereyi otomatik aç;
-                        // pencere zaten açıksa mevcut kullanıcı oturumuna yeni sekme açarak müdahale etme!
-                        if (!appWindowVisible)
+                        // Program penceresi kapalıysa veya hedef kullanıcı offline ise otomatik aç; simge durumundaysa öne getir!
+                        if (existingWnd == IntPtr.Zero || !isTargetOnline)
                         {
                             string q = "?openChat=" + Uri.EscapeDataString(sender);
                             if (!string.IsNullOrEmpty(recipient))
@@ -479,6 +569,18 @@ namespace MSJ
                             }
                             OpenAppWindow(q);
                         }
+                        else
+                        {
+                            RestoreAndFocusWindow(existingWnd);
+                        }
+
+                        MessagePopupForm popup = new MessagePopupForm(sender, recipient, msgPreview);
+                        popup.Show();
+                        try
+                        {
+                            ForceForegroundWindow(popup.Handle);
+                        }
+                        catch { }
                     }
                     catch { }
                 }));
@@ -503,8 +605,8 @@ namespace MSJ
                 {
                     try
                     {
-                        bool appWindowVisible = IsAppWindowVisible();
-                        if (!appWindowVisible)
+                        IntPtr existingWnd = FindExistingAppWindowHandle();
+                        if (existingWnd == IntPtr.Zero || !isTargetOnline)
                         {
                             string q = "?openChat=" + Uri.EscapeDataString(caller) + "&incomingCall=1";
                             if (!string.IsNullOrEmpty(recipient))
@@ -512,6 +614,10 @@ namespace MSJ
                                 q += "&autoUser=" + Uri.EscapeDataString(recipient);
                             }
                             OpenAppWindow(q);
+                        }
+                        else
+                        {
+                            RestoreAndFocusWindow(existingWnd);
                         }
 
                         if (activeCallPopup != null && !activeCallPopup.IsDisposed)
@@ -522,8 +628,7 @@ namespace MSJ
                         activeCallPopup.Show();
                         try
                         {
-                            ShowWindow(activeCallPopup.Handle, SW_RESTORE);
-                            SetForegroundWindow(activeCallPopup.Handle);
+                            ForceForegroundWindow(activeCallPopup.Handle);
                         }
                         catch { }
                     }

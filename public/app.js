@@ -194,12 +194,16 @@ function getE2EESecurityCode(u1, u2) {
 
 window.showE2EEVerificationDialog = function() {
     if (!currentUser || !activeContact) return;
+    if (window.MSJCryptoEngine && typeof window.MSJCryptoEngine.openInteractiveE2EEVerificationModal === 'function') {
+        window.MSJCryptoEngine.openInteractiveE2EEVerificationModal(currentUser.username, activeContact.username);
+        return;
+    }
     const code = getE2EESecurityCode(currentUser.username, activeContact.username);
     alert(
         `🔒 Uçtan Uca Şifreleme (E2EE) Doğrulaması\n\n` +
         `${currentUser.username} ↔ ${activeContact.username} arasındaki mesajlar ve aramalar 256-bit uçtan uca şifreleme ile korunmaktadır.\n\n` +
         `60 Haneli Güvenlik Kodunuz:\n${code}\n\n` +
-        `Yalnızca siz ve ${activeContact.username} bu sohbetteki mesajları okuyabilir veya aramaları dinleyebilirsiniz. Diğer kullanıcılar bu içerikleri kesinlikle göremez.`
+        `Yalnızca siz ve ${activeContact.username} bu sohbetteki mesajları okuyabilir veya aramaları dinleyebilirsiniz.`
     );
 };
 
@@ -326,27 +330,119 @@ const rtcConfig = {
     iceCandidatePoolSize: 10
 };
 
-// PWA Service Worker Kaydı (Arka Planda Bildirim ve Arama Yakalama)
+// PWA Service Worker Kaydı (Arka Planda Bildirim ve Arama Yakalama - WhatsApp / Signal / Telegram Tarzı)
 if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
-        navigator.serviceWorker.register('/sw.js').then((reg) => {
-            if (currentUser && reg.active) {
-                reg.active.postMessage({ type: 'INIT_USER', username: currentUser.username });
+        navigator.serviceWorker.register('/sw.js').then(async (reg) => {
+            const activeUser = (currentUser && currentUser.username) || localStorage.getItem('msj_saved_username') || '';
+            if (activeUser && reg.active) {
+                reg.active.postMessage({ type: 'INIT_USER', username: activeUser });
+            }
+            // Periyodik Arka Plan Senkronizasyonu (Destekleyen tarayıcılarda uygulama kapalıyken uyandırır)
+            if ('periodicSync' in reg) {
+                try {
+                    await reg.periodicSync.register('msj-bg-sync', { minInterval: 60 * 1000 });
+                } catch (e) {}
             }
         }).catch(() => {});
     });
 
-    navigator.serviceWorker.addEventListener('message', (event) => {
-        if (event.data && event.data.type === 'NOTIFICATION_CLICK' && event.data.url) {
+    navigator.serviceWorker.addEventListener('message', async (event) => {
+        if (!event.data) return;
+        if (event.data.type === 'NOTIFICATION_CLICK' || event.data.type === 'SW_WAKEUP_EVENT') {
             try {
-                const u = new URL(event.data.url, window.location.origin);
-                const openChatUser = u.searchParams.get('openChat');
+                try { window.focus(); } catch (e) {}
+                const rawUrl = event.data.url || '';
+                const u = rawUrl ? new URL(rawUrl, window.location.origin) : null;
+                const openChatUser = (u && u.searchParams.get('openChat')) || (event.data.item && event.data.item.sender) || '';
+                const isCall = (u && u.searchParams.get('incomingCall') === '1') || (event.data.item && event.data.item.type === 'call');
+                const isAutoAccept = (u && u.searchParams.get('autoAcceptCall') === '1') || event.data.action === 'accept';
+                const autoUser = (u && u.searchParams.get('autoUser')) || (event.data.item && event.data.item.recipient) || '';
+
+                if (!currentUser && autoUser) {
+                    await quickLoginAsRegisteredUser(autoUser);
+                }
+
                 if (openChatUser) {
                     openChatForSender(openChatUser);
+                }
+
+                if (isCall && openChatUser) {
+                    const callItem = (event.data.item && event.data.item.callPayload) || event.data.item || {};
+                    triggerIncomingCallUi({
+                        callerUsername: openChatUser,
+                        callerAvatar: callItem.callerAvatar || '/avatars/default.svg',
+                        callType: callItem.callType || 'voice',
+                        callerSocketId: callItem.callerSocketId || currentTargetSocketId
+                    }, isAutoAccept);
                 }
             } catch (e) {}
         }
     });
+}
+
+let activeScreenWakeLock = null;
+async function requestCallWakeLock() {
+    try {
+        if ('wakeLock' in navigator && !activeScreenWakeLock) {
+            activeScreenWakeLock = await navigator.wakeLock.request('screen');
+            activeScreenWakeLock.addEventListener('release', () => {
+                activeScreenWakeLock = null;
+            });
+        }
+    } catch (e) {}
+}
+
+function releaseCallWakeLock() {
+    try {
+        if (activeScreenWakeLock) {
+            activeScreenWakeLock.release().catch(() => {});
+            activeScreenWakeLock = null;
+        }
+    } catch (e) {}
+}
+
+function isUserCurrentlyTyping() {
+    return Boolean(
+        activeContact &&
+        messageInput &&
+        document.activeElement === messageInput &&
+        messageInput.value.trim().length > 0
+    );
+}
+
+function triggerIncomingCallUi(callData, autoAccept = false) {
+    if (!callData || !callData.callerUsername) return;
+    if (currentUser && normalizeKey(callData.callerUsername) === normalizeKey(currentUser.username)) return;
+    if (activeCallScreen && activeCallScreen.style.display === 'flex') return;
+
+    currentTargetSocketId = callData.callerSocketId || currentTargetSocketId;
+    currentCallTarget = callData.callerUsername;
+    currentCallType = callData.callType || 'voice';
+
+    if (incomingCallerName) incomingCallerName.textContent = callData.callerUsername;
+    if (incomingCallerAvatar) incomingCallerAvatar.src = callData.callerAvatar || '/avatars/default.svg';
+    if (incomingCallType) {
+        incomingCallType.textContent = currentCallType === 'video' ? 'Gelen Görüntülü Arama...' : 'Gelen Sesli Arama...';
+    }
+
+    if (incomingCallModal && incomingCallModal.style.display !== 'flex') {
+        incomingCallModal.style.display = 'flex';
+        playRingtone();
+        requestCallWakeLock();
+    }
+
+    if (!activeContact || !isUserCurrentlyTyping()) {
+        openChatForSender(callData.callerUsername);
+    }
+
+    if (autoAccept && btnAcceptCall) {
+        setTimeout(() => {
+            if (incomingCallModal && incomingCallModal.style.display === 'flex') {
+                btnAcceptCall.click();
+            }
+        }, 450);
+    }
 }
 
 // DOM Referansları
@@ -1092,12 +1188,33 @@ function isMessageForCurrentUserAndContact(msg, contactKey) {
     return (sKey === myKey && rKey === contactKey) || (sKey === contactKey && rKey === myKey);
 }
 
+function getPersonalPhoneBookForCurrentUser() {
+    if (!currentUser || !currentUser.username) return [];
+    try {
+        const key = 'msj_phone_book_' + normalizeKey(currentUser.username);
+        const raw = localStorage.getItem(key);
+        if (raw) {
+            const parsed = JSON.parse(raw);
+            if (Array.isArray(parsed)) return parsed;
+        }
+    } catch (e) {}
+    return [];
+}
+
+function savePersonalPhoneBookForCurrentUser(list) {
+    if (!currentUser || !currentUser.username || !Array.isArray(list)) return;
+    try {
+        const key = 'msj_phone_book_' + normalizeKey(currentUser.username);
+        localStorage.setItem(key, JSON.stringify(list));
+    } catch (e) {}
+}
+
 function mergeContactsWithPermanentUsers(serverChats) {
     const deletedSet = new Set(getDeletedLocalUserKeys());
     const myKey = currentUser ? normalizeKey(currentUser.username) : '';
     const map = new Map();
 
-    // 1. Önce sunucudan gelen güncel sohbet/kullanıcı verilerini ekle (Sadece aktif kullanıcıya ait mesajlar korunur)
+    // 1. Önce sunucudan gelen güncel sohbet/rehber verilerini ekle (Sadece aktif kullanıcıya ait kendi rehberi ve yazışmaları)
     if (Array.isArray(serverChats)) {
         serverChats.forEach(c => {
             if (!c || !c.username) return;
@@ -1113,18 +1230,43 @@ function mergeContactsWithPermanentUsers(serverChats) {
         });
     }
 
-    // 2. Yalnızca şu anki aktif kullanıcıya ait önbellekteki (msj_cached_contacts_<user>) kişileri koru
+    // 2. Yalnızca şu anki aktif kullanıcıya ait kişisel rehberdeki (msj_phone_book_<user>) ve önbellekteki (msj_cached_contacts_<user>) kişileri koru
+    // MADDE 5 GİZLİLİK KURALI: Sistemdeki diğer tüm kayıtlı kullanıcılar (msj_permanent_users) buraya ASLA eklenmez!
     if (myKey) {
         try {
+            const phoneBook = getPersonalPhoneBookForCurrentUser();
+            if (Array.isArray(phoneBook)) {
+                phoneBook.forEach(c => {
+                    if (!c || !c.username) return;
+                    const k = normalizeKey(c.username);
+                    if (k && k !== myKey && !deletedSet.has(k) && !map.has(k)) {
+                        map.set(k, {
+                            username: c.username,
+                            customName: c.customName || '',
+                            avatar: c.avatar || '/avatars/default.svg',
+                            phone: c.phone || '',
+                            isOnline: false,
+                            statusText: 'Offline',
+                            lastSeen: 'Offline',
+                            lastMessage: null,
+                            unreadCount: 0
+                        });
+                    }
+                });
+            }
+
             const cached = getCachedContactsForCurrentUser();
             if (Array.isArray(cached)) {
                 cached.forEach(c => {
                     if (!c || !c.username) return;
                     const k = normalizeKey(c.username);
-                    if (k && k !== myKey && !deletedSet.has(k) && !map.has(k)) {
-                        const validMsg = isMessageForCurrentUserAndContact(c.lastMessage, k) ? c.lastMessage : null;
+                    const validMsg = isMessageForCurrentUserAndContact(c.lastMessage, k) ? c.lastMessage : null;
+                    // Sadece mesaj geçmişi olan veya telefon numarasıyla rehbere eklenmiş olanları koru
+                    const hasPhoneOrMsg = Boolean(validMsg || c.phone || c.customName);
+                    if (k && k !== myKey && !deletedSet.has(k) && !map.has(k) && hasPhoneOrMsg) {
                         map.set(k, {
                             username: c.username,
+                            customName: c.customName || '',
                             avatar: c.avatar || '/avatars/default.svg',
                             phone: c.phone || '',
                             isOnline: false,
@@ -1138,27 +1280,6 @@ function mergeContactsWithPermanentUsers(serverChats) {
             }
         } catch (e) {}
     }
-
-    // 3. Kalıcı kullanıcı listesindeki (msj_permanent_users) kullanıcıları da koru (Mesaj olmadan yalnız kişi kaydı)
-    const permUsers = getPermanentLocalUsers();
-    permUsers.forEach(u => {
-        if (!u || !u.username) return;
-        const k = normalizeKey(u.username);
-        if (k && k !== myKey && !deletedSet.has(k) && !map.has(k)) {
-            map.set(k, {
-                username: u.username,
-                avatar: u.avatar || '/avatars/default.svg',
-                phone: u.phone || '',
-                isOnline: false,
-                statusText: 'Offline',
-                lastSeen: 'Offline',
-                lastMessage: null,
-                unreadCount: 0
-            });
-        } else if (k && map.has(k) && u.phone && !map.get(k).phone) {
-            map.get(k).phone = u.phone;
-        }
-    });
 
     return Array.from(map.values());
 }
@@ -1439,98 +1560,21 @@ function showPasswordPrompt(username) {
 }
 
 async function loadRegisteredUsersDropdown() {
-    await syncPermanentUsersWithServer();
-    let attempts = 0;
-    while (attempts < 4) {
-        try {
-            const res = await fetch('/api/users/registered');
-            const data = await res.json();
-            if (data.success && Array.isArray(data.users)) {
-                savePermanentLocalUsers(data.users, data.deletedUsers);
-                selectRegisteredUser.innerHTML = '<option value="">-- Kayıtlı Kullanıcı Seçin --</option>';
-                if (quickUsersList) quickUsersList.innerHTML = '';
-
-                data.users.forEach(u => {
-                    const opt = document.createElement('option');
-                    opt.value = u.username;
-                    const statusSuffix = u.lastSeen === 'Online' ? ' (🟢 Online)' : ' (⚪ Offline)';
-                    opt.textContent = `${u.username}${statusSuffix}`;
-                    selectRegisteredUser.appendChild(opt);
-
-                    if (quickUsersList) {
-                        const chipWrap = document.createElement('div');
-                        chipWrap.style.display = 'inline-flex';
-                        chipWrap.style.alignItems = 'center';
-                        chipWrap.style.gap = '2px';
-
-                        const chip = document.createElement('button');
-                        chip.type = 'button';
-                        chip.className = 'quick-user-chip';
-                        chip.title = `${u.username} olarak hızlı giriş yap`;
-                        chip.innerHTML = `
-                            <img src="${u.avatar || '/avatars/default.svg'}" class="avatar-mini" alt="${escapeHtml(u.username)}">
-                            <span><strong>${escapeHtml(u.username)}</strong> <small style="opacity:0.8;">${u.lastSeen === 'Online' ? '🟢' : '⚪'}</small></span>
-                        `;
-                        chip.addEventListener('click', async () => {
-                            // Kayıtlı kullanıcıya tıklandığında doğrudan hızlı giriş yap (veya şifre alanını doldur)
-                            const ok = await quickLoginAsRegisteredUser(u.username);
-                            if (!ok) {
-                                inputUsername.value = u.username;
-                                rememberedName.textContent = u.username;
-                                rememberedAvatar.src = u.avatar || '/avatars/default.svg';
-                                rememberedUserBox.style.display = 'flex';
-                                fieldUsernameSelect.style.display = 'none';
-                                if (rowForgotPassword) rowForgotPassword.style.display = 'block';
-                                inputPassword.value = '';
-                                inputPassword.focus();
-                            }
-                        });
-
-                        const delBtn = document.createElement('button');
-                        delBtn.type = 'button';
-                        delBtn.title = `${u.username} kullanıcısını sil`;
-                        delBtn.textContent = '🗑️';
-                        delBtn.style.cssText = 'background:transparent;border:none;cursor:pointer;font-size:13px;padding:4px;opacity:0.75;';
-                        delBtn.addEventListener('click', (e) => {
-                            e.stopPropagation();
-                            window.requestDeleteUser(u.username);
-                        });
-
-                        chipWrap.appendChild(chip);
-                        chipWrap.appendChild(delBtn);
-                        quickUsersList.appendChild(chipWrap);
-                    }
-                });
-
-                if (selectRegisteredUser) {
-                    selectRegisteredUser.style.display = data.users.length > 0 ? 'block' : 'none';
-                }
-
-                if (quickUsersContainer) {
-                    quickUsersContainer.style.display = data.users.length > 0 ? 'block' : 'none';
-                }
-
-                if (contactsList.length === 0) {
-                    const filteredUsers = currentUser
-                        ? data.users.filter(u => normalizeKey(u.username) !== normalizeKey(currentUser.username))
-                        : data.users;
-                    contactsList = filteredUsers;
-                    renderChatsList(contactsList);
-                }
-
-                return data.users.length;
-            }
-        } catch (e) {
-            attempts++;
-            if (attempts < 4) {
-                await new Promise(r => setTimeout(r, 500));
-            }
-        }
+    // MADDE 3 & 5 GİZLİLİK KURALI:
+    // Giriş / kurulum ekranında sunucudaki tüm kayıtlı kullanıcıların isimleri ("Kayıtlı Kullanıcılar" veya açılır liste)
+    // diğer kullanıcılara ASLA gösterilmez ve klavye açıldığında şifre ekranını kapatmaz!
+    if (selectRegisteredUser) {
+        selectRegisteredUser.innerHTML = '<option value="">-- Hesap Seçin --</option>';
+        selectRegisteredUser.style.display = 'none';
     }
-    if (contactsList.length === 0) {
-        renderChatsList([]);
+    if (quickUsersList) {
+        quickUsersList.innerHTML = '';
     }
-    return 0;
+    if (quickUsersContainer) {
+        quickUsersContainer.style.display = 'none';
+    }
+    const savedUsername = localStorage.getItem('msj_saved_username') || '';
+    return savedUsername ? 1 : 0;
 }
 
 selectRegisteredUser.addEventListener('change', async () => {
@@ -1778,18 +1822,29 @@ function onUserAuthenticated(user, token) {
     savePermanentLocalUsers([user]);
     localStorage.setItem('msj_saved_username', user.username);
     localStorage.setItem('msj_auto_login', 'true');
+    if (user.phone) {
+        localStorage.setItem('msj_my_phone_' + normalizeKey(user.username), user.phone);
+    }
+
+    // Signal X3DH / Double Ratchet & Donanım Anahtar Paketi (IndexedDB Non-Extractable) ve AKD kaydını oluştur
+    if (window.MSJCryptoEngine && typeof window.MSJCryptoEngine.ensureUserIdentityKeys === 'function') {
+        window.MSJCryptoEngine.ensureUserIdentityKeys(user.username).catch(() => {});
+    }
+
+    // Özel Arka Plan Resimlerini Uygula (Madde 6)
+    if (typeof window.applySavedCustomBackgrounds === 'function') {
+        window.applySavedCustomBackgrounds();
+    }
 
     // Giriş yapıldığında sahte/asılı arama ekranı veya çalma sesi kalmasını kesin olarak engelle
     hideOutgoingCall();
     stopRingtone();
     if (incomingCallModal) incomingCallModal.style.display = 'none';
 
-    // Sadece bu kullanıcıya ait önbellek varsa ilk anda göster
+    // Sadece bu kullanıcıya ait önbellek / telefon rehberi varsa ilk anda göster
     const myCached = getCachedContactsForCurrentUser();
-    if (myCached && myCached.length > 0) {
-        contactsList = mergeContactsWithPermanentUsers(myCached);
-        renderChatsList(contactsList);
-    }
+    contactsList = mergeContactsWithPermanentUsers(myCached || []);
+    renderChatsList(contactsList);
 
     // Soket sunucusuna kendi oturumunu bildir (Anında Online durumuna geçer)
     socket.emit('user:join', { token, username: user.username });
@@ -1825,24 +1880,25 @@ function checkUrlDeepLinkActions() {
     try {
         const params = new URLSearchParams(window.location.search);
         const openChatUser = params.get('openChat');
-        const autoAcceptCall = params.get('autoAcceptCall');
-        const incomingCall = params.get('incomingCall');
+        const autoAcceptCall = params.get('autoAcceptCall') === '1';
+        const incomingCall = params.get('incomingCall') === '1';
         if (openChatUser) {
             setTimeout(() => {
                 openChatForSender(openChatUser);
-                if (autoAcceptCall === '1') {
-                    // Gelen arama bildirimi ulaştığında otomatik cevapla veya modal açıksa kabul et
-                    setTimeout(() => {
-                        if (incomingCallModal && incomingCallModal.style.display === 'flex' && btnAcceptCall) {
-                            btnAcceptCall.click();
-                        }
-                    }, 600);
-                } else if (incomingCall === '1' && currentUser) {
-                    // Bekleyen aramayı sunucudan hemen tetikle
-                    const token = localStorage.getItem('msj_token') || sessionStorage.getItem('msj_token') || '';
-                    socket.emit('user:join', { token, username: currentUser.username });
+                if (incomingCall || autoAcceptCall) {
+                    if (currentUser) {
+                        const token = localStorage.getItem('msj_token') || sessionStorage.getItem('msj_token') || '';
+                        socket.emit('user:join', { token, username: currentUser.username });
+                    }
+                    const contactObj = contactsList.find(c => normalizeKey(c.username) === normalizeKey(openChatUser));
+                    triggerIncomingCallUi({
+                        callerUsername: openChatUser,
+                        callerAvatar: (contactObj && contactObj.avatar) || '/avatars/default.svg',
+                        callType: 'voice',
+                        callerSocketId: currentTargetSocketId
+                    }, autoAcceptCall);
                 }
-            }, 300);
+            }, 200);
             // URL'yi temizle
             window.history.replaceState({}, document.title, window.location.pathname);
         }
@@ -1850,14 +1906,11 @@ function checkUrlDeepLinkActions() {
 }
 
 // ==========================================================
-// 2. RESİM 1: SOHBETLER / KAYITLI KULLANICILAR LİSTESİ
+// 2. RESİM 1: SOHBETLER / KİŞİSEL REHBER LİSTESİ (MADDE 5 GİZLİLİK KORUMALI)
 // ==========================================================
 
 async function loadChatsList() {
     let token = localStorage.getItem('msj_token') || sessionStorage.getItem('msj_token');
-
-    // Önce yerel kalıcı kullanıcıları sunucuyla eşitle ki hiçbir kayıtlı kullanıcı eksik kalmasın
-    await syncPermanentUsersWithServer();
 
     if (token && currentUser) {
         try {
@@ -1866,8 +1919,7 @@ async function loadChatsList() {
             });
             const data = await res.json();
 
-            if (data.success && data.chats) {
-                savePermanentLocalUsers(data.chats);
+            if (data.success && Array.isArray(data.chats)) {
                 contactsList = mergeContactsWithPermanentUsers(data.chats);
                 saveCachedContactsForCurrentUser(contactsList);
                 renderChatsList(contactsList);
@@ -1878,34 +1930,15 @@ async function loadChatsList() {
         }
     }
 
-    // Eğer token süresi dolmuşsa veya oturum yedekten açılmışsa kullanıcı listesini doğrudan çek (Mesaj geçmişi karıştırmadan)
-    try {
-        const regRes = await fetch('/api/users/registered');
-        const regData = await regRes.json();
-        if (regData && regData.success && Array.isArray(regData.users)) {
-            savePermanentLocalUsers(regData.users, regData.deletedUsers);
-            const filtered = (currentUser
-                ? regData.users.filter(u => normalizeKey(u.username) !== normalizeKey(currentUser.username))
-                : regData.users
-            ).map(u => ({
-                ...u,
-                lastMessage: null,
-                unreadCount: 0
-            }));
-            contactsList = mergeContactsWithPermanentUsers(filtered);
-            saveCachedContactsForCurrentUser(contactsList);
-            renderChatsList(contactsList);
-            return;
-        }
-    } catch (e) {}
-
-    contactsList = mergeContactsWithPermanentUsers(contactsList);
-    if (contactsList.length > 0) {
-        renderChatsList(contactsList);
-    }
+    // MADDE 5 GİZLİLİK KURALI:
+    // Her kayıtlı kullanıcı sistemdeki tüm kayıtlı isimleri görmemeli!
+    // Yalnızca kendi telefon rehberinde kayıtlı olanları veya mesajlaştığı kişileri görür.
+    contactsList = mergeContactsWithPermanentUsers([]);
+    renderChatsList(contactsList);
 }
 
-// KAYITLI OLMAYAN VEYA KAYITLI KULLANICIYI TELEFON NUMARASINDAN BULMA VE ANINDA MESAJ / ARAMA BAŞLATMA
+// MADDE 4: TELEFON NUMARASINDAN BİRİNİ BULDURUNCA O NUMARAYA KAYITLI KULLANICININ NUMARASIYLA BİRLİKTE
+// “…… Numaralı Kişi Sizi Bu Uygulamayı Kullanmaya Davet Ediyor” DİYE MESAJ GÖNDERSİN
 window.findAndContactByPhone = async function(phoneStr, customName = '', actionType = 'message') {
     const cleanPhone = normalizePhoneClient(phoneStr);
     if (!cleanPhone || cleanPhone.length < 7) {
@@ -1913,16 +1946,70 @@ window.findAndContactByPhone = async function(phoneStr, customName = '', actionT
         return;
     }
 
+    // Davet eden kullanıcının kendi telefon numarasını belirle (yoksa bir kez sorup kaydet)
+    let myUsername = currentUser ? currentUser.username : (localStorage.getItem('msj_saved_username') || '');
+    let myPhone = (currentUser && currentUser.phone)
+        || (myUsername ? localStorage.getItem('msj_my_phone_' + normalizeKey(myUsername)) : '')
+        || (isPhoneQueryClient(myUsername) ? normalizePhoneClient(myUsername) : '');
+
+    if (!myPhone && myUsername) {
+        const enteredMyPhone = prompt(
+            'Karşı tarafa "…… Numaralı Kişi Sizi Bu Uygulamayı Kullanmaya Davet Ediyor" davet mesajı gönderilmesi için lütfen kendi telefon numaranızı girin:',
+            '05'
+        );
+        if (enteredMyPhone && normalizePhoneClient(enteredMyPhone).length >= 7) {
+            myPhone = normalizePhoneClient(enteredMyPhone);
+            if (currentUser) currentUser.phone = myPhone;
+            localStorage.setItem('msj_my_phone_' + normalizeKey(myUsername), myPhone);
+            fetch('/api/users/update_phone', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username: myUsername, phone: myPhone })
+            }).catch(() => {});
+        }
+    }
+
     try {
         const res = await fetch('/api/users/find_by_phone', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ phone: cleanPhone, customName: (customName || '').trim() })
+            body: JSON.stringify({
+                phone: cleanPhone,
+                customName: (customName || '').trim(),
+                inviterUsername: myUsername,
+                inviterPhone: myPhone || myUsername,
+                sendInvite: true
+            })
         });
         const data = await res.json();
         if (data && data.success && data.user) {
             const u = data.user;
-            savePermanentLocalUsers([u]);
+
+            // Kişisel telefon rehberine kaydet (Madde 5: Kendi telefonunda kayıtlı olanları görsün)
+            const myPhoneBook = getPersonalPhoneBookForCurrentUser();
+            const existingIdx = myPhoneBook.findIndex(item => normalizeKey(item.username) === normalizeKey(u.username));
+            const pbEntry = {
+                username: u.username,
+                customName: (customName || u.customName || '').trim(),
+                phone: u.phone || cleanPhone,
+                avatar: u.avatar || '/avatars/default.svg'
+            };
+            if (existingIdx >= 0) {
+                myPhoneBook[existingIdx] = pbEntry;
+            } else {
+                myPhoneBook.unshift(pbEntry);
+            }
+            savePersonalPhoneBookForCurrentUser(myPhoneBook);
+
+            const invitePreviewMsg = data.inviteMessage ? {
+                id: data.inviteMessage.id,
+                sender: myUsername,
+                recipient: u.username,
+                text: data.inviteText || data.inviteMessage.text,
+                timestamp: data.inviteMessage.timestamp || new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }),
+                date: 'Bugün',
+                isOutgoing: true
+            } : null;
 
             let contactObj = contactsList.find(c =>
                 normalizeKey(c.username) === normalizeKey(u.username) ||
@@ -1931,17 +2018,19 @@ window.findAndContactByPhone = async function(phoneStr, customName = '', actionT
             if (!contactObj) {
                 contactObj = {
                     username: u.username,
+                    customName: (customName || u.customName || '').trim(),
                     avatar: u.avatar || '/avatars/default.svg',
                     phone: u.phone || cleanPhone,
-                    isOnline: u.lastSeen === 'Online',
-                    statusText: u.lastSeen === 'Online' ? 'Online' : 'Offline',
+                    isOnline: !!u.isOnline,
+                    statusText: u.isOnline ? 'Online' : 'Offline',
                     lastSeen: u.lastSeen || 'Offline',
-                    lastMessage: null,
+                    lastMessage: invitePreviewMsg,
                     unreadCount: 0
                 };
                 contactsList.unshift(contactObj);
             } else {
                 contactObj.phone = u.phone || cleanPhone;
+                if (invitePreviewMsg) contactObj.lastMessage = invitePreviewMsg;
             }
 
             saveCachedContactsForCurrentUser(contactsList);
@@ -1955,10 +2044,24 @@ window.findAndContactByPhone = async function(phoneStr, customName = '', actionT
             closeNewChatModal();
             selectContact(contactObj);
 
-            if (data.isRegisteredUser && !data.isNewCreated) {
-                showStatusToast(`📱 Numaradan bulundu: ${u.username}`, true);
-            } else {
-                showStatusToast(`📱 ${u.username} eklendi • Mesaj & Arama Açık`, true);
+            const inviterLabel = formatPhonePretty(myPhone || myUsername);
+            const inviteMsgStr = data.inviteText || `“${inviterLabel} Numaralı Kişi Sizi Bu Uygulamayı Kullanmaya Davet Ediyor”`;
+            showStatusToast(`📨 ${inviteMsgStr} mesajı gönderildi!`, true);
+
+            // Eğer karşı taraf henüz uygulamada çevrimiçi değilse tek tıkla SMS davet çubuğu göster
+            if (!u.isOnline && messagesContainer) {
+                setTimeout(() => {
+                    const smsBanner = document.createElement('div');
+                    smsBanner.style.cssText = 'align-self:center;max-width:92%;background:rgba(0,168,132,0.16);border:1px solid #00a884;border-radius:10px;padding:10px 14px;margin:8px auto;text-align:center;font-size:12.5px;color:#e9edef;';
+                    const smsBody = encodeURIComponent(`${inviteMsgStr} - Bağlantı: ${window.location.origin}`);
+                    smsBanner.innerHTML = `
+                        <div style="margin-bottom:6px;color:#25d366;font-weight:700;">📨 Uygulama içi davet mesajı gönderildi!</div>
+                        <div style="margin-bottom:8px;color:#d1d7db;">${escapeHtml(inviteMsgStr)}</div>
+                        <a href="sms:${escapeHtml(cleanPhone)}?body=${smsBody}" style="display:inline-block;padding:6px 12px;border-radius:8px;background:#00a884;color:#fff;text-decoration:none;font-weight:700;font-size:12px;">📱 SMS Olarak da Gönder (${escapeHtml(formatPhonePretty(cleanPhone))})</a>
+                    `;
+                    messagesContainer.appendChild(smsBanner);
+                    scrollToBottom();
+                }, 450);
             }
 
             if (actionType === 'voice' || actionType === 'video') {
@@ -2014,8 +2117,10 @@ function renderChatsList(chats, rawSearchQuery = '') {
     if (!chats || chats.length === 0) {
         if (!activeQuery || !isPhoneQueryClient(activeQuery)) {
             chatListContainer.innerHTML = `
-                <div style="padding: 40px 20px; text-align: center; color: var(--text-secondary); font-size: 14px;">
-                    Henüz kayıtlı başka bir kullanıcı bulunamadı.<br>Yeni bir kişi eklemek veya <strong>telefon numarasından bulmak</strong> için sağ alttaki <strong>+</strong> butonuna dokunun.
+                <div style="padding: 36px 20px; text-align: center; color: var(--text-secondary); font-size: 14px; line-height: 1.55;">
+                    📒 <strong>Kişisel Rehberiniz Boş</strong><br>
+                    Gizlilik gereği sistemdeki diğer kayıtlı kullanıcılar otomatik listelenmez.<br>
+                    Kendi telefonunuzda kayıtlı olan kişileri eklemek veya <strong>telefon numarasından bulup davet etmek</strong> için yukarıdaki <strong>📱 Numaradan Bul &amp; Davet Et</strong> veya sağ alttaki <strong>+</strong> butonuna dokunun.
                 </div>
             `;
         }
@@ -2034,9 +2139,13 @@ function renderChatsList(chats, rawSearchQuery = '') {
         item.dataset.username = contact.username;
         item.style.cursor = 'pointer';
 
+        const displayName = (contact.customName && contact.customName !== contact.username)
+            ? `${contact.customName} (${contact.username})`
+            : contact.username;
+
         let lastSnippet = contact.phone
-            ? `📱 ${formatPhonePretty(contact.phone)} • 🔒 Uçtan uca şifreli sohbet`
-            : '🔒 Uçtan uca şifreli sohbet';
+            ? `📱 ${formatPhonePretty(contact.phone)} • 🔒 Signal E2EE şifreli sohbet`
+            : '🔒 Signal E2EE şifreli sohbet';
         let isOutgoingLast = false;
         let isLastRead = false;
         let timeLabel = contact.isOnline ? 'Çevrimiçi' : '';
@@ -2060,13 +2169,13 @@ function renderChatsList(chats, rawSearchQuery = '') {
 
         item.innerHTML = `
             <div class="chat-avatar-wrap">
-                <img class="avatar" src="${contact.avatar || '/avatars/default.svg'}" alt="${escapeHtml(contact.username)}">
+                <img class="avatar" src="${contact.avatar || '/avatars/default.svg'}" alt="${escapeHtml(displayName)}">
                 ${contact.isOnline ? '<span class="online-badge" title="Çevrimiçi"></span>' : ''}
             </div>
             <div class="chat-content-wrap">
                 <div class="chat-top-line">
                     <span class="chat-title">
-                        <strong class="wa-contact-name">${escapeHtml(contact.username)}</strong>
+                        <strong class="wa-contact-name">${escapeHtml(displayName)}</strong>
                     </span>
                     <span class="wa-chat-time ${hasUnread ? 'unread' : (contact.isOnline && !validLastMsg ? 'online-time' : '')}">${escapeHtml(timeLabel)}</span>
                 </div>
@@ -2949,8 +3058,14 @@ socket.on('chat:message', (msg) => {
     if (isIncoming) {
         // A) Bildirim sesi çal (WhatsApp tarzı net ve tatlı ses)
         playIncomingMessageSound();
+        try { window.focus(); } catch (e) {}
 
-        // B) Sohbet o an açık değilse veya sekme/pencere arka plandaysa:
+        // B) Kullanıcı başka bir kişiye aktif olarak yazı yazmıyorsa sohbet ekranını otomatik aç ve mesajı ekrana getir!
+        if (!isFromActive && !isUserCurrentlyTyping()) {
+            openChatForSender(msg.sender);
+        }
+
+        // C) Sohbet o an açık değilse veya sekme/pencere arka plandaysa:
         if (!isFromActive || document.hidden) {
             showMessageNotificationToast(msg);
             const plainPreview = msg.text ? decryptE2EETextClient(msg.text, msg.sender, msg.recipient) : '';
@@ -3011,8 +3126,12 @@ socket.on('chat:offline_messages', (data) => {
 
     if (hasUnreadForOther) {
         playIncomingMessageSound();
-        if (myMessages.length === 1) {
-            showMessageNotificationToast(myMessages[0]);
+        const latestMsg = myMessages[myMessages.length - 1];
+        if (latestMsg) {
+            showMessageNotificationToast(latestMsg);
+            if (!isUserCurrentlyTyping()) {
+                openChatForSender(latestMsg.sender);
+            }
         }
     }
 
@@ -3102,21 +3221,15 @@ socket.on('user:status_change', (data) => {
     }
 });
 
-// Yeni Bir Kullanıcı Kayıt Olduğunda veya Telefon Numarasından Eklendiğinde
+// Yeni Bir Kullanıcı Kayıt Olduğunda (Madde 5 Gizlilik Korumalı: Sadece kendi rehberimizde varsa güncellenir)
 function handleNewUserRegisteredEvent(data) {
-    if (data && data.username) {
-        savePermanentLocalUsers([{
-            username: data.username,
-            avatar: data.avatar || '/avatars/default.svg',
-            phone: data.phone || undefined
-        }]);
-    }
-    loadRegisteredUsersDropdown();
-    if (currentUser && data && normalizeKey(data.username) !== normalizeKey(currentUser.username)) {
+    if (!currentUser || !data || !data.username) return;
+    const uKey = normalizeKey(data.username);
+    const inMyContacts = contactsList.some(c => normalizeKey(c.username) === uKey) ||
+        getPersonalPhoneBookForCurrentUser().some(c => normalizeKey(c.username) === uKey || (data.phone && c.phone && normalizePhoneClient(c.phone) === normalizePhoneClient(data.phone)));
+    if (inMyContacts) {
         showStatusToast(data.username, true);
         playStatusChime(true);
-        loadChatsList();
-    } else if (!currentUser) {
         loadChatsList();
     }
 }
@@ -3220,7 +3333,7 @@ socket.on('system:wakeup', async (data) => {
                 tag: 'msg-' + data.sender
             });
             loadChatsList().then(() => {
-                if (wokeUpFromOffline && !activeContact) {
+                if (!isUserCurrentlyTyping()) {
                     openChatForSender(data.sender);
                 }
             });
@@ -4766,16 +4879,176 @@ let deferredPrompt = null;
 window.addEventListener('beforeinstallprompt', (e) => {
     e.preventDefault();
     deferredPrompt = e;
+    const btnNative = document.getElementById('btnTriggerNativePwaPrompt');
+    if (btnNative) btnNative.style.display = 'block';
 });
 
+window.addEventListener('appinstalled', () => {
+    deferredPrompt = null;
+    const pwaModal = document.getElementById('pwaInstallModal');
+    const iosBanner = document.getElementById('iosSharePointerBanner');
+    if (pwaModal) pwaModal.style.display = 'none';
+    if (iosBanner) iosBanner.style.display = 'none';
+    showStatusToast('📲 HIHaberleşme başarıyla yüklendi!', true);
+});
+
+function isIosDeviceClient() {
+    const ua = window.navigator.userAgent || '';
+    return /iPhone|iPad|iPod/i.test(ua) || (window.navigator.platform === 'MacIntel' && window.navigator.maxTouchPoints > 1);
+}
+
+function isStandalonePwaClient() {
+    return Boolean(window.navigator.standalone) || (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
+}
+
+function openPwaInstallModal(forceIosView = false) {
+    if (headerDropdown) headerDropdown.style.display = 'none';
+    if (chatDropdownMenu) chatDropdownMenu.style.display = 'none';
+    if (profileModal) profileModal.style.display = 'none';
+
+    const pwaModal = document.getElementById('pwaInstallModal');
+    const alreadyNotice = document.getElementById('pwaAlreadyInstalledNotice');
+    const iosSection = document.getElementById('pwaIosSection');
+    const stdSection = document.getElementById('pwaStandardSection');
+    const btnNative = document.getElementById('btnTriggerNativePwaPrompt');
+    const iosBanner = document.getElementById('iosSharePointerBanner');
+    const iosBannerText = document.getElementById('iosSharePointerText');
+
+    if (!pwaModal) return;
+
+    const isIos = forceIosView || isIosDeviceClient();
+    const isStandalone = isStandalonePwaClient();
+
+    if (alreadyNotice) {
+        alreadyNotice.style.display = isStandalone ? 'block' : 'none';
+    }
+
+    if (isIos) {
+        if (iosSection) iosSection.style.display = 'block';
+        if (stdSection) stdSection.style.display = 'none';
+        if (iosBanner && !isStandalone) {
+            const isChromeIos = /CriOS/i.test(window.navigator.userAgent || '');
+            if (isChromeIos && iosBannerText) {
+                iosBanner.style.bottom = 'auto';
+                iosBanner.style.top = '14px';
+                iosBannerText.innerHTML = '☝️ Sağ üstteki <strong>Paylaş [↑]</strong> simgesine basıp <strong>"Ana Ekrana Ekle"</strong> deyin!';
+            } else if (iosBannerText) {
+                iosBanner.style.top = 'auto';
+                iosBanner.style.bottom = '14px';
+                iosBannerText.innerHTML = '👇 Ekranın en altındaki <strong>Paylaş [↑]</strong> simgesine basıp <strong>"Ana Ekrana Ekle"</strong> deyin!';
+            }
+            iosBanner.style.display = 'block';
+        }
+    } else {
+        // Masaüstü veya Android'de hem standart kurulumu hem de iPhone kurulum seçeneğini göster
+        if (stdSection) stdSection.style.display = 'block';
+        if (iosSection) iosSection.style.display = 'block';
+        if (btnNative) {
+            btnNative.style.display = deferredPrompt ? 'block' : 'none';
+        }
+    }
+
+    pwaModal.style.display = 'flex';
+}
+
+async function handleTriggerPwaInstall(e) {
+    if (e && e.stopPropagation) e.stopPropagation();
+    if (headerDropdown) headerDropdown.style.display = 'none';
+    if (chatDropdownMenu) chatDropdownMenu.style.display = 'none';
+
+    if (deferredPrompt && !isIosDeviceClient()) {
+        try {
+            deferredPrompt.prompt();
+            const choice = await deferredPrompt.userChoice;
+            deferredPrompt = null;
+            if (choice && choice.outcome === 'accepted') {
+                return;
+            }
+        } catch (err) {
+            deferredPrompt = null;
+        }
+    }
+
+    openPwaInstallModal();
+}
+
 if (menuItemInstall) {
-    menuItemInstall.addEventListener('click', async () => {
+    menuItemInstall.addEventListener('click', handleTriggerPwaInstall);
+}
+
+const menuItemChatInstall = document.getElementById('menuItemChatInstall');
+if (menuItemChatInstall) {
+    menuItemChatInstall.addEventListener('click', handleTriggerPwaInstall);
+}
+
+const btnProfileInstallPwa = document.getElementById('btnProfileInstallPwa');
+if (btnProfileInstallPwa) {
+    btnProfileInstallPwa.addEventListener('click', handleTriggerPwaInstall);
+}
+
+const btnClosePwaInstall = document.getElementById('btnClosePwaInstall');
+const pwaInstallModal = document.getElementById('pwaInstallModal');
+const iosSharePointerBanner = document.getElementById('iosSharePointerBanner');
+
+if (btnClosePwaInstall && pwaInstallModal) {
+    btnClosePwaInstall.addEventListener('click', () => {
+        pwaInstallModal.style.display = 'none';
+        if (iosSharePointerBanner) iosSharePointerBanner.style.display = 'none';
+    });
+    pwaInstallModal.addEventListener('click', (e) => {
+        if (e.target === pwaInstallModal) {
+            pwaInstallModal.style.display = 'none';
+            if (iosSharePointerBanner) iosSharePointerBanner.style.display = 'none';
+        }
+    });
+}
+
+if (iosSharePointerBanner) {
+    iosSharePointerBanner.addEventListener('click', () => {
+        iosSharePointerBanner.style.display = 'none';
+    });
+}
+
+const btnIosTriggerShareSheet = document.getElementById('btnIosTriggerShareSheet');
+if (btnIosTriggerShareSheet) {
+    btnIosTriggerShareSheet.addEventListener('click', async () => {
+        const shareUrl = window.location.origin + '/';
+        if (navigator.share) {
+            try {
+                await navigator.share({
+                    title: 'HIHaberleşme',
+                    url: shareUrl
+                });
+                return;
+            } catch (err) {
+                // Kullanıcı kapattıysa veya desteklenmiyorsa alt ok göstergesini öne çıkar
+            }
+        }
+        if (iosSharePointerBanner) {
+            iosSharePointerBanner.style.display = 'block';
+        }
+        showStatusToast('👇 Ekranın altındaki Paylaş [↑] butonuna basıp "Ana Ekrana Ekle" seçin', true);
+    });
+}
+
+const btnIosDirectProfileInstall = document.getElementById('btnIosDirectProfileInstall');
+if (btnIosDirectProfileInstall) {
+    btnIosDirectProfileInstall.addEventListener('click', () => {
+        const activeUser = (currentUser && currentUser.username) || localStorage.getItem('msj_saved_username') || '';
+        const targetOrigin = window.location.origin + '/';
+        const profileUrl = `/api/ios-pwa.mobileconfig?url=${encodeURIComponent(targetOrigin)}&user=${encodeURIComponent(activeUser)}`;
+        window.location.href = profileUrl;
+    });
+}
+
+const btnTriggerNativePwaPrompt = document.getElementById('btnTriggerNativePwaPrompt');
+if (btnTriggerNativePwaPrompt) {
+    btnTriggerNativePwaPrompt.addEventListener('click', async () => {
         if (deferredPrompt) {
             deferredPrompt.prompt();
             await deferredPrompt.userChoice;
             deferredPrompt = null;
-        } else {
-            alert('Bu uygulamayı telefonunuza veya bilgisayarınıza yüklemek için:\nTarayıcınızın menüsünden (üç nokta veya paylaş butonu) "Ana Ekrana Ekle" ya da "Uygulamayı Yükle" seçeneğini kullanabilirsiniz.');
+            if (pwaInstallModal) pwaInstallModal.style.display = 'none';
         }
     });
 }
@@ -4841,13 +5114,16 @@ document.addEventListener('visibilitychange', () => {
 
 // Arka Plan / Bekleme Modu Yedek Uyandırıcı (Yalnızca aktif/kayıtlı kullanıcıya gelen mesaj ve aramaları dinler)
 let clientLastPollNotifId = 0;
+const clientSeenCallIds = new Set();
 setInterval(async () => {
     try {
         const targetUser = (currentUser && currentUser.username) || localStorage.getItem('msj_saved_username') || '';
         if (!targetUser) return;
         const targetKey = normalizeKey(targetUser);
 
-        const res = await fetch(`/api/system/notifications/poll?since=${clientLastPollNotifId}&user=${encodeURIComponent(targetUser)}`);
+        const res = await fetch(`/api/system/notifications/poll?since=${clientLastPollNotifId}&user=${encodeURIComponent(targetUser)}`, {
+            cache: 'no-store'
+        });
         const data = await res.json();
         if (data && data.success) {
             if (typeof data.lastId === 'number' && data.lastId < clientLastPollNotifId) {
@@ -4855,6 +5131,25 @@ setInterval(async () => {
                 clientLastPollNotifId = 0;
                 return;
             }
+
+            // 1. Bekleyen aktif arama varsa ve ekranda arama penceresi açık değilse hemen ekrana düşür!
+            if (Array.isArray(data.activeCalls) && data.activeCalls.length > 0) {
+                for (const callObj of data.activeCalls) {
+                    if (!callObj || !callObj.callerUsername) continue;
+                    if (normalizeKey(callObj.callerUsername) === targetKey) continue;
+                    if (callObj.recipient && normalizeKey(callObj.recipient) !== targetKey) continue;
+                    const cKey = callObj.callId || (callObj.callerUsername + '_' + callObj.createdAt);
+                    if (clientSeenCallIds.has(cKey)) continue;
+                    clientSeenCallIds.add(cKey);
+
+                    if (!currentUser) {
+                        await quickLoginAsRegisteredUser(targetUser);
+                    }
+                    triggerIncomingCallUi(callObj, false);
+                }
+            }
+
+            // 2. Yeni bildirimleri (Mesaj ve Arama) işle
             if (clientLastPollNotifId > 0 && data.lastId > clientLastPollNotifId && Array.isArray(data.notifications)) {
                 for (const item of data.notifications) {
                     if (!item || !item.recipient) continue;
@@ -4868,15 +5163,31 @@ setInterval(async () => {
                     } else if (currentUser && normalizeKey(currentUser.username) === targetKey) {
                         const token = localStorage.getItem('msj_token') || sessionStorage.getItem('msj_token') || '';
                         socket.emit('user:join', { token, username: currentUser.username });
-                        if (item.type === 'message' && (!activeContact || normalizeKey(activeContact.username) !== normalizeKey(item.sender) || document.hidden)) {
-                            const plainText = item.text ? decryptE2EETextClient(item.text, item.sender, item.recipient) : 'Yeni mesaj';
+                    }
+
+                    if (item.type === 'call') {
+                        triggerIncomingCallUi({
+                            callerUsername: item.sender,
+                            callerAvatar: item.callerAvatar || '/avatars/default.svg',
+                            callType: item.callType || 'voice',
+                            callerSocketId: item.callerSocketId || currentTargetSocketId
+                        }, false);
+                    } else if (item.type === 'message') {
+                        const plainText = item.text ? decryptE2EETextClient(item.text, item.sender, item.recipient) : 'Yeni mesaj';
+                        const isFromActive = activeContact && normalizeKey(activeContact.username) === normalizeKey(item.sender);
+                        if (!isFromActive || document.hidden) {
+                            playIncomingMessageSound();
                             showMessageNotificationToast({
                                 id: item.msgId || ('poll_' + item.id),
                                 sender: item.sender,
                                 recipient: item.recipient,
                                 text: plainText
                             });
-                            loadChatsList();
+                            if (!isUserCurrentlyTyping()) {
+                                openChatForSender(item.sender);
+                            } else {
+                                loadChatsList();
+                            }
                         }
                     }
                 }
@@ -4886,7 +5197,484 @@ setInterval(async () => {
             }
         }
     } catch (e) {}
-}, 3000);
+}, 2000);
+
+// ==========================================================
+// MADDE 1 & 3: MOBİL KLAVYE AÇILDIĞINDA ŞİFRE KISMININ KAPANMAMASI
+// VE TÜM TELEFON / MONİTÖR ÇÖZÜNÜRLÜKLERİNE TAM SIĞMA
+// ==========================================================
+(function setupViewportAndKeyboardProtection() {
+    function updateAppViewportHeight() {
+        const vv = window.visualViewport;
+        const height = vv ? vv.height : window.innerHeight;
+        document.documentElement.style.setProperty('--app-height', `${height}px`);
+
+        const fullHeight = window.screen ? window.screen.height : window.innerHeight;
+        const isKeyboardLikelyOpen = (vv && (window.innerHeight - vv.height > 110)) || (fullHeight - height > 220);
+        document.body.classList.toggle('keyboard-open', Boolean(isKeyboardLikelyOpen));
+
+        if (isKeyboardLikelyOpen && authModal && authModal.style.display !== 'none') {
+            const activeEl = document.activeElement;
+            if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'SELECT')) {
+                setTimeout(() => {
+                    try {
+                        activeEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    } catch (e) {}
+                }, 60);
+            }
+        }
+    }
+
+    if (window.visualViewport) {
+        window.visualViewport.addEventListener('resize', updateAppViewportHeight);
+        window.visualViewport.addEventListener('scroll', updateAppViewportHeight);
+    }
+    window.addEventListener('resize', updateAppViewportHeight);
+    window.addEventListener('orientationchange', () => setTimeout(updateAppViewportHeight, 150));
+    updateAppViewportHeight();
+
+    // Giriş/Kurulum ekranındaki tüm input alanlarına odaklanıldığında klavyenin üstüne kaydır
+    [inputUsername, inputPhone, inputPassword, inputConfirmPassword].forEach(inp => {
+        if (!inp) return;
+        inp.addEventListener('focus', () => {
+            document.body.classList.add('keyboard-open');
+            setTimeout(() => {
+                try {
+                    inp.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                } catch (e) {}
+            }, 180);
+        });
+        inp.addEventListener('blur', () => {
+            setTimeout(updateAppViewportHeight, 150);
+        });
+    });
+})();
+
+// ==========================================================
+// MADDE 6: KULLANICI ARKA PLANI VE MESAJ SAYFASI ÖZEL ARKA PLAN RESMİ
+// ==========================================================
+(function setupCustomBackgroundManager() {
+    const bgSettingsModal = document.getElementById('bgSettingsModal');
+    const btnCloseBgSettings = document.getElementById('btnCloseBgSettings');
+    const btnDoneBgSettings = document.getElementById('btnDoneBgSettings');
+    const btnHeaderBgSettings = document.getElementById('btnHeaderBgSettings');
+    const btnQuickBgSettings = document.getElementById('btnQuickBgSettings');
+    const menuItemBgSettings = document.getElementById('menuItemBgSettings');
+    const menuItemChatBgSettings = document.getElementById('menuItemChatBgSettings');
+    const btnProfileBgSettings = document.getElementById('btnProfileBgSettings');
+
+    const inputUsersBgFile = document.getElementById('inputUsersBgFile');
+    const btnSelectUsersBg = document.getElementById('btnSelectUsersBg');
+    const btnResetUsersBg = document.getElementById('btnResetUsersBg');
+    const previewUsersBgBox = document.getElementById('previewUsersBgBox');
+
+    const inputChatBgFile = document.getElementById('inputChatBgFile');
+    const btnSelectChatBg = document.getElementById('btnSelectChatBg');
+    const btnResetChatBg = document.getElementById('btnResetChatBg');
+    const previewChatBgBox = document.getElementById('previewChatBgBox');
+
+    const inputBgDimSlider = document.getElementById('inputBgDimSlider');
+    const bgDimValueLabel = document.getElementById('bgDimValueLabel');
+
+    function getBgStorageKey(prefix) {
+        const uKey = currentUser && currentUser.username
+            ? normalizeKey(currentUser.username)
+            : normalizeKey(localStorage.getItem('msj_saved_username') || 'default');
+        return `${prefix}_${uKey || 'default'}`;
+    }
+
+    function compressImageFileToDataUrl(file, maxWidth = 1440, quality = 0.82) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = (ev) => {
+                const img = new Image();
+                img.onload = () => {
+                    try {
+                        let w = img.width;
+                        let h = img.height;
+                        if (w > maxWidth) {
+                            h = Math.round((h * maxWidth) / w);
+                            w = maxWidth;
+                        }
+                        const canvas = document.createElement('canvas');
+                        canvas.width = w;
+                        canvas.height = h;
+                        const ctx = canvas.getContext('2d');
+                        ctx.drawImage(img, 0, 0, w, h);
+                        resolve(canvas.toDataURL('image/jpeg', quality));
+                    } catch (e) {
+                        resolve(ev.target.result);
+                    }
+                };
+                img.onerror = () => resolve(ev.target.result);
+                img.src = ev.target.result;
+            };
+            reader.onerror = reject;
+            reader.readAsDataURL(file);
+        });
+    }
+
+    window.applySavedCustomBackgrounds = function() {
+        const usersBg = localStorage.getItem(getBgStorageKey('msj_users_bg')) || localStorage.getItem('msj_users_bg_global') || '';
+        const chatBg = localStorage.getItem(getBgStorageKey('msj_chat_bg')) || localStorage.getItem('msj_chat_bg_global') || '';
+        const dimPercent = parseInt(localStorage.getItem(getBgStorageKey('msj_bg_dim')) || localStorage.getItem('msj_bg_dim_global') || '35', 10);
+        const dimDecimal = Math.max(0, Math.min(0.88, dimPercent / 100));
+
+        document.documentElement.style.setProperty('--custom-bg-dim', String(dimDecimal));
+        if (inputBgDimSlider) inputBgDimSlider.value = String(dimPercent);
+        if (bgDimValueLabel) bgDimValueLabel.textContent = `%${dimPercent}`;
+
+        // 1. Kullanıcı (Kişi Listesi) Arka Planı
+        if (chatsScreen) {
+            if (usersBg) {
+                document.documentElement.style.setProperty('--custom-users-bg-image', `url("${usersBg}")`);
+                chatsScreen.classList.add('has-custom-users-bg');
+                if (previewUsersBgBox) {
+                    previewUsersBgBox.style.backgroundImage = `url("${usersBg}")`;
+                    previewUsersBgBox.textContent = '';
+                }
+            } else {
+                document.documentElement.style.removeProperty('--custom-users-bg-image');
+                chatsScreen.classList.remove('has-custom-users-bg');
+                if (previewUsersBgBox) {
+                    previewUsersBgBox.style.backgroundImage = 'none';
+                    previewUsersBgBox.textContent = 'Varsayılan Koyu Tema';
+                }
+            }
+        }
+
+        // 2. Mesaj Sayfası (Sohbet Ekranı) Arka Planı
+        if (messagesContainer) {
+            if (chatBg) {
+                document.documentElement.style.setProperty('--custom-chat-bg-image', `url("${chatBg}")`);
+                messagesContainer.classList.add('has-custom-chat-bg');
+                if (previewChatBgBox) {
+                    previewChatBgBox.style.backgroundImage = `url("${chatBg}")`;
+                    previewChatBgBox.textContent = '';
+                }
+            } else {
+                document.documentElement.style.removeProperty('--custom-chat-bg-image');
+                messagesContainer.classList.remove('has-custom-chat-bg');
+                if (previewChatBgBox) {
+                    previewChatBgBox.style.backgroundImage = 'none';
+                    previewChatBgBox.textContent = 'Varsayılan Sohbet Duvar Kağıdı';
+                }
+            }
+        }
+    };
+
+    function openBgSettingsModal() {
+        if (headerDropdown) headerDropdown.style.display = 'none';
+        if (chatDropdownMenu) chatDropdownMenu.style.display = 'none';
+        closeProfileModal();
+        window.applySavedCustomBackgrounds();
+        if (bgSettingsModal) bgSettingsModal.style.display = 'flex';
+    }
+
+    function closeBgSettingsModal() {
+        if (bgSettingsModal) bgSettingsModal.style.display = 'none';
+    }
+
+    [btnHeaderBgSettings, btnQuickBgSettings, menuItemBgSettings, menuItemChatBgSettings, btnProfileBgSettings].forEach(btn => {
+        if (btn) btn.addEventListener('click', openBgSettingsModal);
+    });
+    if (btnCloseBgSettings) btnCloseBgSettings.addEventListener('click', closeBgSettingsModal);
+    if (btnDoneBgSettings) btnDoneBgSettings.addEventListener('click', closeBgSettingsModal);
+    if (bgSettingsModal) {
+        bgSettingsModal.addEventListener('click', (e) => {
+            if (e.target === bgSettingsModal) closeBgSettingsModal();
+        });
+    }
+
+    if (btnSelectUsersBg && inputUsersBgFile) {
+        btnSelectUsersBg.addEventListener('click', () => inputUsersBgFile.click());
+        inputUsersBgFile.addEventListener('change', async () => {
+            const f = inputUsersBgFile.files && inputUsersBgFile.files[0];
+            if (!f) return;
+            try {
+                const dataUrl = await compressImageFileToDataUrl(f);
+                localStorage.setItem(getBgStorageKey('msj_users_bg'), dataUrl);
+                localStorage.setItem('msj_users_bg_global', dataUrl);
+                window.applySavedCustomBackgrounds();
+                showStatusToast('🖼️ Kullanıcı listesi arka plan resmi güncellendi!', true);
+            } catch (e) {
+                alert('Resim yüklenemedi.');
+            }
+            inputUsersBgFile.value = '';
+        });
+    }
+
+    if (btnResetUsersBg) {
+        btnResetUsersBg.addEventListener('click', () => {
+            localStorage.removeItem(getBgStorageKey('msj_users_bg'));
+            localStorage.removeItem('msj_users_bg_global');
+            window.applySavedCustomBackgrounds();
+            showStatusToast('Kullanıcı arka planı varsayılana döndürüldü', true);
+        });
+    }
+
+    if (btnSelectChatBg && inputChatBgFile) {
+        btnSelectChatBg.addEventListener('click', () => inputChatBgFile.click());
+        inputChatBgFile.addEventListener('change', async () => {
+            const f = inputChatBgFile.files && inputChatBgFile.files[0];
+            if (!f) return;
+            try {
+                const dataUrl = await compressImageFileToDataUrl(f);
+                localStorage.setItem(getBgStorageKey('msj_chat_bg'), dataUrl);
+                localStorage.setItem('msj_chat_bg_global', dataUrl);
+                window.applySavedCustomBackgrounds();
+                showStatusToast('🖼️ Mesaj sayfası arka plan resmi güncellendi!', true);
+            } catch (e) {
+                alert('Resim yüklenemedi.');
+            }
+            inputChatBgFile.value = '';
+        });
+    }
+
+    if (btnResetChatBg) {
+        btnResetChatBg.addEventListener('click', () => {
+            localStorage.removeItem(getBgStorageKey('msj_chat_bg'));
+            localStorage.removeItem('msj_chat_bg_global');
+            window.applySavedCustomBackgrounds();
+            showStatusToast('Mesaj sayfası arka planı varsayılana döndürüldü', true);
+        });
+    }
+
+    if (inputBgDimSlider) {
+        inputBgDimSlider.addEventListener('input', () => {
+            const val = inputBgDimSlider.value;
+            localStorage.setItem(getBgStorageKey('msj_bg_dim'), val);
+            localStorage.setItem('msj_bg_dim_global', val);
+            window.applySavedCustomBackgrounds();
+        });
+    }
+
+    window.applySavedCustomBackgrounds();
+})();
+
+// ==========================================================
+// MADDE 5: HER KULLANICININ YALNIZCA KENDİ TELEFONUNDA KAYITLI OLAN KİŞİLERİ GÖRMESİ
+// (SHA-256 METADATA KORUMALI TELEFON REHBERİ AKTARIMI & EŞLEŞTİRME)
+// ==========================================================
+(function setupPersonalPhoneContactsImport() {
+    const menuItemImportContacts = document.getElementById('menuItemImportContacts');
+    const btnImportPhoneContactsModal = document.getElementById('btnImportPhoneContactsModal');
+    const btnAddFilter = document.getElementById('btnAddFilter');
+    const vcfContactsFileInput = document.getElementById('vcfContactsFileInput');
+
+    async function processImportedPhoneEntries(entries) {
+        if (!Array.isArray(entries) || entries.length === 0) return;
+        const myUsername = currentUser ? currentUser.username : (localStorage.getItem('msj_saved_username') || '');
+        const myPhoneBook = getPersonalPhoneBookForCurrentUser();
+        const hashes = [];
+
+        for (const item of entries) {
+            const cleanPhone = normalizePhoneClient(item.phone || '');
+            if (!cleanPhone || cleanPhone.length < 7) continue;
+            const cName = (item.name || '').trim();
+
+            if (window.MSJCryptoEngine && typeof window.MSJCryptoEngine.hashPhoneForPrivateDiscovery === 'function') {
+                const h = await window.MSJCryptoEngine.hashPhoneForPrivateDiscovery(cleanPhone);
+                if (h) hashes.push(h);
+            }
+
+            // Telefon numarasından bul ve rehbere kaydet
+            await window.findAndContactByPhone(cleanPhone, cName, 'none');
+        }
+
+        if (hashes.length > 0 && myUsername) {
+            try {
+                await fetch('/api/users/match_hashed_phones', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ phoneHashes: hashes, ownerUsername: myUsername })
+                });
+            } catch (e) {}
+        }
+
+        await loadChatsList();
+        showStatusToast(`📒 ${entries.length} kişi telefon rehberinizden eklendi!`, true);
+    }
+
+    async function triggerDeviceContactsImport() {
+        if (headerDropdown) headerDropdown.style.display = 'none';
+
+        // 1. Mobil Tarayıcı Native Contact Picker API (Android Chrome / iOS destekli)
+        if ('contacts' in navigator && 'ContactsManager' in window) {
+            try {
+                const selected = await navigator.contacts.select(['name', 'tel'], { multiple: true });
+                if (selected && selected.length > 0) {
+                    const parsed = [];
+                    selected.forEach(c => {
+                        const name = (c.name && c.name[0]) || '';
+                        const tels = c.tel || [];
+                        tels.forEach(t => {
+                            if (t) parsed.push({ name, phone: t });
+                        });
+                    });
+                    await processImportedPhoneEntries(parsed);
+                    return;
+                }
+            } catch (e) {}
+        }
+
+        // 2. Masaüstü veya Contact Picker desteklemeyen tarayıcılar için Rehber (.vcf) dosyası veya hızlı numara girişi
+        const choice = confirm(
+            '📒 Kendi Telefon Rehberinizden Kişi Aktarımı\n\n' +
+            '• Telefon rehber dosyanızdan (.vcf / vCard) toplu aktarmak için "Tamam"a basın.\n' +
+            '• Tek bir telefon numarasını rehberinize ekleyip davet göndermek için "İptal"e basın.'
+        );
+        if (choice && vcfContactsFileInput) {
+            vcfContactsFileInput.click();
+        } else {
+            openNewChatModal(true);
+        }
+    }
+
+    if (vcfContactsFileInput) {
+        vcfContactsFileInput.addEventListener('change', () => {
+            const f = vcfContactsFileInput.files && vcfContactsFileInput.files[0];
+            if (!f) return;
+            const reader = new FileReader();
+            reader.onload = async (ev) => {
+                const text = String(ev.target.result || '');
+                const cards = text.split(/BEGIN:VCARD/i);
+                const entries = [];
+                cards.forEach(card => {
+                    const fnMatch = card.match(/FN[^:]*:(.+)/i);
+                    const telMatches = card.match(/TEL[^:]*:([^\r\n]+)/gi) || [];
+                    const name = fnMatch ? fnMatch[1].trim() : '';
+                    telMatches.forEach(tLine => {
+                        const parts = tLine.split(':');
+                        const rawTel = parts.slice(1).join(':').trim();
+                        if (rawTel) entries.push({ name, phone: rawTel });
+                    });
+                });
+                if (entries.length > 0) {
+                    await processImportedPhoneEntries(entries);
+                } else {
+                    alert('Dosyada geçerli telefon numarası bulunamadı.');
+                }
+            };
+            reader.readAsText(f);
+            vcfContactsFileInput.value = '';
+        });
+    }
+
+    [menuItemImportContacts, btnImportPhoneContactsModal, btnAddFilter].forEach(btn => {
+        if (btn) btn.addEventListener('click', triggerDeviceContactsImport);
+    });
+})();
+
+// ==========================================================
+// E2EE GÜVENLİK & SIFIR BİLGİ (ZERO-KNOWLEDGE) YEDEKLEME MODALI YÖNETİCİSİ
+// ==========================================================
+(function setupSecurityAndZeroKnowledgeBackupModal() {
+    const securityBackupModal = document.getElementById('securityBackupModal');
+    const btnCloseSecurityBackup = document.getElementById('btnCloseSecurityBackup');
+    const menuItemSecurityBackup = document.getElementById('menuItemSecurityBackup');
+    const btnProfileSecurityBackup = document.getElementById('btnProfileSecurityBackup');
+    const menuItemChatVerifyE2EE = document.getElementById('menuItemChatVerifyE2EE');
+    const chkFlagSecureToggle = document.getElementById('chkFlagSecureToggle');
+    const inputZkBackupPassword = document.getElementById('inputZkBackupPassword');
+    const zkRecoveryKeyBox = document.getElementById('zkRecoveryKeyBox');
+    const btnCreateZkBackup = document.getElementById('btnCreateZkBackup');
+    const btnRestoreZkBackup = document.getElementById('btnRestoreZkBackup');
+    const inputRestoreZkFile = document.getElementById('inputRestoreZkFile');
+
+    function openSecurityModal() {
+        if (headerDropdown) headerDropdown.style.display = 'none';
+        if (chatDropdownMenu) chatDropdownMenu.style.display = 'none';
+        closeProfileModal();
+        if (securityBackupModal) securityBackupModal.style.display = 'flex';
+    }
+
+    function closeSecurityModal() {
+        if (securityBackupModal) securityBackupModal.style.display = 'none';
+    }
+
+    [menuItemSecurityBackup, btnProfileSecurityBackup].forEach(btn => {
+        if (btn) btn.addEventListener('click', openSecurityModal);
+    });
+    if (btnCloseSecurityBackup) btnCloseSecurityBackup.addEventListener('click', closeSecurityModal);
+    if (securityBackupModal) {
+        securityBackupModal.addEventListener('click', (e) => {
+            if (e.target === securityBackupModal) closeSecurityModal();
+        });
+    }
+
+    if (menuItemChatVerifyE2EE) {
+        menuItemChatVerifyE2EE.addEventListener('click', () => {
+            if (chatDropdownMenu) chatDropdownMenu.style.display = 'none';
+            if (window.showE2EEVerificationDialog) window.showE2EEVerificationDialog();
+        });
+    }
+
+    if (chkFlagSecureToggle) {
+        chkFlagSecureToggle.checked = localStorage.getItem('msj_flag_secure') !== 'false';
+        chkFlagSecureToggle.addEventListener('change', () => {
+            localStorage.setItem('msj_flag_secure', chkFlagSecureToggle.checked ? 'true' : 'false');
+            showStatusToast(chkFlagSecureToggle.checked ? '🛡️ FLAG_SECURE ekran koruması aktif' : 'Ekran koruması kapatıldı', true);
+        });
+    }
+
+    if (btnCreateZkBackup) {
+        btnCreateZkBackup.addEventListener('click', async () => {
+            if (!window.MSJCryptoEngine || typeof window.MSJCryptoEngine.createZeroKnowledgeEncryptedBackup !== 'function') return;
+            const pass = inputZkBackupPassword ? inputZkBackupPassword.value.trim() : '';
+            const payload = {
+                user: currentUser,
+                contacts: contactsList,
+                phoneBook: getPersonalPhoneBookForCurrentUser(),
+                exportedAt: new Date().toISOString()
+            };
+            const result = await window.MSJCryptoEngine.createZeroKnowledgeEncryptedBackup(payload, pass);
+            if (zkRecoveryKeyBox && result.recoveryKey64) {
+                zkRecoveryKeyBox.style.display = 'block';
+                zkRecoveryKeyBox.innerHTML = `<strong>64 Haneli Kurtarma Anahtarınız (Lütfen Kaydedin):</strong><br>${escapeHtml(result.recoveryKey64)}`;
+            }
+            const blob = new Blob([JSON.stringify(result.backupBlob, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `HIHaberlesme-ZK-Backup-${(currentUser && currentUser.username) || 'user'}.msjbackup`;
+            a.click();
+            setTimeout(() => URL.revokeObjectURL(url), 3000);
+            showStatusToast('🔐 Sıfır Bilgi (Zero-Knowledge) şifreli yedek indirildi!', true);
+        });
+    }
+
+    if (btnRestoreZkBackup && inputRestoreZkFile) {
+        btnRestoreZkBackup.addEventListener('click', () => inputRestoreZkFile.click());
+        inputRestoreZkFile.addEventListener('change', () => {
+            const f = inputRestoreZkFile.files && inputRestoreZkFile.files[0];
+            if (!f) return;
+            const reader = new FileReader();
+            reader.onload = async (ev) => {
+                try {
+                    const backupBlob = JSON.parse(String(ev.target.result || '{}'));
+                    const pass = (inputZkBackupPassword && inputZkBackupPassword.value.trim()) ||
+                        prompt('Yedeği çözmek için parolanızı veya 64 haneli kurtarma anahtarınızı girin:') || '';
+                    if (!pass) return;
+                    const restored = await window.MSJCryptoEngine.restoreZeroKnowledgeEncryptedBackup(backupBlob, pass);
+                    if (restored && Array.isArray(restored.phoneBook)) {
+                        savePersonalPhoneBookForCurrentUser(restored.phoneBook);
+                    }
+                    if (restored && Array.isArray(restored.contacts)) {
+                        saveCachedContactsForCurrentUser(restored.contacts);
+                        contactsList = mergeContactsWithPermanentUsers(restored.contacts);
+                        renderChatsList(contactsList);
+                    }
+                    showStatusToast('✅ Sıfır Bilgi yedeğiniz başarıyla çözüldü ve geri yüklendi!', true);
+                } catch (err) {
+                    alert('Yedek çözülemedi: Parola veya 64 haneli kurtarma anahtarı hatalı.');
+                }
+            };
+            reader.readAsText(f);
+            inputRestoreZkFile.value = '';
+        });
+    }
+})();
 
 // Uygulamayı Başlat
 initAuth();

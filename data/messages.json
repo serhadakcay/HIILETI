@@ -122,6 +122,56 @@
       "date": "Bugün",
       "createdAt": "2026-10-24T16:28:38.945Z",
       "read": true
+    },
+    {
+      "id": "msg_1792872692190_3ct62f",
+      "sender": "Ser1",
+      "recipient": "Serhad",
+      "text": "dd",
+      "file": null,
+      "timestamp": "20:11",
+      "date": "Bugün",
+      "createdAt": "2026-10-24T20:11:32.285Z",
+      "read": false
+    },
+    {
+      "id": "msg_1792872710775_jfe1l8",
+      "sender": "Ser1",
+      "recipient": "Serhad",
+      "text": "hh",
+      "file": null,
+      "timestamp": "20:11",
+      "date": "Bugün",
+      "createdAt": "2026-10-24T20:11:50.775Z",
+      "read": false
+    },
+    {
+      "id": "msg_1792872928299_31slko",
+      "sender": "Serhad",
+      "recipient": "Ser1",
+      "text": "Dd",
+      "file": null,
+      "timestamp": "20:15",
+      "date": "Bugün",
+      "createdAt": "2026-10-24T20:15:28.300Z",
+      "read": false
+    },
+    {
+      "id": "msg_1792873005230_ctifnv",
+      "sender": "Serhad",
+      "recipient": "Ser1",
+      "text": "",
+      "file": {
+        "url": "/uploads/Screenshot_20261024_231607_Chrome-1792873004936-274595347.jpg",
+        "filename": "Screenshot_20261024_231607_Chrome.jpg",
+        "storedName": "Screenshot_20261024_231607_Chrome-1792873004936-274595347.jpg",
+        "mimetype": "image/jpeg",
+        "size": 395612
+      },
+      "timestamp": "20:16",
+      "date": "Bugün",
+      "createdAt": "2026-10-24T20:16:45.230Z",
+      "read": false
     }
   ]
 }

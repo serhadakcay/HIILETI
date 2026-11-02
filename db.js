@@ -80,6 +80,49 @@ const usersFile = path.join(dataDir, 'users.json');
 const sessionsFile = path.join(dataDir, 'sessions.json');
 const messagesFile = path.join(dataDir, 'messages.json');
 const deletedUsersFile = path.join(dataDir, 'deleted_users.json');
+const userContactsFile = path.join(dataDir, 'user_contacts.json');
+const e2eeKeysFile = path.join(dataDir, 'e2ee_keys.json');
+
+// SQLCipher / AES-256-GCM Yerel Veritabanı (At-Rest) Şifreleme Anahtarı Türetimi
+function getAtRestDbCipherKey() {
+    const crypto = require('crypto');
+    const secret = process.env.MSJ_SQLCIPHER_KEY || 'MSJ_SQLCIPHER_AES256_AT_REST_HARDWARE_BOUND_SECRET_2026';
+    return crypto.createHash('sha256').update(secret, 'utf8').digest();
+}
+
+function encryptAtRestDbText(plainText) {
+    if (!plainText || typeof plainText !== 'string') return plainText || '';
+    if (plainText.startsWith('sqlcipher1:')) return plainText;
+    try {
+        const crypto = require('crypto');
+        const key = getAtRestDbCipherKey();
+        const iv = crypto.randomBytes(12);
+        const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+        const encrypted = Buffer.concat([cipher.update(plainText, 'utf8'), cipher.final()]);
+        const tag = cipher.getAuthTag();
+        return `sqlcipher1:${iv.toString('hex')}:${tag.toString('hex')}:${encrypted.toString('hex')}`;
+    } catch (e) {
+        return plainText;
+    }
+}
+
+function decryptAtRestDbText(storedText) {
+    if (!storedText || typeof storedText !== 'string') return storedText || '';
+    if (!storedText.startsWith('sqlcipher1:')) return storedText;
+    try {
+        const crypto = require('crypto');
+        const parts = storedText.split(':');
+        if (parts.length !== 4) return storedText;
+        const [, ivHex, tagHex, encHex] = parts;
+        const key = getAtRestDbCipherKey();
+        const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(ivHex, 'hex'));
+        decipher.setAuthTag(Buffer.from(tagHex, 'hex'));
+        const decrypted = Buffer.concat([decipher.update(Buffer.from(encHex, 'hex')), decipher.final()]);
+        return decrypted.toString('utf8');
+    } catch (e) {
+        return storedText;
+    }
+}
 
 function ensureDataDir() {
     if (!fs.existsSync(dataDir)) {
@@ -209,6 +252,33 @@ class DatabaseManager {
             CREATE INDEX IF NOT EXISTS idx_messages_convo ON messages(convo_key);
             CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at);
             CREATE INDEX IF NOT EXISTS idx_messages_unread ON messages(recipient, is_read);
+
+            CREATE TABLE IF NOT EXISTS user_contacts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_key TEXT NOT NULL COLLATE NOCASE,
+                contact_key TEXT NOT NULL COLLATE NOCASE,
+                contact_username TEXT NOT NULL COLLATE NOCASE,
+                custom_name TEXT DEFAULT '',
+                phone TEXT DEFAULT '',
+                added_at TEXT,
+                UNIQUE(owner_key, contact_key)
+            );
+            CREATE INDEX IF NOT EXISTS idx_user_contacts_owner ON user_contacts(owner_key);
+
+            CREATE TABLE IF NOT EXISTS e2ee_keys (
+                user_key TEXT PRIMARY KEY COLLATE NOCASE,
+                username TEXT NOT NULL COLLATE NOCASE,
+                protocol_version TEXT DEFAULT 'Signal-X3DH-DoubleRatchet-v2',
+                identity_key TEXT,
+                signing_key TEXT,
+                signed_pre_key TEXT,
+                spk_signature TEXT,
+                one_time_pre_keys_json TEXT DEFAULT '[]',
+                akd_seq INTEGER DEFAULT 1,
+                akd_prev_hash TEXT DEFAULT '',
+                akd_hash TEXT DEFAULT '',
+                updated_at TEXT
+            );
         `);
 
         try {
@@ -275,6 +345,37 @@ class DatabaseManager {
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
         `);
 
+        await this.mysqlPool.query(`
+            CREATE TABLE IF NOT EXISTS user_contacts (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                owner_key VARCHAR(100) NOT NULL,
+                contact_key VARCHAR(100) NOT NULL,
+                contact_username VARCHAR(100) NOT NULL,
+                custom_name VARCHAR(150) DEFAULT '',
+                phone VARCHAR(40) DEFAULT '',
+                added_at VARCHAR(50),
+                UNIQUE KEY uniq_owner_contact (owner_key, contact_key),
+                INDEX idx_user_contacts_owner (owner_key)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+        `);
+
+        await this.mysqlPool.query(`
+            CREATE TABLE IF NOT EXISTS e2ee_keys (
+                user_key VARCHAR(100) PRIMARY KEY,
+                username VARCHAR(100) NOT NULL,
+                protocol_version VARCHAR(100) DEFAULT 'Signal-X3DH-DoubleRatchet-v2',
+                identity_key TEXT,
+                signing_key TEXT,
+                signed_pre_key TEXT,
+                spk_signature TEXT,
+                one_time_pre_keys_json LONGTEXT,
+                akd_seq INT DEFAULT 1,
+                akd_prev_hash VARCHAR(128) DEFAULT '',
+                akd_hash VARCHAR(128) DEFAULT '',
+                updated_at VARCHAR(50)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+        `);
+
         console.log(`[MySQL] MySQL veritabanı aktif: ${config.mysql.host}:${config.mysql.port}/${config.mysql.database}`);
     }
 
@@ -297,33 +398,6 @@ class DatabaseManager {
             ensureDataDir();
             const crypto = require('crypto');
             const deletedMap = getDeletedUsersMap();
-
-            // 0. Kalıcı temel kullanıcıların (Serhad, S1, Ser1, cözücem) kullanıcı kendisi silmediği sürece her zaman var olmasını garanti et
-            const permanentDefaults = ['Serhad', 'S1', 'Ser1', 'cözücem'];
-            let rawUsersInit = {};
-            if (fs.existsSync(usersFile)) {
-                try { rawUsersInit = JSON.parse(fs.readFileSync(usersFile, 'utf8') || '{}'); } catch (e) { rawUsersInit = {}; }
-            }
-            let usersFileModified = false;
-            for (const defName of permanentDefaults) {
-                const defKey = normalizeKey(defName);
-                if (!deletedMap[defKey] && !rawUsersInit[defKey]) {
-                    const salt = crypto.randomBytes(16).toString('hex');
-                    const hash = crypto.pbkdf2Sync('123456', salt, 1000, 64, 'sha512').toString('hex');
-                    rawUsersInit[defKey] = {
-                        username: defName,
-                        salt,
-                        hash,
-                        avatar: '/avatars/default.svg',
-                        lastSeen: 'Offline',
-                        createdAt: new Date().toISOString()
-                    };
-                    usersFileModified = true;
-                }
-            }
-            if (usersFileModified) {
-                try { fs.writeFileSync(usersFile, JSON.stringify(rawUsersInit, null, 2), 'utf8'); } catch (e) {}
-            }
 
             // A) JSON'dan veritabanına aktar (Eksik kullanıcı veya mesajları geri yükle)
             // 1. Kullanıcılar
@@ -994,10 +1068,11 @@ class DatabaseManager {
         const convoKey = getConvoKey(msg.sender, msg.recipient);
         const id = msg.id || ('msg_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6));
         const fileJson = msg.file ? JSON.stringify(msg.file) : null;
-        let cleanText = decryptE2EETextIfNeeded(msg.text || '', msg.sender, msg.recipient);
+        let cleanText = decryptAtRestDbText(decryptE2EETextIfNeeded(msg.text || '', msg.sender, msg.recipient));
         if (msg.file && cleanText === '📎 Dosya / Fotoğraf paylaştı') {
             cleanText = '';
         }
+        const storedCipherText = encryptAtRestDbText(cleanText);
         const timestamp = msg.timestamp || new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' });
         const dateStr = msg.date || 'Bugün';
         const createdAt = msg.createdAt || new Date().toISOString();
@@ -1009,9 +1084,9 @@ class DatabaseManager {
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                  ON DUPLICATE KEY UPDATE
                      is_read = GREATEST(is_read, VALUES(is_read)),
-                     text = IF(VALUES(file_json) IS NOT NULL AND file_json IS NULL, VALUES(text), IF(text LIKE 'e2ee1:%' AND VALUES(text) NOT LIKE 'e2ee1:%', VALUES(text), text)),
+                     text = IF(VALUES(file_json) IS NOT NULL AND file_json IS NULL, VALUES(text), text),
                      file_json = COALESCE(VALUES(file_json), file_json)`,
-                [id, convoKey, msg.sender, msg.recipient, cleanText, fileJson, timestamp, dateStr, createdAt, isRead]
+                [id, convoKey, msg.sender, msg.recipient, storedCipherText, fileJson, timestamp, dateStr, createdAt, isRead]
             );
         } else {
             this.sqliteDb.prepare(`
@@ -1021,11 +1096,10 @@ class DatabaseManager {
                     is_read = MAX(messages.is_read, excluded.is_read),
                     text = CASE
                         WHEN excluded.file_json IS NOT NULL AND messages.file_json IS NULL THEN excluded.text
-                        WHEN messages.text LIKE 'e2ee1:%' AND excluded.text NOT LIKE 'e2ee1:%' THEN excluded.text
                         ELSE messages.text
                     END,
                     file_json = COALESCE(excluded.file_json, messages.file_json)
-            `).run(id, convoKey, msg.sender, msg.recipient, cleanText, fileJson, timestamp, dateStr, createdAt, isRead);
+            `).run(id, convoKey, msg.sender, msg.recipient, storedCipherText, fileJson, timestamp, dateStr, createdAt, isRead);
         }
     }
 
@@ -1033,10 +1107,11 @@ class DatabaseManager {
         const convoKey = getConvoKey(msg.sender, msg.recipient);
         const id = msg.id || ('msg_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6));
         const fileJson = msg.file ? JSON.stringify(msg.file) : null;
-        let cleanText = decryptE2EETextIfNeeded(msg.text || '', msg.sender, msg.recipient);
+        let cleanText = decryptAtRestDbText(decryptE2EETextIfNeeded(msg.text || '', msg.sender, msg.recipient));
         if (msg.file && cleanText === '📎 Dosya / Fotoğraf paylaştı') {
             cleanText = '';
         }
+        const storedCipherText = encryptAtRestDbText(cleanText);
         const timestamp = msg.timestamp || new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' });
         const dateStr = msg.date || 'Bugün';
         const createdAt = msg.createdAt || new Date().toISOString();
@@ -1046,15 +1121,23 @@ class DatabaseManager {
             await this.mysqlPool.query(
                 `INSERT INTO messages (id, convo_key, sender, recipient, text, file_json, timestamp, date_str, created_at, is_read)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [id, convoKey, msg.sender, msg.recipient, cleanText, fileJson, timestamp, dateStr, createdAt, isRead]
+                [id, convoKey, msg.sender, msg.recipient, storedCipherText, fileJson, timestamp, dateStr, createdAt, isRead]
             );
         } else {
             this.sqliteDb.prepare(`
                 INSERT INTO messages (id, convo_key, sender, recipient, text, file_json, timestamp, date_str, created_at, is_read)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            `).run(id, convoKey, msg.sender, msg.recipient, cleanText, fileJson, timestamp, dateStr, createdAt, isRead);
+            `).run(id, convoKey, msg.sender, msg.recipient, storedCipherText, fileJson, timestamp, dateStr, createdAt, isRead);
             this.checkpointSqlite();
         }
+
+        // Mesajlaşılan kişileri birbirinin kişi listesine otomatik kaydet
+        try {
+            if (msg.sender && msg.recipient) {
+                await this.addContactForUser(msg.sender, msg.recipient);
+                await this.addContactForUser(msg.recipient, msg.sender);
+            }
+        } catch (e) {}
 
         const savedResult = {
             id,
@@ -1248,10 +1331,290 @@ class DatabaseManager {
         };
     }
 
-    // SOHBETLER LİSTESİ VE SON MESAJLAR
+    // ========================================================
+    // KİŞİSEL REHBER (HER KULLANICI SADECE KENDİ REHBERİNDEKİ / MESAJLAŞTIĞI KİŞİLERİ GÖRÜR)
+    // ========================================================
+    async addContactForUser(ownerUsername, contactUsername, customName = '', phone = '') {
+        const ownerKey = normalizeKey(ownerUsername);
+        const contactKey = normalizeKey(contactUsername);
+        if (!ownerKey || !contactKey || ownerKey === contactKey) return false;
+
+        const now = new Date().toISOString();
+        const cName = String(customName || '').trim();
+        const cPhone = normalizePhone(phone || '');
+
+        if (this.type === 'mysql') {
+            await this.mysqlPool.query(
+                `INSERT INTO user_contacts (owner_key, contact_key, contact_username, custom_name, phone, added_at)
+                 VALUES (?, ?, ?, ?, ?, ?)
+                 ON DUPLICATE KEY UPDATE
+                     contact_username = VALUES(contact_username),
+                     custom_name = IF(VALUES(custom_name) != '', VALUES(custom_name), custom_name),
+                     phone = IF(VALUES(phone) != '', VALUES(phone), phone)`,
+                [ownerKey, contactKey, contactUsername.trim(), cName, cPhone, now]
+            );
+        } else {
+            this.sqliteDb.prepare(`
+                INSERT INTO user_contacts (owner_key, contact_key, contact_username, custom_name, phone, added_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(owner_key, contact_key) DO UPDATE SET
+                    contact_username = excluded.contact_username,
+                    custom_name = CASE WHEN excluded.custom_name != '' THEN excluded.custom_name ELSE user_contacts.custom_name END,
+                    phone = CASE WHEN excluded.phone != '' THEN excluded.phone ELSE user_contacts.phone END
+            `).run(ownerKey, contactKey, contactUsername.trim(), cName, cPhone, now);
+            this.checkpointSqlite();
+        }
+
+        // JSON yedek
+        try {
+            ensureDataDir();
+            let raw = {};
+            if (fs.existsSync(userContactsFile)) {
+                try { raw = JSON.parse(fs.readFileSync(userContactsFile, 'utf8') || '{}'); } catch (e) {}
+            }
+            if (!raw[ownerKey]) raw[ownerKey] = {};
+            const prev = raw[ownerKey][contactKey] || {};
+            raw[ownerKey][contactKey] = {
+                contactUsername: contactUsername.trim(),
+                customName: cName || prev.customName || '',
+                phone: cPhone || prev.phone || '',
+                addedAt: prev.addedAt || now
+            };
+            fs.writeFileSync(userContactsFile, JSON.stringify(raw, null, 2), 'utf8');
+        } catch (e) {}
+
+        return true;
+    }
+
+    async getContactsForUser(ownerUsername) {
+        const ownerKey = normalizeKey(ownerUsername);
+        if (!ownerKey) return new Map();
+        const map = new Map();
+
+        try {
+            if (this.type === 'mysql') {
+                const [rows] = await this.mysqlPool.query('SELECT * FROM user_contacts WHERE owner_key = ?', [ownerKey]);
+                for (const r of rows) {
+                    map.set(r.contact_key, {
+                        contactKey: r.contact_key,
+                        contactUsername: r.contact_username,
+                        customName: r.custom_name || '',
+                        phone: r.phone || '',
+                        addedAt: r.added_at
+                    });
+                }
+            } else {
+                const rows = this.sqliteDb.prepare('SELECT * FROM user_contacts WHERE owner_key = ?').all(ownerKey);
+                for (const r of rows) {
+                    map.set(r.contact_key, {
+                        contactKey: r.contact_key,
+                        contactUsername: r.contact_username,
+                        customName: r.custom_name || '',
+                        phone: r.phone || '',
+                        addedAt: r.added_at
+                    });
+                }
+            }
+        } catch (e) {}
+
+        // JSON yedekten de oku (varsa eksik olanları tamamla)
+        try {
+            if (fs.existsSync(userContactsFile)) {
+                const raw = JSON.parse(fs.readFileSync(userContactsFile, 'utf8') || '{}');
+                const ownerMap = raw[ownerKey] || {};
+                for (const cKey of Object.keys(ownerMap)) {
+                    if (!map.has(cKey)) {
+                        const item = ownerMap[cKey];
+                        map.set(cKey, {
+                            contactKey: cKey,
+                            contactUsername: item.contactUsername || cKey,
+                            customName: item.customName || '',
+                            phone: item.phone || '',
+                            addedAt: item.addedAt || ''
+                        });
+                    }
+                }
+            }
+        } catch (e) {}
+
+        return map;
+    }
+
+    // Metadata Korumalı (SHA-256 Hash) Rehber Eşleştirme
+    async matchHashedPhones(phoneHashesArray, ownerUsername = '') {
+        const crypto = require('crypto');
+        const hashSet = new Set((phoneHashesArray || []).map(h => String(h || '').toLowerCase().trim()).filter(Boolean));
+        if (hashSet.size === 0) return [];
+
+        const allUsers = await this.getAllUsers();
+        const ownerKey = normalizeKey(ownerUsername);
+        const matched = [];
+
+        for (const u of allUsers) {
+            if (u.userKey === ownerKey) continue;
+            const candidatePhone = normalizePhone(u.phone || (isLikelyPhoneNumber(u.username) ? u.username : ''));
+            if (!candidatePhone) continue;
+
+            const h1 = crypto.createHash('sha256').update('MSJ_PRIVATE_CONTACT_DISCOVERY_V1::' + candidatePhone, 'utf8').digest('hex');
+            const h2 = crypto.createHash('sha256').update(candidatePhone, 'utf8').digest('hex');
+
+            if (hashSet.has(h1) || hashSet.has(h2)) {
+                if (ownerUsername) {
+                    await this.addContactForUser(ownerUsername, u.username, '', candidatePhone);
+                }
+                matched.push({
+                    username: u.username,
+                    phone: candidatePhone,
+                    avatar: u.avatar || '/avatars/default.svg',
+                    phoneHash: h1
+                });
+            }
+        }
+        return matched;
+    }
+
+    // ========================================================
+    // SIGNAL X3DH / DOUBLE RATCHET KEY BUNDLE & AKD KEY TRANSPARENCY
+    // ========================================================
+    async saveUserKeyBundle(username, bundleObj = {}) {
+        const uKey = normalizeKey(username);
+        if (!uKey) return null;
+        const crypto = require('crypto');
+        const now = new Date().toISOString();
+
+        const existing = await this.getUserKeyBundle(username);
+        const nextSeq = existing ? ((existing.akdSeq || 0) + 1) : 1;
+        const prevHash = existing ? (existing.akdHash || 'GENESIS_AKD_ROOT_00000000') : 'GENESIS_AKD_ROOT_00000000';
+
+        const identityKey = String(bundleObj.identityKey || (existing && existing.identityKey) || '');
+        const signingKey = String(bundleObj.signingKey || (existing && existing.signingKey) || '');
+        const signedPreKey = String(bundleObj.signedPreKey || (existing && existing.signedPreKey) || '');
+        const spkSignature = String(bundleObj.spkSignature || (existing && existing.spkSignature) || '');
+        const oneTimePreKeys = Array.isArray(bundleObj.oneTimePreKeys)
+            ? bundleObj.oneTimePreKeys
+            : (existing && existing.oneTimePreKeys ? existing.oneTimePreKeys : []);
+
+        // AKD (Auditable Key Directory) Merkle / Hash-Chain Kanıtı
+        const akdHash = crypto.createHash('sha256')
+            .update(`AKD_V1::${uKey}::${nextSeq}::${prevHash}::${identityKey}::${signingKey}::${signedPreKey}`, 'utf8')
+            .digest('hex');
+
+        const otpkJson = JSON.stringify(oneTimePreKeys);
+        const protocolVersion = bundleObj.protocolVersion || 'Signal-X3DH-DoubleRatchet-v2';
+
+        if (this.type === 'mysql') {
+            await this.mysqlPool.query(
+                `INSERT INTO e2ee_keys (user_key, username, protocol_version, identity_key, signing_key, signed_pre_key, spk_signature, one_time_pre_keys_json, akd_seq, akd_prev_hash, akd_hash, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ON DUPLICATE KEY UPDATE
+                     username = VALUES(username),
+                     protocol_version = VALUES(protocol_version),
+                     identity_key = VALUES(identity_key),
+                     signing_key = VALUES(signing_key),
+                     signed_pre_key = VALUES(signed_pre_key),
+                     spk_signature = VALUES(spk_signature),
+                     one_time_pre_keys_json = VALUES(one_time_pre_keys_json),
+                     akd_seq = VALUES(akd_seq),
+                     akd_prev_hash = VALUES(akd_prev_hash),
+                     akd_hash = VALUES(akd_hash),
+                     updated_at = VALUES(updated_at)`,
+                [uKey, username.trim(), protocolVersion, identityKey, signingKey, signedPreKey, spkSignature, otpkJson, nextSeq, prevHash, akdHash, now]
+            );
+        } else {
+            this.sqliteDb.prepare(`
+                INSERT INTO e2ee_keys (user_key, username, protocol_version, identity_key, signing_key, signed_pre_key, spk_signature, one_time_pre_keys_json, akd_seq, akd_prev_hash, akd_hash, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_key) DO UPDATE SET
+                    username = excluded.username,
+                    protocol_version = excluded.protocol_version,
+                    identity_key = excluded.identity_key,
+                    signing_key = excluded.signing_key,
+                    signed_pre_key = excluded.signed_pre_key,
+                    spk_signature = excluded.spk_signature,
+                    one_time_pre_keys_json = excluded.one_time_pre_keys_json,
+                    akd_seq = excluded.akd_seq,
+                    akd_prev_hash = excluded.akd_prev_hash,
+                    akd_hash = excluded.akd_hash,
+                    updated_at = excluded.updated_at
+            `).run(uKey, username.trim(), protocolVersion, identityKey, signingKey, signedPreKey, spkSignature, otpkJson, nextSeq, prevHash, akdHash, now);
+            this.checkpointSqlite();
+        }
+
+        const record = {
+            userKey: uKey,
+            username: username.trim(),
+            protocolVersion,
+            identityKey,
+            signingKey,
+            signedPreKey,
+            spkSignature,
+            oneTimePreKeys,
+            akdSeq: nextSeq,
+            akdPrevHash: prevHash,
+            akdHash,
+            updatedAt: now
+        };
+
+        try {
+            ensureDataDir();
+            let raw = {};
+            if (fs.existsSync(e2eeKeysFile)) {
+                try { raw = JSON.parse(fs.readFileSync(e2eeKeysFile, 'utf8') || '{}'); } catch (e) {}
+            }
+            raw[uKey] = record;
+            fs.writeFileSync(e2eeKeysFile, JSON.stringify(raw, null, 2), 'utf8');
+        } catch (e) {}
+
+        return record;
+    }
+
+    async getUserKeyBundle(username) {
+        const uKey = normalizeKey(username);
+        if (!uKey) return null;
+
+        try {
+            let row = null;
+            if (this.type === 'mysql') {
+                const [rows] = await this.mysqlPool.query('SELECT * FROM e2ee_keys WHERE user_key = ?', [uKey]);
+                if (rows.length > 0) row = rows[0];
+            } else {
+                row = this.sqliteDb.prepare('SELECT * FROM e2ee_keys WHERE user_key = ?').get(uKey);
+            }
+            if (row) {
+                let otpk = [];
+                try { otpk = JSON.parse(row.one_time_pre_keys_json || '[]'); } catch (e) {}
+                return {
+                    userKey: row.user_key,
+                    username: row.username,
+                    protocolVersion: row.protocol_version,
+                    identityKey: row.identity_key,
+                    signingKey: row.signing_key,
+                    signedPreKey: row.signed_pre_key,
+                    spkSignature: row.spk_signature,
+                    oneTimePreKeys: otpk,
+                    akdSeq: row.akd_seq || 1,
+                    akdPrevHash: row.akd_prev_hash || '',
+                    akdHash: row.akd_hash || '',
+                    updatedAt: row.updated_at
+                };
+            }
+        } catch (e) {}
+
+        try {
+            if (fs.existsSync(e2eeKeysFile)) {
+                const raw = JSON.parse(fs.readFileSync(e2eeKeysFile, 'utf8') || '{}');
+                if (raw[uKey]) return raw[uKey];
+            }
+        } catch (e) {}
+
+        return null;
+    }
+
+    // SOHBETLER LİSTESİ VE SON MESAJLAR (Sadece kullanıcının kendi rehberindeki veya mesajlaştığı kişiler)
     async getChatsList(currentUsername, onlineUserKeysMap) {
         const currentKey = normalizeKey(currentUsername);
         const allUsers = await this.getAllUsers();
+        const personalContactsMap = await this.getContactsForUser(currentUsername);
         const chatItems = [];
 
         for (const contact of allUsers) {
@@ -1285,12 +1648,22 @@ class DatabaseManager {
                 unreadCount = uRow ? uRow.cnt : 0;
             }
 
+            // GİZLİLİK KURALI (Madde 5):
+            // Her kayıtlı kullanıcı sistemdeki tüm kayıtlı isimleri görmemeli!
+            // Sadece kendi rehberine eklediği (personalContactsMap) VEYA mesaj geçmişi (lastRow) olan kişileri görmeli.
+            const isInPersonalContacts = personalContactsMap.has(contact.userKey);
+            if (!isInPersonalContacts && !lastRow && unreadCount === 0) {
+                continue;
+            }
+
+            const savedContactInfo = personalContactsMap.get(contact.userKey);
             const isOnline = onlineUserKeysMap && onlineUserKeysMap.has(contact.userKey) && onlineUserKeysMap.get(contact.userKey).size > 0;
             const lastMsg = lastRow ? this.formatMessageRow(lastRow) : null;
 
             chatItems.push({
                 username: contact.username,
-                phone: contact.phone || '',
+                customName: (savedContactInfo && savedContactInfo.customName) ? savedContactInfo.customName : '',
+                phone: contact.phone || (savedContactInfo && savedContactInfo.phone) || '',
                 avatar: contact.avatar || '/avatars/default.svg',
                 isOnline,
                 statusText: isOnline ? 'Online' : 'Offline',
@@ -1318,7 +1691,8 @@ class DatabaseManager {
             try { fileObj = JSON.parse(row.file_json); } catch (e) {}
         }
 
-        let cleanText = decryptE2EETextIfNeeded(row.text || '', row.sender, row.recipient);
+        const rawDecrypted = decryptAtRestDbText(row.text || '');
+        let cleanText = decryptE2EETextIfNeeded(rawDecrypted, row.sender, row.recipient);
         if (fileObj && cleanText === '📎 Dosya / Fotoğraf paylaştı') {
             cleanText = '';
         }

@@ -898,9 +898,9 @@ html, body {
    ========================================================== */
 .chat-screen {
     width: 100%;
-    max-width: 860px;
+    max-width: 100%;
     height: 100%;
-    height: 100dvh;
+    height: var(--app-height, 100dvh);
     display: none;
     flex-direction: column;
     background-color: var(--bg-dark);
@@ -1298,16 +1298,23 @@ html, body {
 
 /* ==========================================================
    KULLANICI GİRİŞİ / ŞİFRE KARTI (AUTH OVERLAY)
+   Mobil Klavye Korumalı & Tüm Ekranlara Uyumlu
    ========================================================== */
 .auth-overlay {
     position: fixed;
-    inset: 0;
-    background-color: rgba(11, 20, 26, 0.95);
+    top: 0;
+    left: 0;
+    right: 0;
+    height: var(--app-height, 100dvh);
+    max-height: 100dvh;
+    background-color: rgba(11, 20, 26, 0.96);
     display: flex;
-    align-items: center;
+    align-items: safe center;
     justify-content: center;
     z-index: 2000;
-    padding: 16px;
+    padding: 12px;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
 }
 
 .auth-card-whatsapp {
@@ -1315,7 +1322,8 @@ html, body {
     border-radius: 18px;
     width: 100%;
     max-width: 400px;
-    padding: 32px 24px;
+    padding: 22px 20px;
+    margin: auto 0;
     box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
     text-align: center;
     border: 1px solid rgba(255, 255, 255, 0.05);
@@ -2613,5 +2621,163 @@ html, body {
     background-color: rgba(0, 168, 132, 0.85);
     color: #fff;
 }
+
+@keyframes bounceDown {
+    0%, 100% {
+        transform: translateY(0);
+    }
+    50% {
+        transform: translateY(6px);
+    }
+}
+
+.dropdown-menu {
+    z-index: 2500;
+}
+
+.dropdown-item {
+    -webkit-tap-highlight-color: rgba(0, 168, 132, 0.2);
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+/* ==========================================================
+   MADDE 1 & 3: HER BOYUTTA VE ÇÖZÜNÜRLÜKTE TELEFON EKRANI VE MONİTÖRE SIĞMA
+   + MOBİL KLAVYE AÇILDIĞINDA ŞİFRE ALANININ KAPANMAMASI
+   ========================================================== */
+body.keyboard-open .auth-overlay,
+@media (max-height: 700px) {
+    .auth-overlay {
+        align-items: flex-start !important;
+        padding-top: 8px !important;
+        padding-bottom: 140px !important;
+    }
+    .auth-card-whatsapp {
+        padding: 14px 16px !important;
+        margin: 0 auto 24px auto !important;
+    }
+    .auth-wa-logo {
+        display: none !important;
+    }
+    .auth-card-header h2 {
+        font-size: 17px !important;
+        margin-bottom: 2px !important;
+    }
+    .auth-card-header p {
+        font-size: 12px !important;
+        margin-bottom: 8px !important;
+    }
+    .auth-tabs-header {
+        margin-bottom: 10px !important;
+        padding: 3px !important;
+    }
+    .auth-tab-btn {
+        padding: 7px !important;
+        font-size: 12.5px !important;
+    }
+    .form-field {
+        margin-bottom: 10px !important;
+    }
+    .form-field label {
+        font-size: 12px !important;
+        margin-bottom: 3px !important;
+    }
+    .auth-select, .auth-input {
+        padding: 9px 12px !important;
+        font-size: 14px !important;
+    }
+    .form-checkbox {
+        margin: 8px 0 10px !important;
+    }
+    .auth-submit-btn {
+        padding: 11px !important;
+        font-size: 15px !important;
+    }
+    .auth-toggle-row {
+        margin-top: 10px !important;
+    }
+}
+
+/* Çok Küçük Ekranlı Telefonlar (320px - 360px) */
+@media (max-width: 375px) {
+    .main-header, .chat-header {
+        height: 52px;
+        padding: 0 8px;
+    }
+    .header-title {
+        font-size: 18px;
+    }
+    .icon-btn {
+        width: 34px;
+        height: 34px;
+    }
+    .filter-chips-row {
+        padding: 4px 10px 8px;
+        gap: 6px;
+    }
+    .filter-chip {
+        padding: 5px 10px;
+        font-size: 12px;
+    }
+    .chat-list-item {
+        padding: 10px 10px;
+    }
+    .chat-bottom-input-bar {
+        padding: 6px 8px;
+        gap: 6px;
+    }
+    .auth-card-whatsapp {
+        padding: 16px 14px;
+    }
+}
+
+/* Geniş Ekran Monitörler (Full HD, 2K, 4K) için Tam Uyum */
+@media (min-width: 1024px) {
+    .chats-screen, .chat-screen {
+        width: 100%;
+        max-width: 100%;
+    }
+    .chat-messages-canvas {
+        padding: 18px 8%;
+    }
+    .message-row {
+        max-width: 72%;
+    }
+}
+
+/* ==========================================================
+   MADDE 6: KULLANICI ARKA PLANI VE MESAJ SAYFASI ÖZEL ARKA PLAN RESMİ
+   ========================================================== */
+#chatsScreen.has-custom-users-bg {
+    background-image: var(--custom-users-bg-image) !important;
+    background-size: cover !important;
+    background-position: center center !important;
+    background-repeat: no-repeat !important;
+}
+
+#chatsScreen.has-custom-users-bg #chatListContainer {
+    background-color: rgba(11, 20, 26, var(--custom-bg-dim, 0.35)) !important;
+    backdrop-filter: blur(1px);
+}
+
+#chatsScreen.has-custom-users-bg .chat-list-item {
+    background-color: rgba(17, 27, 33, 0.72);
+    margin: 3px 8px;
+    border-radius: 10px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+#chatsScreen.has-custom-users-bg .chat-list-item:hover {
+    background-color: rgba(32, 44, 51, 0.88);
+}
+
+#messagesContainer.has-custom-chat-bg {
+    background-image: linear-gradient(rgba(11, 20, 26, var(--custom-bg-dim, 0.35)), rgba(11, 20, 26, var(--custom-bg-dim, 0.35))), var(--custom-chat-bg-image) !important;
+    background-size: cover !important;
+    background-position: center center !important;
+    background-repeat: no-repeat !important;
+}
+
+
 
 

@@ -13,7 +13,7 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="HIHaberleşme">
     <meta name="mobile-web-app-capable" content="yes">
-    <link rel="stylesheet" href="/style.css?v=18">
+    <link rel="stylesheet" href="/style.css?v=21">
 </head>
 <body>
     <!-- ==========================================
@@ -56,6 +56,12 @@
                     </div>
                 </div>
                 <div class="header-actions">
+                    <!-- Arka Plan Resmi Hızlı Ayar Butonu -->
+                    <button class="icon-btn" id="btnHeaderBgSettings" title="Kullanıcı ve Mesaj Arka Plan Resmi Seç">
+                        <svg viewBox="0 0 24 24" width="21" height="21" fill="currentColor">
+                            <path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/>
+                        </svg>
+                    </button>
                     <!-- Ses / Mikrofon & Hoparlör Hızlı Ayar Butonu -->
                     <button class="icon-btn" id="btnHeaderAudioSettings" title="Mikrofon ve Hoparlör Ayarları">
                         <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor">
@@ -79,8 +85,11 @@
 
                 <!-- Açılır Menü (Üç Nokta) -->
                 <div class="dropdown-menu" id="headerDropdown" style="display:none;">
+                    <div class="dropdown-item" id="menuItemBgSettings">🖼️ Arka Plan Resmi Ayarları</div>
+                    <div class="dropdown-item" id="menuItemPhoneLookup">📱 Telefon Numarasından Bul ve Davet Et</div>
+                    <div class="dropdown-item" id="menuItemImportContacts">📒 Telefon Rehberimden Kişileri Aktar</div>
+                    <div class="dropdown-item" id="menuItemSecurityBackup">🛡️ E2EE Güvenlik & Sıfır Bilgi Yedekleme</div>
                     <div class="dropdown-item" id="menuItemAudioSettings">🎧 Mikrofon ve Hoparlör Ayarları</div>
-                    <div class="dropdown-item" id="menuItemPhoneLookup">📱 Telefon Numarasından Kişi Bul</div>
                     <div class="dropdown-item" id="menuItemQr">📱 Telefondan Bağlan / QR Kod</div>
                     <div class="dropdown-item" id="menuItemCloudGuide">☁️ 7/24 Kullanım (PC Kapalıyken)</div>
                     <div class="dropdown-item" id="menuItemNewChat">💬 Yeni Yazışma Başlat</div>
@@ -98,7 +107,7 @@
                     <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" class="search-icon">
                         <path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/>
                     </svg>
-                    <input type="text" id="inputSearchChats" placeholder="Kişi ara veya telefon numarası yazın (05XX...)" autocomplete="off" />
+                    <input type="text" id="inputSearchChats" placeholder="Rehberimde ara veya telefon numarası yazın (05XX...)" autocomplete="off" />
                     <button class="clear-search-btn" id="btnClearSearch" style="display:none;">&times;</button>
                 </div>
             </div>
@@ -109,8 +118,9 @@
                 <button type="button" class="filter-chip" data-filter="online">Online</button>
                 <button type="button" class="filter-chip" data-filter="unread">Okunmamış</button>
                 <button type="button" class="filter-chip" data-filter="favorites">Favoriler</button>
-                <button type="button" class="filter-chip" id="btnQuickPhoneLookup" style="background:rgba(0,168,132,0.18);color:#25d366;border:1px solid rgba(0,168,132,0.45);font-weight:600;" title="Kayıtlı olmayan kişiyi telefon numarasından bul">📱 Numaradan Bul</button>
-                <button type="button" class="filter-chip plus-chip" id="btnAddFilter" title="Filtre Ekle">+</button>
+                <button type="button" class="filter-chip" id="btnQuickPhoneLookup" style="background:rgba(0,168,132,0.18);color:#25d366;border:1px solid rgba(0,168,132,0.45);font-weight:600;" title="Telefon numarasından bul ve davet mesajı gönder">📱 Numaradan Bul & Davet Et</button>
+                <button type="button" class="filter-chip" id="btnQuickBgSettings" style="background:rgba(83,189,235,0.15);color:#53bdeb;border:1px solid rgba(83,189,235,0.4);font-weight:600;" title="Kullanıcı ve Mesaj Arka Plan Resmi Seç">🖼️ Arka Plan</button>
+                <button type="button" class="filter-chip plus-chip" id="btnAddFilter" title="Telefon Rehberinden Kişi Ekle">+</button>
             </div>
 
             <!-- SOHBETLER / KAYITLI KULLANICILAR LİSTESİ -->
@@ -118,7 +128,7 @@
                 <!-- JavaScript ile dinamik olarak render edilecek -->
                 <div class="loading-spinner" id="chatListLoading">
                     <div class="spinner"></div>
-                    <span>Kayıtlı kullanıcılar yükleniyor...</span>
+                    <span>Rehberiniz yükleniyor...</span>
                 </div>
             </div>
 
@@ -140,7 +150,7 @@
                     <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor">
                         <path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/>
                     </svg>
-                    <span class="back-btn-text">Kullanıcılar</span>
+                    <span class="back-btn-text">Rehber</span>
                     <span class="back-unread-bubble" id="backUnreadBadge" style="display:none;" title="Yeni Mesaj">✉️ <span id="backUnreadCount">0</span></span>
                 </button>
                 <div class="chat-user-avatar-wrap" id="headerAvatarWrap">
@@ -153,13 +163,13 @@
                 </div>
                 <div class="chat-header-actions">
                     <!-- Görüntülü Arama -->
-                    <button class="icon-btn" id="btnVideoCall" title="Görüntülü Arama">
+                    <button class="icon-btn" id="btnVideoCall" title="Görüntülü Arama (DTLS-SRTP E2EE)">
                         <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor">
                             <path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/>
                         </svg>
                     </button>
                     <!-- Sesli Arama -->
-                    <button class="icon-btn" id="btnVoiceCall" title="Sesli Arama">
+                    <button class="icon-btn" id="btnVoiceCall" title="Sesli Arama (DTLS-SRTP E2EE)">
                         <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor">
                             <path d="M20.01 15.38c-1.23 0-2.42-.2-3.53-.56a.977.977 0 0 0-1.01.24l-1.57 1.97c-2.83-1.35-5.43-3.9-6.63-6.81l1.97-1.51c.31-.24.4-.67.27-1.04-.37-1.12-.57-2.32-.57-3.57 0-.55-.45-1-1-1H4.51c-.55 0-1 .45-1 1 0 9.39 7.63 17.02 17.02 17.02.55 0 1-.45 1-1v-4.52c0-.55-.45-1-1-1z"/>
                         </svg>
@@ -172,7 +182,10 @@
                     </button>
                     <!-- Sohbet Seçenekleri Açılır Menüsü -->
                     <div class="dropdown-menu chat-options-dropdown" id="chatDropdownMenu" style="display:none;">
+                        <div class="dropdown-item" id="menuItemChatBgSettings">🖼️ Mesaj Sayfası Arka Plan Resmi Seç</div>
+                        <div class="dropdown-item" id="menuItemChatVerifyE2EE">🔐 Signal E2EE & QR Kod Doğrulaması</div>
                         <div class="dropdown-item" id="menuItemChatAudioSettings">🎧 Mikrofon ve Hoparlör Ayarları</div>
+                        <div class="dropdown-item" id="menuItemChatInstall">📲 Uygulamayı Yükle (PWA)</div>
                         <div class="dropdown-item danger" id="menuItemClearChat">🗑️ Sohbeti Temizle (Yazışmaları Sil)</div>
                         <div class="dropdown-item danger" id="menuItemDeleteUser">❌ Bu Kullanıcıyı Sil (Kayıtlardan Kaldır)</div>
                         <div class="dropdown-item" id="menuItemContactInfo">👤 Kullanıcı Bilgisi</div>
@@ -182,17 +195,17 @@
                 </div>
             </header>
 
-            <!-- MESAJLAR ALANI (WHATSAPP KOYU DOODLE DUVAR KAĞIDI) -->
+            <!-- MESAJLAR ALANI (WHATSAPP KOYU DOODLE DUVAR KAĞIDI VEYA ÖZEL RESİM) -->
             <div class="chat-messages-canvas" id="messagesContainer">
                 <!-- TARİH ROZETİ -->
                 <div class="date-pill-badge" id="chatDateBadge">Bugün</div>
 
                 <!-- SARI ŞİFRELEME UYARISI BANNERI (RESİM 2) -->
-                <div class="encryption-warning-banner" onclick="if(window.showE2EEVerificationDialog) window.showE2EEVerificationDialog();" style="cursor:pointer;" title="Uçtan Uca Şifreleme (E2EE) Güvenlik Kodunu Doğrula">
+                <div class="encryption-warning-banner" onclick="if(window.showE2EEVerificationDialog) window.showE2EEVerificationDialog();" style="cursor:pointer;" title="Signal X3DH + Double Ratchet Uçtan Uca Şifreleme Doğrulaması">
                     <span class="enc-icon">🔒</span>
                     <span class="enc-text">
-                        Mesajlar ve aramalar uçtan uca şifrelidir (256-Bit E2EE). Yalnızca bu sohbetteki kişiler bu içerikleri okuyabilir, dinleyebilir veya paylaşabilir.
-                        <a href="javascript:void(0);" class="enc-link" id="btnEncDetails">Güvenlik kodunu doğrula</a>
+                        Mesajlar ve aramalar Signal Protokolü (X3DH + Double Ratchet, Curve25519, Ed25519, AES-256-GCM) ile uçtan uca şifrelidir. Sunucu dahil hiç kimse okuyamaz.
+                        <a href="javascript:void(0);" class="enc-link" id="btnEncDetails">QR & Sesli Güvenlik Doğrulaması</a>
                     </span>
                 </div>
             </div>
@@ -255,12 +268,13 @@
 
     <!-- ==========================================
          KULLANICI GİRİŞİ / ŞİFRE EKRANI (AUTH MODAL)
+         Mobil klavye açıldığında şifre alanının kapanmaması için kaydırılabilir ve kompakt yapı
          ========================================== -->
     <div class="auth-overlay" id="authModal" style="display:none;">
-        <div class="auth-card-whatsapp">
-            <div class="auth-card-header">
+        <div class="auth-card-whatsapp" id="authCardInner">
+            <div class="auth-card-header" id="authCardHeader">
                 <div class="auth-wa-logo">
-                    <svg viewBox="0 0 24 24" width="56" height="56" fill="#00a884">
+                    <svg viewBox="0 0 24 24" width="44" height="44" fill="#00a884">
                         <path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H6l-2 2V4h16v12z"/>
                         <path d="M7 9h10v2H7zm0-3h10v2H7zm0 6h7v2H7z"/>
                     </svg>
@@ -275,18 +289,18 @@
                 <button type="button" class="auth-tab-btn" id="tabAuthRegister">➕ Yeni Kullanıcı Ekle</button>
             </div>
 
-            <!-- HATIRLANAN KULLANICI PROFİLİ -->
+            <!-- HATIRLANAN KULLANICI PROFİLİ (Sadece bu cihazda oturum açmış kendi hesabı) -->
             <div class="remembered-user-box" id="rememberedUserBox" style="display:none;">
                 <img id="rememberedAvatar" class="avatar" src="/avatars/default.svg" alt="Avatar">
                 <div class="remembered-info">
                     <span class="remembered-name" id="rememberedName">Kullanıcı</span>
-                    <button type="button" class="btn-switch-account" id="btnSwitchAccount">Farklı hesap seç</button>
+                    <button type="button" class="btn-switch-account" id="btnSwitchAccount">Farklı hesap ile giriş</button>
                 </div>
             </div>
 
-            <!-- KAYITLI KULLANICILAR HIZLI GİRİŞ LİSTESİ -->
-            <div class="quick-users-wrapper" id="quickUsersContainer" style="display:none;">
-                <div class="quick-users-label">Kayıtlı Kullanıcılar:</div>
+            <!-- GİZLİLİK (Madde 5): Diğer kayıtlı kullanıcıların isimleri burada gösterilmez -->
+            <div class="quick-users-wrapper" id="quickUsersContainer" data-privacy-hidden="true" style="display:none !important;">
+                <div class="quick-users-label">Cihazımdaki Hesabım:</div>
                 <div class="quick-users-list" id="quickUsersList"></div>
             </div>
 
@@ -295,8 +309,8 @@
                 <div class="form-field" id="fieldUsernameSelect">
                     <label for="inputUsername">Kullanıcı Adı veya Telefon Numarası</label>
                     <div class="input-with-select">
-                        <select id="selectRegisteredUser" class="auth-select" style="display:none;">
-                            <option value="">-- Kayıtlı Kullanıcı Seçin --</option>
+                        <select id="selectRegisteredUser" class="auth-select" data-privacy-hidden="true" style="display:none !important;">
+                            <option value="">-- Hesap Seçin --</option>
                         </select>
                         <input type="text" id="inputUsername" class="auth-input" placeholder="Kullanıcı adınızı veya telefon numaranızı yazın" autocomplete="username" required />
                     </div>
@@ -304,12 +318,12 @@
 
                 <!-- Yeni Kayıt İçin Telefon Numarası -->
                 <div class="form-field" id="fieldPhone" style="display:none;">
-                    <label for="inputPhone">📱 Telefon Numarası (Numarayla bulunabilmeniz için)</label>
-                    <input type="tel" id="inputPhone" class="auth-input" placeholder="Örn: 05XX XXX XX XX (İsteğe bağlı)" autocomplete="tel" />
+                    <label for="inputPhone">📱 Telefon Numaranız (Davet ve rehber eşleşmesi için)</label>
+                    <input type="tel" id="inputPhone" class="auth-input" placeholder="Örn: 05XX XXX XX XX" autocomplete="tel" />
                 </div>
 
                 <!-- Şifre Alanı -->
-                <div class="form-field">
+                <div class="form-field" id="fieldPasswordWrap">
                     <label for="inputPassword">Şifre</label>
                     <div class="input-password-wrap">
                         <input type="password" id="inputPassword" class="auth-input" placeholder="Şifrenizi girin" required autocomplete="current-password" />
@@ -367,9 +381,18 @@
                 </div>
                 <h2 id="profileUsernameDisplay" class="profile-name">Kullanıcı</h2>
                 <div id="profilePhoneDisplay" style="color:#00a884;font-size:14px;font-weight:600;margin-top:4px;margin-bottom:6px;">📱 Telefon: Eklenmedi</div>
-                <div class="profile-badge-online">🟢 Çevrimiçi (Aktif Hesap)</div>
+                <div class="profile-badge-online">🟢 Çevrimiçi (Signal E2EE Aktif)</div>
                 
                 <div class="profile-actions-list">
+                    <button type="button" class="profile-action-btn primary" id="btnProfileBgSettings">
+                        🖼️ Arka Plan Resmi Ayarları (Kullanıcı & Mesaj Sayfası)
+                    </button>
+                    <button type="button" class="profile-action-btn primary" id="btnProfileSecurityBackup">
+                        🛡️ E2EE Güvenlik & Sıfır Bilgi (Zero-Knowledge) Yedekleme
+                    </button>
+                    <button type="button" class="profile-action-btn primary" id="btnProfileInstallPwa">
+                        📲 Uygulamayı Telefona / Ana Ekrana Yükle (PWA)
+                    </button>
                     <button type="button" class="profile-action-btn primary" id="btnProfileUpdatePhone">
                         📱 Telefon Numaramı Ekle / Güncelle
                     </button>
@@ -741,24 +764,34 @@
                 </div>
             </div>
 
-            <!-- KAYITLI OLMAYAN KULLANICIYI TELEFON NUMARASINDAN BULMA PANELİ -->
+            <!-- KAYITLI OLMAYAN KULLANICIYI TELEFON NUMARASINDAN BULMA VE DAVET ETME PANELİ -->
             <div class="phone-lookup-panel" id="phoneLookupBox" style="margin:10px 14px;padding:12px 14px;background:rgba(0,168,132,0.10);border:1px solid rgba(0,168,132,0.35);border-radius:12px;">
-                <div style="font-size:13px;font-weight:700;color:#25d366;margin-bottom:8px;display:flex;align-items:center;gap:6px;">
-                    <span>📱 Kayıtlı Olmayan Kişiyi Telefon Numarasından Bul</span>
+                <div style="font-size:13px;font-weight:700;color:#25d366;margin-bottom:6px;display:flex;align-items:center;gap:6px;">
+                    <span>📱 Telefon Numarasından Kişi Bul & Uygulamaya Davet Et</span>
+                </div>
+                <div style="font-size:11.5px;color:#8696a0;margin-bottom:8px;line-height:1.35;">
+                    Numarayı bulduğunuzda numaranızla birlikte <em>"…… Numaralı Kişi Sizi Bu Uygulamayı Kullanmaya Davet Ediyor"</em> mesajı otomatik gönderilir.
                 </div>
                 <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
                     <input type="tel" id="inputLookupPhone" placeholder="Telefon Numarası (Örn: 0555 123 45 67)" autocomplete="off" style="flex:2;min-width:170px;padding:9px 12px;border-radius:8px;border:1px solid #2a3942;background:#111b21;color:#e9edef;font-size:14px;outline:none;" />
-                    <input type="text" id="inputLookupCustomName" placeholder="İsim (İsteğe bağlı)" autocomplete="off" style="flex:1;min-width:120px;padding:9px 12px;border-radius:8px;border:1px solid #2a3942;background:#111b21;color:#e9edef;font-size:13px;outline:none;" />
+                    <input type="text" id="inputLookupCustomName" placeholder="Rehber İsmi (İsteğe bağlı)" autocomplete="off" style="flex:1;min-width:120px;padding:9px 12px;border-radius:8px;border:1px solid #2a3942;background:#111b21;color:#e9edef;font-size:13px;outline:none;" />
                 </div>
                 <div style="display:flex;gap:8px;flex-wrap:wrap;">
-                    <button type="button" id="btnLookupStartChat" style="flex:2;padding:9px 12px;border-radius:8px;border:none;background:#00a884;color:#fff;font-weight:700;font-size:13px;cursor:pointer;">💬 Numarayı Bul ve Mesaj Gönder</button>
+                    <button type="button" id="btnLookupStartChat" style="flex:2;padding:9px 12px;border-radius:8px;border:none;background:#00a884;color:#fff;font-weight:700;font-size:13px;cursor:pointer;">💬 Numarayı Bul & Davet Gönder</button>
                     <button type="button" id="btnLookupVoiceCall" style="flex:1;padding:9px 10px;border-radius:8px;border:1px solid rgba(0,168,132,0.5);background:#1f2c34;color:#25d366;font-weight:600;font-size:13px;cursor:pointer;">📞 Sesli Ara</button>
                     <button type="button" id="btnLookupVideoCall" style="flex:1;padding:9px 10px;border-radius:8px;border:1px solid rgba(0,168,132,0.5);background:#1f2c34;color:#25d366;font-weight:600;font-size:13px;cursor:pointer;">📹 Görüntülü</button>
                 </div>
             </div>
 
-            <!-- HIZLI İŞLEM: YENİ KULLANICI EKLE -->
-            <div class="new-chat-quick-actions">
+            <!-- HIZLI İŞLEMLER: TELEFON REHBERİNDEN KİŞİ SEÇ VE YENİ KULLANICI EKLE -->
+            <div class="new-chat-quick-actions" style="display:flex;flex-direction:column;gap:6px;">
+                <div class="new-chat-action-item" id="btnImportPhoneContactsModal" style="background:rgba(83,189,235,0.08);border:1px solid rgba(83,189,235,0.28);border-radius:10px;">
+                    <div class="action-icon-circle" style="background:#00a884;">📒</div>
+                    <div class="action-text">
+                        <strong>Telefon Rehberimden Kişileri Aktar / Seç</strong>
+                        <span>Yalnızca kendi telefonunuzda kayıtlı olan kişileri listenize ekleyin (SHA-256 Gizli Eşleşme)</span>
+                    </div>
+                </div>
                 <div class="new-chat-action-item" id="btnActionCreateNewUser">
                     <div class="action-icon-circle">➕</div>
                     <div class="action-text">
@@ -767,14 +800,237 @@
                     </div>
                 </div>
             </div>
+            <input type="file" id="vcfContactsFileInput" accept=".vcf,text/vcard" style="display:none;" />
 
-            <div class="new-chat-section-label">Kayıtlı Kişiler (Mesajlaşmak veya aramak için dokunun)</div>
+            <div class="new-chat-section-label">Telefonumda Kayıtlı Kişilerim (Mesajlaşmak veya aramak için dokunun)</div>
 
             <!-- KİŞİLER LİSTESİ -->
             <div class="new-chat-users-list" id="newChatUsersList">
                 <!-- JavaScript dinamik olarak ekleyecek -->
             </div>
         </div>
+    </div>
+
+    <!-- ==========================================
+         KULLANICI ARKA PLANI VE MESAJ SAYFASI ARKA PLAN RESMİ SEÇİM MODALI (MADDE 6)
+         ========================================== -->
+    <div class="qr-modal-overlay" id="bgSettingsModal" style="display:none; z-index: 5200;">
+        <div class="qr-modal-card" style="max-width: 460px; width: 94%; text-align: left; padding: 20px; max-height: 92dvh; overflow-y: auto;">
+            <div class="qr-modal-header" style="margin-bottom: 14px;">
+                <h3 style="display:flex;align-items:center;gap:8px;font-size:16.5px;">
+                    <span>🖼️ Arka Plan Resmi Ayarları</span>
+                </h3>
+                <button type="button" class="icon-btn" id="btnCloseBgSettings">&times;</button>
+            </div>
+
+            <p style="font-size:12.5px;color:#8696a0;line-height:1.45;margin-bottom:14px;">
+                Hem <strong>Kullanıcı / Rehber Listesi</strong> arka planına hem de <strong>Mesaj Sayfası</strong> arka planına telefonunuzdan veya bilgisayarınızdan istediğiniz resmi koyabilirsiniz.
+            </p>
+
+            <!-- 1. KULLANICI (REHBER / SOHBET LİSTESİ) ARKA PLAN RESMİ -->
+            <div style="background:#182229;border:1px solid #2a3942;border-radius:12px;padding:14px;margin-bottom:14px;">
+                <div style="font-weight:700;color:#25d366;font-size:13.5px;margin-bottom:8px;">
+                    1️⃣ Kullanıcı (Kişi Listesi) Arka Plan Resmi
+                </div>
+                <div id="previewUsersBgBox" style="width:100%;height:96px;border-radius:10px;border:1px dashed #3b4a54;background:#111b21 center/cover no-repeat;display:flex;align-items:center;justify-content:center;color:#8696a0;font-size:12px;margin-bottom:10px;">
+                    Varsayılan Koyu Tema
+                </div>
+                <input type="file" id="inputUsersBgFile" accept="image/*" style="display:none;" />
+                <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                    <button type="button" id="btnSelectUsersBg" style="flex:2;padding:9px 12px;border-radius:8px;border:none;background:#00a884;color:#fff;font-weight:700;font-size:13px;cursor:pointer;">
+                        📂 Galeriden / Dosyadan Resim Seç
+                    </button>
+                    <button type="button" id="btnResetUsersBg" style="flex:1;padding:9px 10px;border-radius:8px;border:1px solid #3b4a54;background:#111b21;color:#f15c6d;font-weight:600;font-size:12.5px;cursor:pointer;">
+                        🗑️ Sıfırla
+                    </button>
+                </div>
+            </div>
+
+            <!-- 2. MESAJ SAYFASI (YAZIŞMA EKRANI) ARKA PLAN RESMİ -->
+            <div style="background:#182229;border:1px solid #2a3942;border-radius:12px;padding:14px;margin-bottom:14px;">
+                <div style="font-weight:700;color:#53bdeb;font-size:13.5px;margin-bottom:8px;">
+                    2️⃣ Mesaj Sayfası (Sohbet Ekranı) Arka Plan Resmi
+                </div>
+                <div id="previewChatBgBox" style="width:100%;height:96px;border-radius:10px;border:1px dashed #3b4a54;background:#0b141a center/cover no-repeat;display:flex;align-items:center;justify-content:center;color:#8696a0;font-size:12px;margin-bottom:10px;">
+                    Varsayılan Sohbet Duvar Kağıdı
+                </div>
+                <input type="file" id="inputChatBgFile" accept="image/*" style="display:none;" />
+                <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                    <button type="button" id="btnSelectChatBg" style="flex:2;padding:9px 12px;border-radius:8px;border:none;background:#00a884;color:#fff;font-weight:700;font-size:13px;cursor:pointer;">
+                        📂 Galeriden / Dosyadan Resim Seç
+                    </button>
+                    <button type="button" id="btnResetChatBg" style="flex:1;padding:9px 10px;border-radius:8px;border:1px solid #3b4a54;background:#111b21;color:#f15c6d;font-weight:600;font-size:12.5px;cursor:pointer;">
+                        🗑️ Sıfırla
+                    </button>
+                </div>
+            </div>
+
+            <!-- KARARTMA / OKUNABİLİRLİK AYARI -->
+            <div style="background:#182229;border:1px solid #2a3942;border-radius:12px;padding:12px 14px;margin-bottom:12px;">
+                <div style="display:flex;justify-content:space-between;font-size:12.5px;color:#e9edef;margin-bottom:6px;">
+                    <span>🔆 Arka Plan Karartma (Yazı Okunabilirliği)</span>
+                    <span id="bgDimValueLabel">%35</span>
+                </div>
+                <input type="range" id="inputBgDimSlider" min="0" max="85" value="35" style="width:100%;accent-color:#00a884;" />
+            </div>
+
+            <button type="button" id="btnDoneBgSettings" style="width:100%;padding:11px;border-radius:10px;border:none;background:#00a884;color:#fff;font-weight:700;font-size:14px;cursor:pointer;">
+                ✅ Tamam ve Uygula
+            </button>
+        </div>
+    </div>
+
+    <!-- ==========================================
+         E2EE GÜVENLİK & SIFIR BİLGİ (ZERO-KNOWLEDGE) YEDEKLEME MODALI
+         ========================================== -->
+    <div class="qr-modal-overlay" id="securityBackupModal" style="display:none; z-index: 5300;">
+        <div class="qr-modal-card" style="max-width: 480px; width: 94%; text-align: left; padding: 20px; max-height: 92dvh; overflow-y: auto;">
+            <div class="qr-modal-header" style="margin-bottom: 12px;">
+                <h3 style="display:flex;align-items:center;gap:8px;font-size:16px;">
+                    <span>🛡️ Signal E2EE & Sıfır Bilgi (Zero-Knowledge) Güvenlik</span>
+                </h3>
+                <button type="button" class="icon-btn" id="btnCloseSecurityBackup">&times;</button>
+            </div>
+
+            <div style="background:#182229;border:1px solid rgba(0,168,132,0.4);border-radius:12px;padding:12px;margin-bottom:12px;font-size:12px;color:#d1d7db;line-height:1.5;">
+                <div>✅ <strong>Protokol:</strong> Signal (X3DH + Double Ratchet) &amp; MLS (RFC 9420)</div>
+                <div>✅ <strong>Algoritmalar:</strong> Curve25519 (X25519), Ed25519, AES-256-GCM / ChaCha20-Poly1305</div>
+                <div>✅ <strong>Donanım Anahtar Saklama:</strong> WebCrypto Non-Extractable Secure Enclave</div>
+                <div>✅ <strong>Yerel Veritabanı:</strong> SQLCipher AES-256 At-Rest Şifreleme</div>
+                <div>✅ <strong>Ağ ve Arama:</strong> TLS 1.3 + Certificate Pinning + WebRTC DTLS-SRTP</div>
+                <div>✅ <strong>Metadata Gizliliği:</strong> Sealed Sender + SHA-256 Rehber Özetleme</div>
+            </div>
+
+            <!-- EKRAN VE BELLEK KORUMASI (FLAG_SECURE) -->
+            <div style="background:#182229;border:1px solid #2a3942;border-radius:12px;padding:12px 14px;margin-bottom:12px;">
+                <label style="display:flex;align-items:center;justify-content:space-between;cursor:pointer;font-size:13px;color:#e9edef;font-weight:600;">
+                    <span>🛡️ Ekran Görüntüsü &amp; Arka Plan Koruması (FLAG_SECURE)</span>
+                    <input type="checkbox" id="chkFlagSecureToggle" checked style="width:18px;height:18px;accent-color:#00a884;" />
+                </label>
+                <div style="font-size:11.5px;color:#8696a0;margin-top:4px;">
+                    Uygulama arka plana alındığında ekranı otomatik bulanıklaştırır ve panoya kopyalanan hassas verileri 30 saniye sonra temizler.
+                </div>
+            </div>
+
+            <!-- SIFIR BİLGİ (ZERO-KNOWLEDGE) YEDEKLEME -->
+            <div style="background:#182229;border:1px solid #2a3942;border-radius:12px;padding:14px;margin-bottom:12px;">
+                <div style="font-weight:700;color:#25d366;font-size:13.5px;margin-bottom:6px;">
+                    ☁️ Sıfır Bilgi (Zero-Knowledge) Şifreli Yedekleme
+                </div>
+                <p style="font-size:12px;color:#8696a0;line-height:1.4;margin-bottom:10px;">
+                    Yedekleriniz cihazınızda kendi parolanız veya 64 haneli kurtarma anahtarıyla (Argon2id / PBKDF2-SHA256 + AES-256-GCM) şifrelenir.
+                </p>
+                <input type="password" id="inputZkBackupPassword" placeholder="Yedekleme parolası (veya boş bırakıp 64 haneli anahtar üretin)" style="width:100%;padding:9px 12px;border-radius:8px;border:1px solid #2a3942;background:#111b21;color:#e9edef;font-size:13px;margin-bottom:8px;outline:none;" />
+                <div id="zkRecoveryKeyBox" style="display:none;background:#111b21;border:1px dashed #00a884;border-radius:8px;padding:8px 10px;margin-bottom:8px;font-family:monospace;font-size:11px;color:#25d366;word-break:break-all;"></div>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                    <button type="button" id="btnCreateZkBackup" style="flex:1;padding:9px 12px;border-radius:8px;border:none;background:#00a884;color:#fff;font-weight:700;font-size:12.5px;cursor:pointer;">
+                        🔐 Şifreli Yedek İndir
+                    </button>
+                    <button type="button" id="btnRestoreZkBackup" style="flex:1;padding:9px 12px;border-radius:8px;border:1px solid #00a884;background:#111b21;color:#25d366;font-weight:700;font-size:12.5px;cursor:pointer;">
+                        📂 Yedekten Geri Yükle
+                    </button>
+                    <input type="file" id="inputRestoreZkFile" accept=".json,.msjbackup" style="display:none;" />
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ==========================================
+         PWA / iPHONE ANA EKRANA UYGULAMA YÜKLEME MODALI
+         ========================================== -->
+    <div class="qr-modal-overlay" id="pwaInstallModal" style="display:none; z-index: 5000;">
+        <div class="qr-modal-card" style="max-width: 440px; text-align: left; padding: 20px;">
+            <div class="qr-modal-header" style="margin-bottom: 12px;">
+                <h3 style="display:flex;align-items:center;gap:8px;font-size:17px;">
+                    <img src="/apple-touch-icon.png" alt="İkon" style="width:32px;height:32px;border-radius:8px;">
+                    <span>HIHaberleşme Uygulamasını Yükle</span>
+                </h3>
+                <button type="button" class="icon-btn" id="btnClosePwaInstall">&times;</button>
+            </div>
+
+            <!-- Zaten Yüklü Uyarısı -->
+            <div id="pwaAlreadyInstalledNotice" style="display:none;background:rgba(0,168,132,0.16);border:1px solid #00a884;border-radius:10px;padding:10px 12px;margin-bottom:12px;color:#25d366;font-size:13px;font-weight:600;">
+                ✅ Uygulama şu anda Ana Ekranınızda tam ekran (PWA) modunda çalışıyor!
+            </div>
+
+            <!-- iPHONE / iPAD (iOS) KURULUM EKRANI -->
+            <div id="pwaIosSection" style="display:none;">
+                <!-- YÖNTEM 1: SAFARİ / CHROME DOĞRUDAN ANA EKRANA EKLE (SERTİFİKASIZ & ANINDA) -->
+                <div style="background:#182229;border:1px solid rgba(0,168,132,0.45);border-radius:12px;padding:14px;margin-bottom:14px;">
+                    <div style="color:#25d366;font-weight:700;font-size:14px;margin-bottom:10px;display:flex;align-items:center;gap:6px;">
+                        <span>🍏</span>
+                        <span>1. Yöntem: Doğrudan Ana Ekrana Ekle (En Hızlı)</span>
+                    </div>
+
+                    <div style="display:flex;align-items:flex-start;gap:10px;margin-bottom:10px;background:#111b21;padding:10px;border-radius:8px;">
+                        <div style="min-width:34px;height:34px;border-radius:8px;background:rgba(0,122,255,0.18);color:#4da3ff;display:flex;align-items:center;justify-content:center;">
+                            <!-- iOS Paylaş İkonu -->
+                            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/>
+                                <polyline points="16 6 12 2 8 6"/>
+                                <line x1="12" y1="2" x2="12" y2="15"/>
+                            </svg>
+                        </div>
+                        <div style="font-size:13px;color:#e9edef;line-height:1.45;">
+                            <strong>1. Adım:</strong> iPhone ekranının en altındaki (Chrome'da sağ üstteki) mavi <strong>Paylaş</strong> simgesine dokunun.
+                        </div>
+                    </div>
+
+                    <div style="display:flex;align-items:flex-start;gap:10px;margin-bottom:12px;background:#111b21;padding:10px;border-radius:8px;">
+                        <div style="min-width:34px;height:34px;border-radius:8px;background:rgba(0,168,132,0.18);color:#25d366;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:bold;">
+                            ➕
+                        </div>
+                        <div style="font-size:13px;color:#e9edef;line-height:1.45;">
+                            <strong>2. Adım:</strong> Açılan menüyü biraz aşağı kaydırıp <strong>"Ana Ekrana Ekle"</strong> seçeneğine ve sağ üstten <strong>"Ekle"</strong> düğmesine basın.
+                        </div>
+                    </div>
+
+                    <button type="button" id="btnIosTriggerShareSheet" style="width:100%;padding:11px 14px;border-radius:10px;border:none;background:#00a884;color:#ffffff;font-weight:700;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;">
+                        <span>📤 Paylaş Menüsünü Aç / Göster</span>
+                    </button>
+                </div>
+
+                <!-- YÖNTEM 2: TEK TIKLA OTOMATİK iOS UYGULAMA PROFİLİ (.mobileconfig) -->
+                <div style="background:#182229;border:1px solid #2a3942;border-radius:12px;padding:14px;">
+                    <div style="color:#53bdeb;font-weight:700;font-size:13.5px;margin-bottom:6px;">
+                        ⚡ 2. Yöntem: Otomatik Kurulum Paketi İndir
+                    </div>
+                    <p style="font-size:12.5px;color:#8696a0;line-height:1.45;margin-bottom:10px;">
+                        Paylaş menüsüyle uğraşmadan doğrudan iPhone uygulama profilini indirip kurmak için:
+                    </p>
+                    <button type="button" id="btnIosDirectProfileInstall" style="width:100%;padding:11px 14px;border-radius:10px;border:1px solid #00a884;background:#111b21;color:#25d366;font-weight:700;font-size:13.5px;cursor:pointer;">
+                        📲 iPhone Uygulama Paketini İndir (.mobileconfig)
+                    </button>
+                    <div style="font-size:11.5px;color:#8696a0;margin-top:8px;line-height:1.4;">
+                        💡 <em>"İzin Ver"</em> dedikten sonra <strong>iPhone Ayarlar → Profil İndirildi → Yükle</strong> adımıyla uygulama ana ekrana otomatik yerleşir.
+                    </div>
+                </div>
+            </div>
+
+            <!-- ANDROID / WINDOWS / MAC KURULUM EKRANI -->
+            <div id="pwaStandardSection" style="display:none;">
+                <div style="background:#182229;border:1px solid rgba(0,168,132,0.45);border-radius:12px;padding:16px;">
+                    <p style="font-size:13.5px;color:#e9edef;line-height:1.5;margin-bottom:14px;">
+                        <strong>HIHaberleşme</strong> uygulamasını cihazınızın ana ekranına veya masaüstüne kurarak tam ekran ve anlık bildirim desteğiyle kullanabilirsiniz:
+                    </p>
+                    <button type="button" id="btnTriggerNativePwaPrompt" style="width:100%;padding:12px 16px;border-radius:10px;border:none;background:#00a884;color:#fff;font-weight:700;font-size:14.5px;cursor:pointer;margin-bottom:12px;display:none;">
+                        📲 Uygulamayı Şimdi Yükle
+                    </button>
+                    <div id="pwaManualAndroidSteps" style="background:#111b21;padding:12px;border-radius:8px;font-size:13px;color:#e9edef;line-height:1.55;">
+                        <div style="margin-bottom:6px;">1️⃣ Tarayıcınızın sağ üst köşesindeki <strong>⋮ (Üç Nokta)</strong> menüsüne dokunun.</div>
+                        <div>2️⃣ <strong>"Uygulamayı yükle"</strong> veya <strong>"Ana ekrana ekle"</strong> seçeneğine dokunun.</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- iPHONE SAFARİ ALT PAYLAŞ BUTONU CANLI OK GÖSTERGESİ -->
+    <div id="iosSharePointerBanner" style="display:none;position:fixed;left:12px;right:12px;bottom:14px;z-index:6000;background:#00a884;color:#ffffff;padding:12px 16px;border-radius:14px;box-shadow:0 8px 28px rgba(0,0,0,0.65);text-align:center;font-size:13.5px;font-weight:700;cursor:pointer;">
+        <div id="iosSharePointerText">
+            👇 Hemen aşağıdaki <strong>Paylaş [↑]</strong> simgesine basıp <strong>"Ana Ekrana Ekle"</strong> deyin!
+        </div>
+        <div style="font-size:22px;margin-top:4px;animation:bounceDown 1s infinite;">⬇️</div>
     </div>
 
     <script>
@@ -807,6 +1063,7 @@
         })();
     </script>
     <script src="/socket.io/socket.io.js"></script>
-    <script src="/app.js?v=18"></script>
+    <script src="/crypto-e2ee.js?v=21"></script>
+    <script src="/app.js?v=21"></script>
 </body>
 </html>
