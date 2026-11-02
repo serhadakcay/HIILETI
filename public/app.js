@@ -1209,18 +1209,165 @@ function savePersonalPhoneBookForCurrentUser(list) {
     } catch (e) {}
 }
 
+function getPhoneMatchKeyClient(phoneOrUsername) {
+    const clean = normalizePhoneClient(phoneOrUsername || '');
+    if (!clean || clean.length < 7) return '';
+    return clean.length >= 10 ? clean.slice(-10) : clean;
+}
+
+// Numaradan bulunup mesaj gönderilen bir kişi programı kurup kullanıcı adıyla giriş yaptığında istemci tarafında anında entegre eder
+function integratePhoneContactOnClient(oldUsernameOrPhone, newUsername, phone, avatar = '/avatars/default.svg', isOnline = true) {
+    if (!newUsername) return;
+    const cleanNewUser = newUsername.trim();
+    const newKey = normalizeKey(cleanNewUser);
+    const cleanPhone = normalizePhoneClient(phone || oldUsernameOrPhone || '');
+    const phoneMatchKey = getPhoneMatchKeyClient(cleanPhone);
+    const oldKey = normalizeKey(oldUsernameOrPhone || cleanPhone);
+
+    if (!newKey) return;
+    if (oldKey && oldKey !== newKey) {
+        addDeletedLocalUserKey(oldKey);
+    }
+
+    // 1. Kişisel telefon rehberini (msj_phone_book_<user>) güncelle
+    try {
+        const pb = getPersonalPhoneBookForCurrentUser();
+        if (Array.isArray(pb) && pb.length > 0) {
+            let pbChanged = false;
+            let savedCustomName = '';
+            const updatedPb = [];
+            const seenKeys = new Set();
+            pb.forEach(item => {
+                if (!item || !item.username) return;
+                const ik = normalizeKey(item.username);
+                const ipKey = getPhoneMatchKeyClient(item.phone || (isPhoneQueryClient(item.username) ? item.username : ''));
+                if ((oldKey && ik === oldKey) || (phoneMatchKey && ipKey === phoneMatchKey) || ik === newKey) {
+                    if (item.customName && !isPhoneQueryClient(item.customName)) {
+                        savedCustomName = item.customName;
+                    }
+                    pbChanged = true;
+                    if (!seenKeys.has(newKey)) {
+                        seenKeys.add(newKey);
+                        updatedPb.push({
+                            username: cleanNewUser,
+                            customName: savedCustomName || item.customName || '',
+                            phone: cleanPhone || item.phone || '',
+                            avatar: avatar || item.avatar || '/avatars/default.svg'
+                        });
+                    }
+                } else if (!seenKeys.has(ik)) {
+                    seenKeys.add(ik);
+                    updatedPb.push(item);
+                }
+            });
+            if (pbChanged) {
+                savePersonalPhoneBookForCurrentUser(updatedPb);
+            }
+        }
+    } catch (e) {}
+
+    // 2. contactsList içinde eski numaralı kaydı yeni kullanıcı adıyla birleştir
+    let oldContact = null;
+    let newContact = null;
+    contactsList.forEach(c => {
+        if (!c || !c.username) return;
+        const ck = normalizeKey(c.username);
+        const cpKey = getPhoneMatchKeyClient(c.phone || (isPhoneQueryClient(c.username) ? c.username : ''));
+        if (ck === newKey) {
+            newContact = c;
+        } else if ((oldKey && ck === oldKey) || (phoneMatchKey && cpKey === phoneMatchKey)) {
+            oldContact = c;
+        }
+    });
+
+    if (oldContact && !newContact) {
+        oldContact.username = cleanNewUser;
+        if (cleanPhone) oldContact.phone = cleanPhone;
+        if (avatar) oldContact.avatar = avatar;
+        oldContact.isOnline = Boolean(isOnline);
+        oldContact.statusText = isOnline ? 'Online' : 'Offline';
+        oldContact.lastSeen = isOnline ? 'Online' : 'Offline';
+        if (oldContact.lastMessage) {
+            if (normalizeKey(oldContact.lastMessage.sender) === oldKey) oldContact.lastMessage.sender = cleanNewUser;
+            if (normalizeKey(oldContact.lastMessage.recipient) === oldKey) oldContact.lastMessage.recipient = cleanNewUser;
+        }
+    } else if (oldContact && newContact) {
+        if (!newContact.phone && (cleanPhone || oldContact.phone)) {
+            newContact.phone = cleanPhone || oldContact.phone;
+        }
+        if (!newContact.customName && oldContact.customName && !isPhoneQueryClient(oldContact.customName)) {
+            newContact.customName = oldContact.customName;
+        }
+        if (!newContact.lastMessage && oldContact.lastMessage) {
+            newContact.lastMessage = {
+                ...oldContact.lastMessage,
+                sender: normalizeKey(oldContact.lastMessage.sender) === oldKey ? cleanNewUser : oldContact.lastMessage.sender,
+                recipient: normalizeKey(oldContact.lastMessage.recipient) === oldKey ? cleanNewUser : oldContact.lastMessage.recipient
+            };
+        }
+        newContact.isOnline = Boolean(isOnline);
+        newContact.statusText = isOnline ? 'Online' : 'Offline';
+        newContact.lastSeen = isOnline ? 'Online' : 'Offline';
+        contactsList = contactsList.filter(c => normalizeKey(c.username) !== normalizeKey(oldContact.username));
+    } else if (newContact) {
+        if (cleanPhone) newContact.phone = cleanPhone;
+        newContact.isOnline = Boolean(isOnline);
+        newContact.statusText = isOnline ? 'Online' : 'Offline';
+        newContact.lastSeen = isOnline ? 'Online' : 'Offline';
+    }
+
+    saveCachedContactsForCurrentUser(contactsList);
+
+    // 3. Eğer şu an açık olan sohbet eski telefon numarasıysa başlığı ve hedefi yeni kullanıcı adına geçir
+    if (activeContact) {
+        const ak = normalizeKey(activeContact.username);
+        const apKey = getPhoneMatchKeyClient(activeContact.phone || (isPhoneQueryClient(activeContact.username) ? activeContact.username : ''));
+        if ((oldKey && ak === oldKey) || (phoneMatchKey && apKey === phoneMatchKey) || ak === newKey) {
+            activeContact.username = cleanNewUser;
+            if (cleanPhone) activeContact.phone = cleanPhone;
+            activeContact.isOnline = Boolean(isOnline);
+            if (chatContactName) {
+                chatContactName.textContent = cleanPhone && !isPhoneQueryClient(cleanNewUser)
+                    ? `${cleanNewUser} (${formatPhonePretty(cleanPhone)})`
+                    : cleanNewUser;
+            }
+            if (chatContactStatus) chatContactStatus.textContent = isOnline ? 'Online' : 'Offline';
+            if (headerOnlineDot) headerOnlineDot.style.display = isOnline ? 'block' : 'none';
+        }
+    }
+}
+
 function mergeContactsWithPermanentUsers(serverChats) {
     const deletedSet = new Set(getDeletedLocalUserKeys());
     const myKey = currentUser ? normalizeKey(currentUser.username) : '';
     const map = new Map();
+    const phoneKeyToUserKey = new Map();
 
-    // 1. Önce sunucudan gelen güncel sohbet/rehber verilerini ekle (Sadece aktif kullanıcıya ait kendi rehberi ve yazışmaları)
+    // 1. Önce sunucudan gelen güncel sohbet/rehber verilerini ekle
     if (Array.isArray(serverChats)) {
         serverChats.forEach(c => {
             if (!c || !c.username) return;
             const k = normalizeKey(c.username);
             if (k && k !== myKey && !deletedSet.has(k)) {
                 const validMsg = isMessageForCurrentUserAndContact(c.lastMessage, k) ? c.lastMessage : null;
+                const pKey = getPhoneMatchKeyClient(c.phone || (isPhoneQueryClient(c.username) ? c.username : ''));
+                // Eğer aynı telefon numarasına sahip hem numara kaydı hem gerçek kullanıcı adı varsa gerçek kullanıcı adını tut
+                if (pKey && phoneKeyToUserKey.has(pKey)) {
+                    const existingKey = phoneKeyToUserKey.get(pKey);
+                    const existingItem = map.get(existingKey);
+                    if (existingItem) {
+                        if (isPhoneQueryClient(existingItem.username) && !isPhoneQueryClient(c.username)) {
+                            map.delete(existingKey);
+                            phoneKeyToUserKey.set(pKey, k);
+                        } else if (!isPhoneQueryClient(existingItem.username) && isPhoneQueryClient(c.username)) {
+                            if (!existingItem.lastMessage && validMsg) existingItem.lastMessage = validMsg;
+                            return;
+                        }
+                    }
+                } else if (pKey) {
+                    phoneKeyToUserKey.set(pKey, k);
+                }
+
                 map.set(k, {
                     ...c,
                     lastMessage: validMsg,
@@ -1231,15 +1378,34 @@ function mergeContactsWithPermanentUsers(serverChats) {
     }
 
     // 2. Yalnızca şu anki aktif kullanıcıya ait kişisel rehberdeki (msj_phone_book_<user>) ve önbellekteki (msj_cached_contacts_<user>) kişileri koru
-    // MADDE 5 GİZLİLİK KURALI: Sistemdeki diğer tüm kayıtlı kullanıcılar (msj_permanent_users) buraya ASLA eklenmez!
+    // Eğer numaradan bulunan kişi kullanıcı adıyla entegre olmuşsa telefon numarası üzerinden eşleştirip birleştir!
     if (myKey) {
         try {
             const phoneBook = getPersonalPhoneBookForCurrentUser();
+            let phoneBookNeedsUpdate = false;
             if (Array.isArray(phoneBook)) {
                 phoneBook.forEach(c => {
                     if (!c || !c.username) return;
                     const k = normalizeKey(c.username);
+                    const pKey = getPhoneMatchKeyClient(c.phone || (isPhoneQueryClient(c.username) ? c.username : ''));
+                    if (pKey && phoneKeyToUserKey.has(pKey)) {
+                        const integratedKey = phoneKeyToUserKey.get(pKey);
+                        const integratedContact = map.get(integratedKey);
+                        if (integratedContact) {
+                            if (!integratedContact.phone && c.phone) integratedContact.phone = c.phone;
+                            if (!integratedContact.customName && c.customName && !isPhoneQueryClient(c.customName)) {
+                                integratedContact.customName = c.customName;
+                            }
+                            if (integratedKey !== k) {
+                                c.username = integratedContact.username;
+                                c.phone = integratedContact.phone || c.phone;
+                                phoneBookNeedsUpdate = true;
+                            }
+                        }
+                        return;
+                    }
                     if (k && k !== myKey && !deletedSet.has(k) && !map.has(k)) {
+                        if (pKey) phoneKeyToUserKey.set(pKey, k);
                         map.set(k, {
                             username: c.username,
                             customName: c.customName || '',
@@ -1253,6 +1419,9 @@ function mergeContactsWithPermanentUsers(serverChats) {
                         });
                     }
                 });
+                if (phoneBookNeedsUpdate) {
+                    savePersonalPhoneBookForCurrentUser(phoneBook);
+                }
             }
 
             const cached = getCachedContactsForCurrentUser();
@@ -1260,10 +1429,19 @@ function mergeContactsWithPermanentUsers(serverChats) {
                 cached.forEach(c => {
                     if (!c || !c.username) return;
                     const k = normalizeKey(c.username);
+                    const pKey = getPhoneMatchKeyClient(c.phone || (isPhoneQueryClient(c.username) ? c.username : ''));
+                    if (pKey && phoneKeyToUserKey.has(pKey)) {
+                        const integratedKey = phoneKeyToUserKey.get(pKey);
+                        const integratedContact = map.get(integratedKey);
+                        if (integratedContact && !integratedContact.phone && c.phone) {
+                            integratedContact.phone = c.phone;
+                        }
+                        return;
+                    }
                     const validMsg = isMessageForCurrentUserAndContact(c.lastMessage, k) ? c.lastMessage : null;
-                    // Sadece mesaj geçmişi olan veya telefon numarasıyla rehbere eklenmiş olanları koru
                     const hasPhoneOrMsg = Boolean(validMsg || c.phone || c.customName);
                     if (k && k !== myKey && !deletedSet.has(k) && !map.has(k) && hasPhoneOrMsg) {
+                        if (pKey) phoneKeyToUserKey.set(pKey, k);
                         map.set(k, {
                             username: c.username,
                             customName: c.customName || '',
@@ -1501,6 +1679,20 @@ async function initAuth() {
     }
 }
 
+// Numaradan bulunup davet/mesaj gönderilmiş bir kullanıcı programı kurduğunda telefon numarasını otomatik doldur
+async function autoFillPendingInvitedPhone() {
+    if (!inputPhone || (inputPhone.value && inputPhone.value.trim().length >= 7)) return;
+    try {
+        const res = await fetch('/api/users/pending_phones');
+        const data = await res.json();
+        if (data && data.success && Array.isArray(data.pendingPhones) && data.pendingPhones.length === 1) {
+            if (!inputPhone.value || !inputPhone.value.trim()) {
+                inputPhone.value = data.pendingPhones[0].phone || '';
+            }
+        }
+    } catch (e) {}
+}
+
 function showRegisterPrompt() {
     authMode = 'register';
     if (tabAuthRegister) tabAuthRegister.classList.add('active');
@@ -1514,13 +1706,14 @@ function showRegisterPrompt() {
     if (fieldPhone) fieldPhone.style.display = 'block';
     if (rowForgotPassword) rowForgotPassword.style.display = 'none';
     if (btnCancelAuth) btnCancelAuth.style.display = currentUser ? 'inline-block' : 'none';
-    authSubtitle.textContent = 'Yeni kullanıcı hesabı oluşturun';
+    authSubtitle.textContent = 'Yeni kullanıcı hesabı oluşturun (Telefon numaranızla entegre edilir)';
     btnAuthSubmit.textContent = 'Kayıt Ol ve Giriş Yap';
     btnToggleAuthMode.textContent = 'Zaten hesabınız var mı? Giriş Yap';
     inputUsername.value = '';
     inputPassword.value = '';
     inputConfirmPassword.value = '';
     if (inputPhone) inputPhone.value = '';
+    autoFillPendingInvitedPhone();
     inputUsername.focus();
 }
 
@@ -1532,7 +1725,6 @@ function showPasswordPrompt(username) {
     authErrorMsg.style.display = 'none';
     authErrorMsg.innerHTML = '';
     fieldConfirmPassword.style.display = 'none';
-    if (fieldPhone) fieldPhone.style.display = 'none';
     if (btnCancelAuth) btnCancelAuth.style.display = currentUser ? 'inline-block' : 'none';
     btnAuthSubmit.textContent = 'Giriş Yap';
     btnToggleAuthMode.textContent = 'Hesabınız yok mu? Yeni Kullanıcı Aç';
@@ -1545,16 +1737,19 @@ function showPasswordPrompt(username) {
         rememberedName.textContent = username;
         rememberedAvatar.src = `/avatars/default.svg`;
         fieldUsernameSelect.style.display = 'none';
+        if (fieldPhone) fieldPhone.style.display = 'none';
         inputUsername.value = username;
         inputPassword.value = '';
         if (rowForgotPassword) rowForgotPassword.style.display = 'block';
         inputPassword.focus();
     } else {
-        authSubtitle.textContent = 'Kayıtlı kullanıcı seçin veya kullanıcı adınızı yazın';
+        authSubtitle.textContent = 'Kullanıcı adınızı (ve varsa davet edildiğiniz telefon numaranızı) girin';
         rememberedUserBox.style.display = 'none';
         fieldUsernameSelect.style.display = 'block';
+        if (fieldPhone) fieldPhone.style.display = 'block';
         inputPassword.value = '';
         if (rowForgotPassword) rowForgotPassword.style.display = 'none';
+        autoFillPendingInvitedPhone();
         inputUsername.focus();
     }
 }
@@ -1590,9 +1785,11 @@ selectRegisteredUser.addEventListener('change', async () => {
 btnSwitchAccount.addEventListener('click', () => {
     rememberedUserBox.style.display = 'none';
     fieldUsernameSelect.style.display = 'block';
+    if (fieldPhone) fieldPhone.style.display = 'block';
     if (rowForgotPassword) rowForgotPassword.style.display = 'none';
     inputUsername.value = '';
     inputPassword.value = '';
+    autoFillPendingInvitedPhone();
     inputUsername.focus();
 });
 
@@ -1656,10 +1853,11 @@ if (btnForgotPassword) {
         try {
             btnForgotPassword.disabled = true;
             btnForgotPassword.textContent = 'Güncelleniyor...';
+            const phoneVal = inputPhone ? inputPhone.value.trim() : '';
             const res = await fetch('/api/auth/reset_password', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username: user, newPassword: newPass.trim() })
+                body: JSON.stringify({ username: user, newPassword: newPass.trim(), phone: phoneVal })
             });
             const data = await res.json();
             if (data.success) {
@@ -1687,8 +1885,24 @@ document.getElementById('authForm').addEventListener('submit', async (e) => {
     authErrorMsg.style.display = 'none';
     authErrorMsg.innerHTML = '';
 
-    const username = (inputUsername.value.trim() || (rememberedUserBox.style.display !== 'none' ? rememberedName.textContent.trim() : '')).trim();
+    let username = (inputUsername.value.trim() || (rememberedUserBox.style.display !== 'none' ? rememberedName.textContent.trim() : '')).trim();
     const password = inputPassword.value;
+
+    // Eğer kullanıcı adı kutusuna yanlışlıkla telefon numarası yazıldıysa onu telefon kutusuna taşıyıp kullanıcı adı iste
+    if (username && isPhoneQueryClient(username) && inputPhone) {
+        if (!inputPhone.value.trim()) {
+            inputPhone.value = username;
+        }
+        if (fieldPhone) fieldPhone.style.display = 'block';
+        const chosenName = prompt(
+            `📱 ${formatPhonePretty(username)} numaranız ile entegre edilecek Kullanıcı Adınızı girin (Örn: Ahmet):`,
+            ''
+        );
+        if (chosenName && chosenName.trim().length >= 2 && !isPhoneQueryClient(chosenName.trim())) {
+            username = chosenName.trim();
+            inputUsername.value = username;
+        }
+    }
 
     if (!username || !password) {
         authErrorMsg.textContent = 'Lütfen kullanıcı adı ve şifrenizi girin.';
@@ -1706,7 +1920,7 @@ document.getElementById('authForm').addEventListener('submit', async (e) => {
     }
 
     const endpoint = authMode === 'register' ? '/api/auth/register' : '/api/auth/login';
-    const phoneVal = (authMode === 'register' && inputPhone) ? inputPhone.value.trim() : '';
+    const phoneVal = inputPhone ? inputPhone.value.trim() : '';
     btnAuthSubmit.disabled = true;
     btnAuthSubmit.textContent = 'Bağlanıyor...';
 
@@ -1745,7 +1959,7 @@ document.getElementById('authForm').addEventListener('submit', async (e) => {
                             const rRes = await fetch('/api/auth/reset_password', {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ username, newPassword: password })
+                                body: JSON.stringify({ username, newPassword: password, phone: phoneVal })
                             });
                             const rData = await rRes.json();
                             if (rData.success) {
@@ -1776,7 +1990,7 @@ document.getElementById('authForm').addEventListener('submit', async (e) => {
                             const rRes = await fetch('/api/auth/register', {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ username, password, resetExisting: true })
+                                body: JSON.stringify({ username, password, phone: phoneVal, resetExisting: true })
                             });
                             const rData = await rRes.json();
                             if (rData.success) {
@@ -1847,7 +2061,8 @@ function onUserAuthenticated(user, token) {
     renderChatsList(contactsList);
 
     // Soket sunucusuna kendi oturumunu bildir (Anında Online durumuna geçer)
-    socket.emit('user:join', { token, username: user.username });
+    const mySavedPhone = user.phone || localStorage.getItem('msj_my_phone_' + normalizeKey(user.username)) || '';
+    socket.emit('user:join', { token, username: user.username, phone: mySavedPhone });
 
     // Service Worker'a aktif kullanıcıyı bildir (Arka planda SADECE bu kullanıcının bildirimlerini sorgulaması için)
     if ('serviceWorker' in navigator) {
@@ -2106,29 +2321,91 @@ function createUnregisteredPhoneLookupElement(rawPhoneQuery) {
     return card;
 }
 
+let currentChatFilter = 'all';
+
+function updateOnlineFilterChipCount() {
+    try {
+        const onlineCount = Array.isArray(contactsList) ? contactsList.filter(c => c && c.isOnline).length : 0;
+        filterChips.forEach(chip => {
+            if (chip.dataset && chip.dataset.filter === 'online') {
+                chip.textContent = onlineCount > 0 ? `Online (${onlineCount})` : 'Online';
+            }
+        });
+    } catch (e) {}
+}
+
+function formatContactIntegratedDisplayName(contact) {
+    if (!contact || !contact.username) return '';
+    const hasIntegratedPhone = contact.phone && !isPhoneQueryClient(contact.username) && normalizePhoneClient(contact.phone) !== normalizePhoneClient(contact.username);
+    if (contact.customName && contact.customName !== contact.username && !isPhoneQueryClient(contact.customName)) {
+        return hasIntegratedPhone
+            ? `${contact.customName} (${contact.username} • ${formatPhonePretty(contact.phone)})`
+            : `${contact.customName} (${contact.username})`;
+    }
+    if (hasIntegratedPhone) {
+        return `${contact.username} (${formatPhonePretty(contact.phone)})`;
+    }
+    return contact.username;
+}
+
 function renderChatsList(chats, rawSearchQuery = '') {
     chatListContainer.innerHTML = '';
+    updateOnlineFilterChipCount();
 
     const activeQuery = rawSearchQuery || (inputSearchChats ? inputSearchChats.value.trim() : '');
     if (activeQuery && isPhoneQueryClient(activeQuery)) {
         chatListContainer.appendChild(createUnregisteredPhoneLookupElement(activeQuery));
     }
 
-    if (!chats || chats.length === 0) {
+    // Aktif filtreyi (Tümü / Online / Okunmamış) her yenilemede koru ki Online ekranında olan kullanıcılar anında görünsün!
+    let effectiveList = Array.isArray(chats) ? chats.slice() : [];
+    if (!rawSearchQuery && chats === contactsList) {
+        if (currentChatFilter === 'online') {
+            effectiveList = effectiveList.filter(c => c && c.isOnline);
+        } else if (currentChatFilter === 'unread') {
+            effectiveList = effectiveList.filter(c => c && (c.unreadCount || 0) > 0);
+        }
+        if (activeQuery) {
+            const qKey = normalizeKey(activeQuery);
+            const dQuery = normalizePhoneClient(activeQuery);
+            effectiveList = effectiveList.filter(c => {
+                if (normalizeKey(c.username).includes(qKey)) return true;
+                if (c.customName && normalizeKey(c.customName).includes(qKey)) return true;
+                if (dQuery && dQuery.length >= 3 && c.phone && normalizePhoneClient(c.phone).includes(dQuery)) return true;
+                return false;
+            });
+        }
+    }
+
+    if (!effectiveList || effectiveList.length === 0) {
         if (!activeQuery || !isPhoneQueryClient(activeQuery)) {
-            chatListContainer.innerHTML = `
-                <div style="padding: 36px 20px; text-align: center; color: var(--text-secondary); font-size: 14px; line-height: 1.55;">
-                    📒 <strong>Kişisel Rehberiniz Boş</strong><br>
-                    Gizlilik gereği sistemdeki diğer kayıtlı kullanıcılar otomatik listelenmez.<br>
-                    Kendi telefonunuzda kayıtlı olan kişileri eklemek veya <strong>telefon numarasından bulup davet etmek</strong> için yukarıdaki <strong>📱 Numaradan Bul &amp; Davet Et</strong> veya sağ alttaki <strong>+</strong> butonuna dokunun.
-                </div>
-            `;
+            if (currentChatFilter === 'online') {
+                chatListContainer.innerHTML = `
+                    <div style="padding: 36px 20px; text-align: center; color: var(--text-secondary); font-size: 14px; line-height: 1.55;">
+                        🟢 <strong>Şu Anda Çevrimiçi (Online) Kullanıcı Yok</strong><br>
+                        Bir kullanıcı uygulamayı açtığında veya giriş yaptığında bu ekranda anında <strong>Online</strong> olarak listelenir.
+                    </div>
+                `;
+            } else if (currentChatFilter === 'unread') {
+                chatListContainer.innerHTML = `
+                    <div style="padding: 36px 20px; text-align: center; color: var(--text-secondary); font-size: 14px; line-height: 1.55;">
+                        ✉️ <strong>Okunmamış Mesajınız Yok</strong>
+                    </div>
+                `;
+            } else {
+                chatListContainer.innerHTML = `
+                    <div style="padding: 36px 20px; text-align: center; color: var(--text-secondary); font-size: 14px; line-height: 1.55;">
+                        📒 <strong>Kişisel Rehberiniz Boş</strong><br>
+                        Kendi telefonunuzda kayıtlı olan kişileri eklemek veya <strong>telefon numarasından bulup davet etmek</strong> için yukarıdaki <strong>📱 Numaradan Bul &amp; Davet Et</strong> veya sağ alttaki <strong>+</strong> butonuna dokunun.
+                    </div>
+                `;
+            }
         }
         updateUnreadBadges();
         return;
     }
 
-    chats.forEach(contact => {
+    effectiveList.forEach(contact => {
         const item = document.createElement('div');
         const contactKey = normalizeKey(contact.username);
         const isActive = activeContact && normalizeKey(activeContact.username) === contactKey;
@@ -2139,16 +2416,14 @@ function renderChatsList(chats, rawSearchQuery = '') {
         item.dataset.username = contact.username;
         item.style.cursor = 'pointer';
 
-        const displayName = (contact.customName && contact.customName !== contact.username)
-            ? `${contact.customName} (${contact.username})`
-            : contact.username;
+        const displayName = formatContactIntegratedDisplayName(contact);
 
         let lastSnippet = contact.phone
-            ? `📱 ${formatPhonePretty(contact.phone)} • 🔒 Signal E2EE şifreli sohbet`
-            : '🔒 Signal E2EE şifreli sohbet';
+            ? `📱 ${formatPhonePretty(contact.phone)} • ${contact.isOnline ? '🟢 Online' : '🔒 Signal E2EE şifreli sohbet'}`
+            : (contact.isOnline ? '🟢 Online • 🔒 Signal E2EE şifreli sohbet' : '🔒 Signal E2EE şifreli sohbet');
         let isOutgoingLast = false;
         let isLastRead = false;
-        let timeLabel = contact.isOnline ? 'Çevrimiçi' : '';
+        let timeLabel = contact.isOnline ? '🟢 Online' : '';
 
         if (validLastMsg) {
             const decryptedPreview = validLastMsg.text
@@ -2159,7 +2434,7 @@ function renderChatsList(chats, rawSearchQuery = '') {
             isLastRead = !!validLastMsg.read;
             lastSnippet = rawText;
             if (validLastMsg.timestamp) {
-                timeLabel = validLastMsg.timestamp;
+                timeLabel = contact.isOnline ? `🟢 Online • ${validLastMsg.timestamp}` : validLastMsg.timestamp;
             }
         }
 
@@ -2170,14 +2445,14 @@ function renderChatsList(chats, rawSearchQuery = '') {
         item.innerHTML = `
             <div class="chat-avatar-wrap">
                 <img class="avatar" src="${contact.avatar || '/avatars/default.svg'}" alt="${escapeHtml(displayName)}">
-                ${contact.isOnline ? '<span class="online-badge" title="Çevrimiçi"></span>' : ''}
+                ${contact.isOnline ? '<span class="online-badge" title="Çevrimiçi (Online)"></span>' : ''}
             </div>
             <div class="chat-content-wrap">
                 <div class="chat-top-line">
                     <span class="chat-title">
                         <strong class="wa-contact-name">${escapeHtml(displayName)}</strong>
                     </span>
-                    <span class="wa-chat-time ${hasUnread ? 'unread' : (contact.isOnline && !validLastMsg ? 'online-time' : '')}">${escapeHtml(timeLabel)}</span>
+                    <span class="wa-chat-time ${hasUnread ? 'unread' : (contact.isOnline ? 'online-time' : '')}">${escapeHtml(timeLabel)}</span>
                 </div>
                 <div class="chat-bottom-line">
                     <div class="chat-last-msg-preview ${hasUnread ? 'unread' : ''}" title="${escapeHtml(lastSnippet)}">
@@ -2215,6 +2490,7 @@ inputSearchChats.addEventListener('input', () => {
 
     const filtered = contactsList.filter(c => {
         if (normalizeKey(c.username).includes(query)) return true;
+        if (c.customName && normalizeKey(c.customName).includes(query)) return true;
         if (digitsQuery && digitsQuery.length >= 3 && c.phone && normalizePhoneClient(c.phone).includes(digitsQuery)) return true;
         return false;
     });
@@ -2246,16 +2522,10 @@ filterChips.forEach(chip => {
         });
         chip.classList.add('active');
 
-        const filter = chip.dataset.filter;
-        if (filter === 'unread') {
-            const unread = contactsList.filter(c => c.unreadCount > 0);
-            renderChatsList(unread);
-        } else if (filter === 'online') {
-            const onlineOnly = contactsList.filter(c => c.isOnline);
-            renderChatsList(onlineOnly);
-        } else {
-            renderChatsList(contactsList);
-        }
+        currentChatFilter = chip.dataset.filter || 'all';
+        renderChatsList(contactsList);
+        // Online veya Tümü sekmesine geçildiğinde sunucudan anlık durumu da tazele
+        loadChatsList();
     });
 });
 
@@ -2332,6 +2602,7 @@ function renderNewChatUsers(list, rawSearchQuery = '') {
         const item = document.createElement('div');
         item.className = 'new-chat-user-item';
 
+        const displayTitle = formatContactIntegratedDisplayName(contact);
         const phoneInfoHtml = contact.phone
             ? ` • 📱 ${escapeHtml(formatPhonePretty(contact.phone))}`
             : '';
@@ -2339,11 +2610,11 @@ function renderNewChatUsers(list, rawSearchQuery = '') {
         item.innerHTML = `
             <div class="new-chat-user-left">
                 <div class="chat-avatar-wrap" style="position:relative;">
-                    <img class="avatar" src="${contact.avatar || '/avatars/default.svg'}" alt="${escapeHtml(contact.username)}">
+                    <img class="avatar" src="${contact.avatar || '/avatars/default.svg'}" alt="${escapeHtml(displayTitle)}">
                     ${contact.isOnline ? '<span class="online-badge" title="Online"></span>' : '<span class="offline-badge" title="Offline"></span>'}
                 </div>
                 <div class="new-chat-user-info">
-                    <span class="new-chat-username">${escapeHtml(contact.username)}</span>
+                    <span class="new-chat-username">${escapeHtml(displayTitle)}</span>
                     <span class="new-chat-status ${contact.isOnline ? 'online' : 'offline'}">
                         ${contact.isOnline ? '🟢 Online' : '⚪ Offline (Mesaj & Arama Açık)'}${phoneInfoHtml}
                     </span>
@@ -2495,8 +2766,8 @@ function selectContact(contact) {
     socket.emit('chat:mark_read', { contactUsername: contact.username });
     dismissMessageNotificationToast();
 
-    // Resim 2 Başlık Bilgilerini Doldur
-    chatContactName.textContent = contact.username;
+    // Resim 2 Başlık Bilgilerini Doldur (Entegre numara + kullanıcı adı birlikte gösterilir)
+    chatContactName.textContent = formatContactIntegratedDisplayName(contact);
     chatContactAvatar.src = contact.avatar || '/avatars/default.svg';
 
     if (contact.isOnline) {
@@ -3181,30 +3452,102 @@ socket.on('chat:typing', (data) => {
     }
 });
 
+// Numaradan bulunan ve mesaj gönderilen kullanıcı programı kurduğunda numara + kullanıcı adı entegrasyon bildirimi
+socket.on('user:phone_integrated', (data) => {
+    if (!data || !data.newUsername) return;
+    const oldList = Array.isArray(data.oldUsernames) && data.oldUsernames.length > 0
+        ? data.oldUsernames
+        : (data.oldUsername ? [data.oldUsername] : [data.phone || '']);
+
+    oldList.forEach(oldItem => {
+        integratePhoneContactOnClient(oldItem, data.newUsername, data.phone || '', data.avatar || '/avatars/default.svg', data.isOnline !== false);
+    });
+
+    if (currentUser && normalizeKey(data.newUsername) !== normalizeKey(currentUser.username)) {
+        const prettyP = data.phone ? ` (${formatPhonePretty(data.phone)})` : '';
+        showStatusToast(`${data.newUsername}${prettyP}`, true);
+    }
+
+    renderChatsList(contactsList);
+    if (newChatModal && newChatModal.style.display === 'flex') {
+        renderNewChatUsers(contactsList);
+    }
+    loadChatsList().then(() => {
+        if (activeContact && normalizeKey(activeContact.username) === normalizeKey(data.newUsername)) {
+            loadConversationHistory(activeContact.username);
+        }
+    });
+});
+
 // Kullanıcı Çevrimiçi/Çevrimdışı Durum Değişimi (Online / Offline Bildirimi)
 socket.on('user:status_change', (data) => {
-    if (data && data.username) {
-        savePermanentLocalUsers([{ username: data.username, avatar: data.avatar || '/avatars/default.svg' }]);
-    }
+    if (!data || !data.username) return;
+    const incomingKey = normalizeKey(data.username);
+    const incomingPhoneKey = getPhoneMatchKeyClient(data.phone || '');
+
+    savePermanentLocalUsers([{
+        username: data.username,
+        phone: data.phone || undefined,
+        avatar: data.avatar || '/avatars/default.svg'
+    }]);
+
     // Kendi durum değişimimiz değilse ekranda sesli ve görsel uyarı ver
-    if (currentUser && normalizeKey(data.username) !== normalizeKey(currentUser.username)) {
+    const isMe = currentUser && normalizeKey(currentUser.username) === incomingKey;
+    if (currentUser && !isMe) {
         showStatusToast(data.username, data.isOnline);
         playStatusChime(data.isOnline);
     }
 
-    const contact = contactsList.find(c => normalizeKey(c.username) === normalizeKey(data.username));
-    if (contact) {
-        contact.isOnline = data.isOnline;
-        contact.statusText = data.isOnline ? 'Online' : 'Offline';
-        contact.lastSeen = data.isOnline ? 'Online' : 'Offline';
-        renderChatsList(contactsList);
-    } else {
-        // Yeni bir kullanıcı bağlandıysa listeyi yenile
-        loadChatsList();
+    // Eğer rehberde telefon numarasıyla kayıtlıysa ve şimdi kullanıcı adıyla Online olduysa anında entegre et
+    if (incomingPhoneKey && !isPhoneQueryClient(data.username)) {
+        const phoneContact = contactsList.find(c =>
+            normalizeKey(c.username) !== incomingKey &&
+            getPhoneMatchKeyClient(c.phone || (isPhoneQueryClient(c.username) ? c.username : '')) === incomingPhoneKey
+        );
+        if (phoneContact) {
+            integratePhoneContactOnClient(phoneContact.username, data.username, data.phone, data.avatar || '/avatars/default.svg', Boolean(data.isOnline));
+        }
     }
 
-    if (activeContact && normalizeKey(activeContact.username) === normalizeKey(data.username)) {
-        activeContact.isOnline = data.isOnline;
+    let contact = contactsList.find(c => normalizeKey(c.username) === incomingKey);
+    if (contact) {
+        contact.isOnline = Boolean(data.isOnline);
+        contact.statusText = data.isOnline ? 'Online' : 'Offline';
+        contact.lastSeen = data.isOnline ? 'Online' : 'Offline';
+        if (data.phone && !contact.phone) contact.phone = data.phone;
+        if (data.avatar && (!contact.avatar || contact.avatar === '/avatars/default.svg')) contact.avatar = data.avatar;
+        renderChatsList(contactsList);
+    } else if (!isMe) {
+        // Programı kullanmaya başlayan kullanıcı üstte Online uyarısı verdiğinde Online ekranında da ANINDA görünsün!
+        const newContactObj = {
+            username: data.username,
+            customName: '',
+            avatar: data.avatar || '/avatars/default.svg',
+            phone: data.phone || '',
+            isOnline: Boolean(data.isOnline),
+            statusText: data.isOnline ? 'Online' : 'Offline',
+            lastSeen: data.isOnline ? 'Online' : 'Offline',
+            lastMessage: null,
+            unreadCount: 0
+        };
+        contactsList.unshift(newContactObj);
+        saveCachedContactsForCurrentUser(contactsList);
+        renderChatsList(contactsList);
+    }
+
+    if (newChatModal && newChatModal.style.display === 'flex') {
+        renderNewChatUsers(contactsList);
+    }
+
+    // Sunucudan da güncel sohbet ve mesaj bilgilerini senkronize et
+    loadChatsList();
+
+    if (activeContact && normalizeKey(activeContact.username) === incomingKey) {
+        activeContact.isOnline = Boolean(data.isOnline);
+        if (data.phone && !activeContact.phone) {
+            activeContact.phone = data.phone;
+            if (chatContactName) chatContactName.textContent = formatContactIntegratedDisplayName(activeContact);
+        }
         if (data.isOnline) {
             chatContactStatus.textContent = 'Online';
             headerOnlineDot.style.display = 'block';
@@ -3214,24 +3557,56 @@ socket.on('user:status_change', (data) => {
         }
     }
 
-    if (data.isOnline && currentCallTarget && normalizeKey(currentCallTarget) === normalizeKey(data.username)) {
+    if (data.isOnline && currentCallTarget && normalizeKey(currentCallTarget) === incomingKey) {
         if (outgoingCallModal && outgoingCallModal.style.display === 'flex' && outgoingCallStatus) {
             outgoingCallStatus.textContent = 'Çalıyor (Karşı cihaz Online oldu)...';
         }
     }
 });
 
-// Yeni Bir Kullanıcı Kayıt Olduğunda (Madde 5 Gizlilik Korumalı: Sadece kendi rehberimizde varsa güncellenir)
+// Yeni Bir Kullanıcı Kayıt Olduğunda (Üstte Online uyarısı verilir ve Online ekranına anında eklenir)
 function handleNewUserRegisteredEvent(data) {
     if (!currentUser || !data || !data.username) return;
     const uKey = normalizeKey(data.username);
-    const inMyContacts = contactsList.some(c => normalizeKey(c.username) === uKey) ||
-        getPersonalPhoneBookForCurrentUser().some(c => normalizeKey(c.username) === uKey || (data.phone && c.phone && normalizePhoneClient(c.phone) === normalizePhoneClient(data.phone)));
-    if (inMyContacts) {
+    if (uKey === normalizeKey(currentUser.username)) return;
+
+    const incomingPhoneKey = getPhoneMatchKeyClient(data.phone || '');
+    if (incomingPhoneKey && !isPhoneQueryClient(data.username)) {
+        integratePhoneContactOnClient(data.phone, data.username, data.phone, data.avatar || '/avatars/default.svg', data.isOnline !== false);
+    }
+
+    let existing = contactsList.find(c => normalizeKey(c.username) === uKey);
+    const isOnlineNow = data.isOnline !== false;
+    if (existing) {
+        existing.isOnline = isOnlineNow;
+        existing.statusText = isOnlineNow ? 'Online' : 'Offline';
+        existing.lastSeen = isOnlineNow ? 'Online' : 'Offline';
+        if (data.phone && !existing.phone) existing.phone = data.phone;
+    } else if (!isPhoneQueryClient(data.username) || isOnlineNow) {
+        contactsList.unshift({
+            username: data.username,
+            customName: '',
+            avatar: data.avatar || '/avatars/default.svg',
+            phone: data.phone || '',
+            isOnline: isOnlineNow,
+            statusText: isOnlineNow ? 'Online' : 'Offline',
+            lastSeen: isOnlineNow ? 'Online' : 'Offline',
+            lastMessage: null,
+            unreadCount: 0
+        });
+    }
+
+    saveCachedContactsForCurrentUser(contactsList);
+    renderChatsList(contactsList);
+    if (newChatModal && newChatModal.style.display === 'flex') {
+        renderNewChatUsers(contactsList);
+    }
+
+    if (isOnlineNow) {
         showStatusToast(data.username, true);
         playStatusChime(true);
-        loadChatsList();
     }
+    loadChatsList();
 }
 socket.on('user:new_registered', handleNewUserRegisteredEvent);
 socket.on('user:registered', handleNewUserRegisteredEvent);

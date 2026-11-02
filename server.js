@@ -115,6 +115,136 @@ function getPrimaryIp() {
 const { db, normalizeKey, normalizePhone, isLikelyPhoneNumber, getConvoKey } = require('./db');
 let globalIo = null;
 
+// Kayıt olan, giriş yapan veya bulut üzerinden bağlanan kullanıcıların anında Online görünmesi için etkin çevrimiçi takip haritaları
+const recentOnlineUsers = new Map(); // userKey -> expiresAtTimestamp
+const cloudOnlineUsers = new Map();  // userKey -> expiresAtTimestamp
+
+function markUserOnline(username, durationMs = 75000) {
+    if (!username) return;
+    const uKey = normalizeKey(username);
+    if (!uKey) return;
+    recentOnlineUsers.set(uKey, Date.now() + durationMs);
+    db.updateUserLastSeen(username, 'Online').catch(() => {});
+}
+
+function unmarkUserOnline(username) {
+    if (!username) return;
+    const uKey = normalizeKey(username);
+    if (!uKey) return;
+    recentOnlineUsers.delete(uKey);
+    cloudOnlineUsers.delete(uKey);
+}
+
+function isUserEffectivelyOnline(usernameOrKey) {
+    const uKey = normalizeKey(usernameOrKey);
+    if (!uKey) return false;
+    if (onlineUserSockets.has(uKey) && onlineUserSockets.get(uKey).size > 0) {
+        return true;
+    }
+    const now = Date.now();
+    const recExp = recentOnlineUsers.get(uKey);
+    if (recExp) {
+        if (recExp > now) return true;
+        recentOnlineUsers.delete(uKey);
+    }
+    const cloudExp = cloudOnlineUsers.get(uKey);
+    if (cloudExp) {
+        if (cloudExp > now) return true;
+        cloudOnlineUsers.delete(uKey);
+    }
+    return false;
+}
+
+function getEffectiveOnlineMap() {
+    const map = new Map();
+    const now = Date.now();
+    for (const [k, set] of onlineUserSockets.entries()) {
+        if (set && set.size > 0) {
+            map.set(k, set);
+        }
+    }
+    for (const [k, exp] of recentOnlineUsers.entries()) {
+        if (exp > now) {
+            if (!map.has(k)) map.set(k, new Set(['recent_online']));
+        } else {
+            recentOnlineUsers.delete(k);
+        }
+    }
+    for (const [k, exp] of cloudOnlineUsers.entries()) {
+        if (exp > now) {
+            if (!map.has(k)) map.set(k, new Set(['cloud_online']));
+        } else {
+            cloudOnlineUsers.delete(k);
+        }
+    }
+    return map;
+}
+
+// Numaradan bulunan ve mesaj gönderilen kullanıcı programı kurduğunda numarası ile kullanıcı adını otomatik entegre eder
+async function integrateUserWithPhoneIfApplicable(cleanUser, explicitPhone = '', extraData = {}) {
+    if (!cleanUser || isLikelyPhoneNumber(cleanUser)) return null;
+    let targetPhone = explicitPhone ? normalizePhone(explicitPhone) : '';
+
+    // Eğer kullanıcı kayıt/giriş sırasında telefon kutusunu boş bıraktıysa bile,
+    // sistemde numaradan bulunup mesaj gönderilmiş sahipsiz (unclaimed) bir telefon numarası varsa ve bu kullanıcı PC sahibi değilse otomatik eşleştir!
+    if (!targetPhone || targetPhone.length < 7) {
+        const existing = await db.getUser(cleanUser);
+        const alreadyHasPhone = existing && existing.phone && normalizePhone(existing.phone).length >= 7;
+        const isHostPcOwner = localPcUsername && normalizeKey(cleanUser) === normalizeKey(localPcUsername);
+        if (!alreadyHasPhone && !isHostPcOwner) {
+            const unclaimedList = await db.getUnclaimedPhoneUsers(localPcUsername || '');
+            if (unclaimedList.length === 1) {
+                targetPhone = unclaimedList[0].phone;
+            }
+        }
+    }
+
+    if (!targetPhone || targetPhone.length < 7) return null;
+
+    const intRes = await db.integratePhoneWithUsername(targetPhone, cleanUser, extraData);
+    if (intRes && intRes.user) {
+        if (Array.isArray(intRes.oldUsernames)) {
+            for (const oldName of intRes.oldUsernames) {
+                const oldKey = normalizeKey(oldName);
+                if (oldKey && oldKey !== normalizeKey(cleanUser)) {
+                    onlineUserSockets.delete(oldKey);
+                    if (typeof deleteUserOnCloudServer === 'function') {
+                        deleteUserOnCloudServer(oldName).catch(() => {});
+                    }
+                }
+            }
+        }
+        if (globalIo && (intRes.integrated || (intRes.oldUsernames && intRes.oldUsernames.length > 0))) {
+            globalIo.emit('user:phone_integrated', {
+                oldUsername: (intRes.oldUsernames && intRes.oldUsernames[0]) || targetPhone,
+                oldUsernames: intRes.oldUsernames || [targetPhone],
+                newUsername: intRes.user.username,
+                phone: intRes.user.phone || targetPhone,
+                avatar: intRes.user.avatar || '/avatars/default.svg',
+                isOnline: true
+            });
+        }
+    }
+    return intRes;
+}
+
+function broadcastUserOnlineStatus(userObj, isNewRegistration = false) {
+    if (!userObj || !userObj.username) return;
+    markUserOnline(userObj.username);
+    if (!globalIo) return;
+    const payload = {
+        username: userObj.username,
+        phone: userObj.phone || '',
+        avatar: userObj.avatar || '/avatars/default.svg',
+        isOnline: true,
+        statusText: 'Online'
+    };
+    if (isNewRegistration) {
+        globalIo.emit('user:new_registered', payload);
+    }
+    globalIo.emit('user:status_change', payload);
+}
+
 function hashPassword(password, salt) {
     return crypto.pbkdf2Sync(password, salt, 1000, 64, 'sha512').toString('hex');
 }
@@ -219,9 +349,12 @@ app.post('/api/auth/register', async (req, res) => {
             return res.status(400).json({ success: false, error: 'Şifre en az 3 karakter olmalıdır' });
         }
 
-        const existing = await db.getUser(cleanUser);
+        let existing = await db.getUser(cleanUser);
         if (existing) {
-            if (cleanPhone && !existing.phone) {
+            if (!isLikelyPhoneNumber(existing.username)) {
+                const intRes = await integrateUserWithPhoneIfApplicable(existing.username, cleanPhone);
+                if (intRes && intRes.user) existing = intRes.user;
+            } else if (cleanPhone && !existing.phone) {
                 await db.updateUserPhone(existing.username, cleanPhone);
                 existing.phone = cleanPhone;
             }
@@ -232,6 +365,7 @@ app.post('/api/auth/register', async (req, res) => {
                 await db.updateUserPassword(existing.username, salt, hash);
                 const token = crypto.randomBytes(32).toString('hex');
                 await db.saveSession(token, existing.username);
+                broadcastUserOnlineStatus(existing, false);
                 return res.json({
                     success: true,
                     token,
@@ -245,11 +379,17 @@ app.post('/api/auth/register', async (req, res) => {
             const hash1234 = hashPassword('1234', existing.salt);
             const hash123456 = hashPassword('123456', existing.salt);
             const hashAdmin = hashPassword('admin', existing.salt);
+            const existingIsDefault = (existing.hash === hash123456 || existing.hash === hash1234);
 
             if (testHash === existing.hash || passTrimHash === existing.hash ||
-                testHash === hash1234 || testHash === hash123456 || testHash === hashAdmin) {
+                testHash === hash1234 || testHash === hash123456 || testHash === hashAdmin ||
+                (existingIsDefault && password.trim().length >= 3)) {
+                if (existingIsDefault && password.trim().length >= 3 && password.trim() !== '123456') {
+                    await db.updateUserPassword(existing.username, existing.salt, passTrimHash).catch(() => {});
+                }
                 const token = crypto.randomBytes(32).toString('hex');
                 await db.saveSession(token, existing.username);
+                broadcastUserOnlineStatus(existing, false);
                 return res.json({
                     success: true,
                     token,
@@ -268,7 +408,7 @@ app.post('/api/auth/register', async (req, res) => {
         const hash = hashPassword(password, salt);
         const avatar = `/avatars/default.svg`;
 
-        const newUser = await db.createUser({
+        let newUser = await db.createUser({
             username: cleanUser,
             phone: cleanPhone,
             salt,
@@ -278,17 +418,24 @@ app.post('/api/auth/register', async (req, res) => {
             createdAt: new Date().toISOString()
         });
 
-        const token = crypto.randomBytes(32).toString('hex');
-        await db.saveSession(token, cleanUser);
-
-        if (globalIo) {
-            globalIo.emit('user:new_registered', {
-                username: cleanUser,
-                phone: cleanPhone,
+        // Numaradan bulunup mesaj gönderilmiş bir kullanıcı programı kurduğunda numarasını ve tüm mesajlarını kullanıcı adıyla entegre et!
+        if (!isLikelyPhoneNumber(cleanUser)) {
+            const intRes = await integrateUserWithPhoneIfApplicable(cleanUser, cleanPhone, {
+                salt,
+                hash,
                 avatar,
-                isOnline: true
+                lastSeen: 'Online'
             });
+            if (intRes && intRes.user) {
+                newUser = intRes.user;
+            }
         }
+
+        const finalUser = newUser || { username: cleanUser, phone: cleanPhone, avatar };
+        const token = crypto.randomBytes(32).toString('hex');
+        await db.saveSession(token, finalUser.username);
+
+        broadcastUserOnlineStatus(finalUser, true);
 
         if (typeof syncWithCloudServer === 'function') {
             syncWithCloudServer().catch(() => {});
@@ -297,7 +444,7 @@ app.post('/api/auth/register', async (req, res) => {
         res.json({
             success: true,
             token,
-            user: { username: cleanUser, phone: cleanPhone, avatar }
+            user: { username: finalUser.username, phone: finalUser.phone || cleanPhone || '', avatar: finalUser.avatar || avatar }
         });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
@@ -307,11 +454,12 @@ app.post('/api/auth/register', async (req, res) => {
 // 2. Giriş Yap API
 app.post('/api/auth/login', async (req, res) => {
     try {
-        const { username, password } = req.body;
+        const { username, password, phone } = req.body;
         if (!username || !password) {
             return res.status(400).json({ success: false, error: 'Kullanıcı adı ve şifre giriniz' });
         }
         const cleanUser = username.trim();
+        const cleanPhone = phone ? normalizePhone(phone) : '';
         let existing = await db.getUser(cleanUser);
 
         if (!existing) {
@@ -322,25 +470,32 @@ app.post('/api/auth/login', async (req, res) => {
                 const avatar = `/avatars/default.svg`;
                 existing = await db.createUser({
                     username: cleanUser,
+                    phone: cleanPhone,
                     salt,
                     hash,
                     avatar,
                     lastSeen: 'Online',
                     createdAt: new Date().toISOString()
                 });
-                if (globalIo) {
-                    globalIo.emit('user:new_registered', {
-                        username: cleanUser,
+                if (!isLikelyPhoneNumber(cleanUser)) {
+                    const intRes = await integrateUserWithPhoneIfApplicable(cleanUser, cleanPhone, {
+                        salt,
+                        hash,
                         avatar,
-                        isOnline: true
+                        lastSeen: 'Online'
                     });
+                    if (intRes && intRes.user) existing = intRes.user;
                 }
+                broadcastUserOnlineStatus(existing, true);
                 if (typeof syncWithCloudServer === 'function') {
                     syncWithCloudServer().catch(() => {});
                 }
             } else {
                 return res.status(401).json({ success: false, error: 'Bu kullanıcı bulunamadı. Lütfen yeni kullanıcı olarak kayıt olun.' });
             }
+        } else if (!isLikelyPhoneNumber(existing.username)) {
+            const intRes = await integrateUserWithPhoneIfApplicable(existing.username, cleanPhone);
+            if (intRes && intRes.user) existing = intRes.user;
         }
 
         const testHash = hashPassword(password, existing.salt);
@@ -372,6 +527,8 @@ app.post('/api/auth/login', async (req, res) => {
         const token = crypto.randomBytes(32).toString('hex');
         await db.saveSession(token, existing.username);
 
+        broadcastUserOnlineStatus(existing, false);
+
         res.json({
             success: true,
             token,
@@ -385,11 +542,12 @@ app.post('/api/auth/login', async (req, res) => {
 // 2.1 Şifre Sıfırlama API
 app.post('/api/auth/reset_password', async (req, res) => {
     try {
-        const { username, newPassword } = req.body;
+        const { username, newPassword, phone } = req.body;
         if (!username || !newPassword) {
             return res.status(400).json({ success: false, error: 'Kullanıcı adı ve yeni şifre zorunludur' });
         }
         const cleanUser = username.trim();
+        const cleanPhone = phone ? normalizePhone(phone) : '';
         if (newPassword.length < 3) {
             return res.status(400).json({ success: false, error: 'Yeni şifre en az 3 karakter olmalıdır' });
         }
@@ -404,9 +562,15 @@ app.post('/api/auth/reset_password', async (req, res) => {
         const salt = crypto.randomBytes(16).toString('hex');
         const hash = hashPassword(newPassword, salt);
         await db.updateUserPassword(cleanUser, salt, hash);
+        if (!isLikelyPhoneNumber(existing.username)) {
+            const intRes = await integrateUserWithPhoneIfApplicable(existing.username, cleanPhone);
+            if (intRes && intRes.user) existing = intRes.user;
+        }
 
         const token = crypto.randomBytes(32).toString('hex');
         await db.saveSession(token, existing.username);
+
+        broadcastUserOnlineStatus(existing, false);
 
         if (typeof syncWithCloudServer === 'function') {
             syncWithCloudServer().catch(() => {});
@@ -426,11 +590,12 @@ app.post('/api/auth/reset_password', async (req, res) => {
 // 2.2 Otomatik Giriş API (Beni Hatırla için Kesintisiz Giriş)
 app.post('/api/auth/auto_login', async (req, res) => {
     try {
-        const { username, token } = req.body;
+        const { username, token, phone } = req.body;
         if (!username) {
             return res.status(400).json({ success: false, error: 'Kullanıcı adı zorunludur' });
         }
         const cleanUser = username.trim();
+        const cleanPhone = phone ? normalizePhone(phone) : '';
         let user = await db.getUser(cleanUser);
         if (!user) {
             // Cihazda kayıtlı kullanıcı varsa silinmesine izin verme, veritabanına otomatik geri yükle
@@ -440,10 +605,16 @@ app.post('/api/auth/auto_login', async (req, res) => {
             return res.status(404).json({ success: false, error: 'Kullanıcı bulunamadı' });
         }
 
+        if (!isLikelyPhoneNumber(user.username)) {
+            const intRes = await integrateUserWithPhoneIfApplicable(user.username, cleanPhone);
+            if (intRes && intRes.user) user = intRes.user;
+        }
+        markUserOnline(user.username);
+
         // Eğer mevcut bir token gönderilmişse ve geçerliyse
         if (token) {
             const session = await db.getSession(token);
-            if (session && normalizeKey(session.username) === normalizeKey(cleanUser)) {
+            if (session && normalizeKey(session.username) === normalizeKey(user.username)) {
                 await db.updateSessionLastUsed(token);
                 return res.json({
                     success: true,
@@ -453,7 +624,7 @@ app.post('/api/auth/auto_login', async (req, res) => {
             }
         }
 
-        const lastSession = await db.getLastSessionForUser(cleanUser);
+        const lastSession = await db.getLastSessionForUser(user.username);
         const newToken = (lastSession && lastSession.token) ? lastSession.token : crypto.randomBytes(32).toString('hex');
         await db.saveSession(newToken, user.username);
 
@@ -480,6 +651,7 @@ app.post('/api/auth/verify', async (req, res) => {
             if (username && username.trim().length >= 2) {
                 const ensuredUser = await db.ensureUserExists(username.trim());
                 if (ensuredUser) {
+                    markUserOnline(ensuredUser.username);
                     await db.saveSession(token, ensuredUser.username);
                     return res.json({
                         success: true,
@@ -498,6 +670,8 @@ app.post('/api/auth/verify', async (req, res) => {
         if (!user) {
             return res.status(401).json({ success: false, error: 'Kullanıcı bulunamadı' });
         }
+
+        markUserOnline(user.username);
 
         res.json({
             success: true,
@@ -526,7 +700,7 @@ app.get('/api/users/registered', async (req, res) => {
     try {
         const all = await db.getAllUsers();
         const list = all.map(u => {
-            const isOnline = onlineUserSockets.has(u.userKey) && onlineUserSockets.get(u.userKey).size > 0;
+            const isOnline = isUserEffectivelyOnline(u.userKey);
             return {
                 username: u.username,
                 phone: u.phone || '',
@@ -539,6 +713,19 @@ app.get('/api/users/registered', async (req, res) => {
             };
         });
         res.json({ success: true, users: list, deletedUsers: db.getDeletedUserKeys() });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// 5.0.1 Numaradan bulunup davet/mesaj gönderilmiş, henüz kullanıcı adıyla entegre edilmemiş telefon numaralarını getir
+app.get('/api/users/pending_phones', async (req, res) => {
+    try {
+        const pending = await db.getUnclaimedPhoneUsers(localPcUsername || '');
+        res.json({
+            success: true,
+            pendingPhones: pending
+        });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
     }
@@ -569,11 +756,24 @@ app.post('/api/users/sync', async (req, res) => {
                         fromSync: true
                     } : { fromSync: true };
                     const ensured = await db.ensureUserExists(uName.trim(), uAvatar, extraData);
+                    if (item && typeof item === 'object' && item.isOnline && ensured) {
+                        cloudOnlineUsers.set(normalizeKey(ensured.username), Date.now() + 45000);
+                    }
+                    if (ensured && ensured._wasIntegrated && globalIo) {
+                        const intRes = ensured._wasIntegrated;
+                        globalIo.emit('user:phone_integrated', {
+                            oldUsername: (intRes.oldUsernames && intRes.oldUsernames[0]) || intRes.phone,
+                            oldUsernames: intRes.oldUsernames || [intRes.phone],
+                            newUsername: ensured.username,
+                            phone: ensured.phone || intRes.phone || '',
+                            avatar: ensured.avatar || '/avatars/default.svg',
+                            isOnline: isUserEffectivelyOnline(ensured.username)
+                        });
+                    }
                     if (ensured && ensured._wasCreated) {
                         anyCreated = true;
                         if (globalIo) {
-                            const uKey = normalizeKey(ensured.username);
-                            const isOnline = onlineUserSockets.has(uKey) && onlineUserSockets.get(uKey).size > 0;
+                            const isOnline = isUserEffectivelyOnline(ensured.username);
                             globalIo.emit('user:new_registered', {
                                 username: ensured.username,
                                 phone: ensured.phone || '',
@@ -590,7 +790,7 @@ app.post('/api/users/sync', async (req, res) => {
         }
         const all = await db.getAllUsers();
         const list = all.map(u => {
-            const isOnline = onlineUserSockets.has(u.userKey) && onlineUserSockets.get(u.userKey).size > 0;
+            const isOnline = isUserEffectivelyOnline(u.userKey);
             return {
                 username: u.username,
                 phone: u.phone || '',
@@ -627,7 +827,7 @@ app.get('/api/users/search_phone', async (req, res) => {
                     normalizePhone(u.username).includes(cleanDigits)
                 );
                 if (nameMatch || phoneMatch) {
-                    const isOnline = onlineUserSockets.has(u.userKey) && onlineUserSockets.get(u.userKey).size > 0;
+                    const isOnline = isUserEffectivelyOnline(u.userKey);
                     matches.push({
                         username: u.username,
                         phone: u.phone || (isLikelyPhoneNumber(u.username) ? normalizePhone(u.username) : ''),
@@ -966,6 +1166,30 @@ app.post('/api/users/update_phone', async (req, res) => {
         if (!updated) {
             return res.status(404).json({ success: false, error: 'Kullanıcı bulunamadı' });
         }
+        if (updated._integrationResult) {
+            const intRes = updated._integrationResult;
+            if (Array.isArray(intRes.oldUsernames)) {
+                for (const oldName of intRes.oldUsernames) {
+                    const oldKey = normalizeKey(oldName);
+                    if (oldKey && oldKey !== normalizeKey(updated.username)) {
+                        onlineUserSockets.delete(oldKey);
+                        if (typeof deleteUserOnCloudServer === 'function') {
+                            deleteUserOnCloudServer(oldName).catch(() => {});
+                        }
+                    }
+                }
+            }
+            if (globalIo && (intRes.integrated || (intRes.oldUsernames && intRes.oldUsernames.length > 0))) {
+                globalIo.emit('user:phone_integrated', {
+                    oldUsername: (intRes.oldUsernames && intRes.oldUsernames[0]) || intRes.phone,
+                    oldUsernames: intRes.oldUsernames || [intRes.phone],
+                    newUsername: updated.username,
+                    phone: updated.phone || intRes.phone || '',
+                    avatar: updated.avatar || '/avatars/default.svg',
+                    isOnline: isUserEffectivelyOnline(updated.username)
+                });
+            }
+        }
         if (typeof syncWithCloudServer === 'function') {
             syncWithCloudServer().catch(() => {});
         }
@@ -995,6 +1219,7 @@ app.delete('/api/users/:username', async (req, res) => {
         }
 
         onlineUserSockets.delete(result.userKey);
+        unmarkUserOnline(result.username);
         if (globalIo) {
             globalIo.emit('user:deleted', {
                 username: result.username,
@@ -1017,12 +1242,12 @@ app.delete('/api/users/:username', async (req, res) => {
 app.get('/api/chats', authenticateToken, async (req, res) => {
     try {
         const currentUsername = req.user.username;
-        const chatItems = await db.getChatsList(currentUsername, onlineUserSockets);
+        const chatItems = await db.getChatsList(currentUsername, getEffectiveOnlineMap());
 
         res.json({
             success: true,
             chats: chatItems,
-            currentUser: { username: req.user.username, avatar: req.user.avatar }
+            currentUser: { username: req.user.username, phone: req.user.phone || '', avatar: req.user.avatar }
         });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
@@ -2119,6 +2344,7 @@ async function syncWithCloudServer() {
                 username: u.username,
                 phone: u.phone || '',
                 avatar: u.avatar || '/avatars/default.svg',
+                isOnline: isUserEffectivelyOnline(u.userKey),
                 salt: u.salt,
                 hash: u.hash,
                 createdAt: u.createdAt
@@ -2148,6 +2374,8 @@ async function syncWithCloudServer() {
                 for (const cu of data.users) {
                     const uName = cu && cu.username ? cu.username.trim() : '';
                     if (uName.length >= 2 && !db.isUserDeleted(uName)) {
+                        const prevKey = normalizeKey(uName);
+                        const wasCloudOnline = cloudOnlineUsers.has(prevKey) && cloudOnlineUsers.get(prevKey) > Date.now();
                         const ensured = await db.ensureUserExists(uName, cu.avatar || '/avatars/default.svg', {
                             phone: cu.phone || '',
                             salt: cu.salt,
@@ -2155,15 +2383,40 @@ async function syncWithCloudServer() {
                             createdAt: cu.createdAt,
                             fromSync: true
                         });
-                        if (ensured && ensured._wasCreated && globalIo) {
+                        if (ensured) {
                             const uKey = normalizeKey(ensured.username);
-                            const isOnline = onlineUserSockets.has(uKey) && onlineUserSockets.get(uKey).size > 0;
-                            globalIo.emit('user:new_registered', {
-                                username: ensured.username,
-                                phone: ensured.phone || '',
-                                avatar: ensured.avatar || '/avatars/default.svg',
-                                isOnline
-                            });
+                            if (cu.isOnline) {
+                                cloudOnlineUsers.set(uKey, Date.now() + 45000);
+                                if (!wasCloudOnline && globalIo) {
+                                    globalIo.emit('user:status_change', {
+                                        username: ensured.username,
+                                        phone: ensured.phone || '',
+                                        avatar: ensured.avatar || '/avatars/default.svg',
+                                        isOnline: true,
+                                        statusText: 'Online'
+                                    });
+                                }
+                            }
+                            if (ensured._wasIntegrated && globalIo) {
+                                const intRes = ensured._wasIntegrated;
+                                globalIo.emit('user:phone_integrated', {
+                                    oldUsername: (intRes.oldUsernames && intRes.oldUsernames[0]) || intRes.phone,
+                                    oldUsernames: intRes.oldUsernames || [intRes.phone],
+                                    newUsername: ensured.username,
+                                    phone: ensured.phone || intRes.phone || '',
+                                    avatar: ensured.avatar || '/avatars/default.svg',
+                                    isOnline: isUserEffectivelyOnline(uKey)
+                                });
+                            }
+                            if (ensured._wasCreated && globalIo) {
+                                const isOnline = isUserEffectivelyOnline(uKey);
+                                globalIo.emit('user:new_registered', {
+                                    username: ensured.username,
+                                    phone: ensured.phone || '',
+                                    avatar: ensured.avatar || '/avatars/default.svg',
+                                    isOnline
+                                });
+                            }
                         }
                     }
                 }
@@ -2239,35 +2492,49 @@ async function startServer() {
                 return;
             }
 
-            const userKey = normalizeKey(username);
             let existing = await db.getUser(username);
             if (!existing) {
                 existing = await db.ensureUserExists(username, (data && data.avatar) || '/avatars/default.svg');
             }
+
+            const joinPhone = (data && data.phone) ? normalizePhone(data.phone) : '';
+            if (existing && !isLikelyPhoneNumber(existing.username)) {
+                const intRes = await integrateUserWithPhoneIfApplicable(existing.username, joinPhone);
+                if (intRes && intRes.user) {
+                    existing = intRes.user;
+                }
+            }
+
+            const finalUsername = existing ? existing.username : username;
+            const userKey = normalizeKey(finalUsername);
             const avatar = existing ? existing.avatar : ((data && data.avatar) || '/avatars/default.svg');
+            const phone = existing ? (existing.phone || '') : joinPhone;
 
             // Soketi varsa önceki kullanıcı odalarından çıkarıp yalnızca bu kullanıcıya bağla
-            bindSocketToUser(socket, username, avatar);
+            bindSocketToUser(socket, finalUsername, avatar);
+            markUserOnline(finalUsername);
 
             // Eğer bu bağlantı yerel bilgisayardan (localhost / 127.0.0.1) yapılmışsa PC kullanıcısı olarak kaydet
             const remoteAddr = (socket.handshake && socket.handshake.address) || '';
             if (remoteAddr === '127.0.0.1' || remoteAddr === '::1' || remoteAddr === '::ffff:127.0.0.1') {
-                setLocalPcUsername(username);
+                setLocalPcUsername(finalUsername);
             }
 
-            await db.updateUserLastSeen(username, 'Online');
+            await db.updateUserLastSeen(finalUsername, 'Online');
 
-            console.log(`[Kullanıcı Bağlandı] ${username} (${socket.id})`);
+            console.log(`[Kullanıcı Bağlandı] ${finalUsername} (${socket.id})`);
 
             // Çevrimiçi durumunu anlık olarak herkese bildir
             io.emit('user:status_change', {
-                username: username,
+                username: finalUsername,
+                phone: phone,
+                avatar: avatar,
                 isOnline: true,
                 statusText: 'Online'
             });
 
             socket.emit('auth:success', {
-                user: { username, avatar, phone: existing ? (existing.phone || '') : '' }
+                user: { username: finalUsername, avatar, phone }
             });
 
             // PROGRAM KAPALIYKEN VEYA OFFLINE İKEN GELEN GERÇEK AKTİF ARAMA VARSA ANINDA EKRANA DÜŞÜR!
@@ -2807,6 +3074,7 @@ async function startServer() {
                     onlineUserSockets.get(userKey).delete(socket.id);
                     if (onlineUserSockets.get(userKey).size === 0) {
                         onlineUserSockets.delete(userKey);
+                        unmarkUserOnline(user.username);
                         await db.updateUserLastSeen(user.username, 'Offline');
 
                         // Çevrimdışı (Offline) olduğunu anlık olarak herkese bildir
