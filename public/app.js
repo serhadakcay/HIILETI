@@ -960,6 +960,7 @@ let notifyToastTimer = null;
 let lastNotifySender = null;
 
 function showMessageNotificationToast(msg) {
+    if (msg && window.MSJPlus?.muted(msg.sender)) return;
     if (!messageNotifyToast || !notifySender || !notifyText) return;
     if (!currentUser || !msg) return;
 
@@ -2372,6 +2373,7 @@ function renderChatsList(chats, rawSearchQuery = '') {
 
     // Aktif filtreyi (Tümü / Online / Okunmamış) her yenilemede koru ki Online ekranında olan kullanıcılar anında görünsün!
     let effectiveList = Array.isArray(chats) ? chats.slice() : [];
+    effectiveList = window.MSJPlus?.filterChats(effectiveList) || effectiveList;
     if (!rawSearchQuery && chats === contactsList) {
         if (currentChatFilter === 'online') {
             effectiveList = effectiveList.filter(c => c && c.isOnline);
@@ -2432,8 +2434,8 @@ function renderChatsList(chats, rawSearchQuery = '') {
         const displayName = formatContactIntegratedDisplayName(contact);
 
         let lastSnippet = contact.phone
-            ? `📱 ${formatPhonePretty(contact.phone)} • ${contact.isOnline ? '🟢 Online' : '🔒 Signal E2EE şifreli sohbet'}`
-            : (contact.isOnline ? '🟢 Online • 🔒 Signal E2EE şifreli sohbet' : '🔒 Signal E2EE şifreli sohbet');
+            ? `📱 ${formatPhonePretty(contact.phone)} • ${contact.isOnline ? '🟢 Online' : 'Özel sohbet'}`
+            : (contact.isOnline ? '🟢 Online • Özel sohbet' : 'Özel sohbet');
         let isOutgoingLast = false;
         let isLastRead = false;
         let timeLabel = contact.isOnline ? '🟢 Online' : '';
@@ -2483,6 +2485,7 @@ function renderChatsList(chats, rawSearchQuery = '') {
             selectContact(contact);
         });
 
+        window.MSJPlus?.decorateChat(item, contact);
         chatListContainer.appendChild(item);
     });
 
@@ -2772,6 +2775,7 @@ btnFabNewChat.addEventListener('click', () => {
 // ==========================================================
 
 function selectContact(contact) {
+    window.MSJPlus?.select(contact);
     activeContact = contact;
 
     // Okunmamış mesajları sıfırla ve sunucuya bildir
@@ -2922,6 +2926,7 @@ function appendMessageBubble(msg) {
         const existingTemp = document.getElementById(msg.tempId);
         if (existingTemp) {
             existingTemp.id = msg.id;
+            window.MSJPlus?.messageTools(existingTemp, msg);
             existingTemp.classList.remove('pending');
             const checks = existingTemp.querySelector('.bubble-checks');
             if (checks) checks.textContent = '✓✓';
@@ -2996,6 +3001,7 @@ function appendMessageBubble(msg) {
         </div>
     `;
 
+    window.MSJPlus?.messageTools(bubble, msg);
     messagesContainer.appendChild(bubble);
     scrollToBottom();
 }
@@ -3121,6 +3127,8 @@ function sendTextMessage(text) {
         return;
     }
 
+    text = window.MSJPlus?.prepareText(text) ?? text;
+
     // Giriş kutusunu ANINDA temizle (ikinci bir Enter veya tıklamada aynı metnin tekrar gitmesini %100 engeller)
     messageInput.value = '';
     iconMic.style.display = 'block';
@@ -3182,6 +3190,7 @@ function sendTextMessage(text) {
         } else {
             if (bubbleEl && ack.message) {
                 bubbleEl.id = ack.message.id;
+                window.MSJPlus?.messageTools(bubbleEl, ack.message);
                 bubbleEl.classList.remove('pending');
                 const delBtn = bubbleEl.querySelector('.btn-msg-delete');
                 if (delBtn) delBtn.setAttribute('onclick', `requestDeleteMessage('${ack.message.id}')`);
@@ -3270,6 +3279,7 @@ async function handleFileUpload(file) {
                     const bubbleEl = document.getElementById(tempId) || (ack && ack.message && document.getElementById(ack.message.id));
                     if (bubbleEl && ack && ack.success && ack.message) {
                         bubbleEl.id = ack.message.id;
+                window.MSJPlus?.messageTools(bubbleEl, ack.message);
                         bubbleEl.classList.remove('pending');
                         const delBtn = bubbleEl.querySelector('.btn-msg-delete');
                         if (delBtn) delBtn.setAttribute('onclick', `requestDeleteMessage('${ack.message.id}')`);
@@ -3343,7 +3353,7 @@ socket.on('chat:message', (msg) => {
     }
 
     // 2. Eğer mesaj bize geldiyse:
-    if (isIncoming) {
+    if (isIncoming && !window.MSJPlus?.muted(msg.sender)) {
         // A) Bildirim sesi çal (WhatsApp tarzı net ve tatlı ses)
         playIncomingMessageSound();
         try { window.focus(); } catch (e) {}
@@ -3412,7 +3422,7 @@ socket.on('chat:offline_messages', (data) => {
         }
     });
 
-    if (hasUnreadForOther) {
+    if (hasUnreadForOther && myMessages.some(m => !window.MSJPlus?.muted(m.sender))) {
         playIncomingMessageSound();
         const latestMsg = myMessages[myMessages.length - 1];
         if (latestMsg) {

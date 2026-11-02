@@ -390,27 +390,36 @@ namespace MSJ
         private static int lastNotificationId = 0;
         private static Thread notificationThread = null;
 
+        // The local browser creates this handoff only after successful authentication.
+        // No username-only login or security bypass is used.
+        static WebClient CreateAuthenticatedClient()
+        {
+            string file = Path.Combine(appDir, "data", "desktop-session.json");
+            string json = File.ReadAllText(file, Encoding.UTF8);
+            Match match = Regex.Match(json, @"""token""\s*:\s*""([a-f0-9]{64})""");
+            if (!match.Success) throw new InvalidOperationException("Önce yerel uygulamada giriş yapınız.");
+            WebClient client = new LocalWebClient();
+            client.Headers["x-auth-token"] = match.Groups[1].Value;
+            return client;
+        }
+
+        sealed class LocalWebClient : WebClient
+        {
+            protected override WebRequest GetWebRequest(Uri address)
+            {
+                if (!address.IsLoopback) throw new InvalidOperationException("Yalnızca yerel sunucuya erişilebilir.");
+                WebRequest request = base.GetWebRequest(address);
+                request.Timeout = 5000;
+                return request;
+            }
+        }
+
         static void StartBackgroundNotificationListener()
         {
             if (notificationThread != null && notificationThread.IsAlive) return;
 
             notificationThread = new Thread(() =>
             {
-                try
-                {
-                    using (WebClient wc = new WebClient())
-                    {
-                        wc.Encoding = Encoding.UTF8;
-                        string initJson = wc.DownloadString("http://127.0.0.1:3000/api/system/notifications/poll?since=0");
-                        var match = Regex.Match(initJson, "\"lastId\"\\s*:\\s*(\\d+)");
-                        if (match.Success)
-                        {
-                            int.TryParse(match.Groups[1].Value, out lastNotificationId);
-                        }
-                    }
-                }
-                catch { }
-
                 while (true)
                 {
                     try
@@ -423,7 +432,7 @@ namespace MSJ
                             EnsureServerRunning();
                         }
 
-                        using (WebClient wc = new WebClient())
+                        using (WebClient wc = CreateAuthenticatedClient())
                         {
                             wc.Encoding = Encoding.UTF8;
                             string url = "http://127.0.0.1:3000/api/system/notifications/poll?since=" + lastNotificationId;
@@ -482,7 +491,7 @@ namespace MSJ
             var results = new System.Collections.Generic.List<string>();
             if (string.IsNullOrEmpty(json)) return results;
 
-            int itemsIdx = json.IndexOf("\"items\"");
+            int itemsIdx = json.IndexOf("\"notifications\"");
             int startBracket = itemsIdx >= 0 ? json.IndexOf('[', itemsIdx) : -1;
             if (startBracket < 0) return results;
 
@@ -711,7 +720,7 @@ namespace MSJ
             {
                 try
                 {
-                    using (WebClient wc = new WebClient())
+                    using (WebClient wc = CreateAuthenticatedClient())
                     {
                         wc.Encoding = Encoding.UTF8;
                         wc.Headers[HttpRequestHeader.ContentType] = "application/json";
@@ -732,11 +741,11 @@ namespace MSJ
             {
                 try
                 {
-                    using (WebClient wc = new WebClient())
+                    using (WebClient wc = CreateAuthenticatedClient())
                     {
                         wc.Encoding = Encoding.UTF8;
                         wc.Headers[HttpRequestHeader.ContentType] = "application/json";
-                        string body = "{\"caller\":\"" + caller.Replace("\"", "\\\"") + "\",\"recipient\":\"" + recipient.Replace("\"", "\\\"") + "\"}";
+                        string body = "{\"callerUsername\":\"" + caller.Replace("\"", "\\\"") + "\",\"recipient\":\"" + recipient.Replace("\"", "\\\"") + "\"}";
                         wc.UploadString("http://127.0.0.1:3000/api/system/call/reject", "POST", body);
                     }
                 }
@@ -826,16 +835,6 @@ namespace MSJ
             {
                 try { serverProcess.Kill(); } catch { }
             }
-
-            try
-            {
-                Process[] procs = Process.GetProcessesByName("node");
-                foreach (Process p in procs)
-                {
-                    try { p.Kill(); } catch { }
-                }
-            }
-            catch { }
 
             Application.Exit();
             Environment.Exit(0);

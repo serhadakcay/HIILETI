@@ -180,6 +180,7 @@ function getPrimaryIp() {
 // ==========================================
 const { db, normalizeKey, normalizePhone, isLikelyPhoneNumber, getConvoKey } = require('./db');
 let globalIo = null;
+const featureTools = require('./features')(app, { db, normalizeKey, dataDir, io: () => globalIo });
 
 // Kayıt olan, giriş yapan veya bulut üzerinden bağlanan kullanıcıların anında Online görünmesi için etkin çevrimiçi takip haritaları
 const recentOnlineUsers = new Map(); // userKey -> expiresAtTimestamp
@@ -385,6 +386,12 @@ function readSessionCookie(req) {
     return match ? match[1] : '';
 }
 function sessionCookie(res, req, token) {
+    const ip = req.socket.remoteAddress;
+    if (!IS_CLOUD && ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(ip)) {
+        const file = path.join(dataDir, 'desktop-session.json');
+        fs.writeFileSync(file + '.tmp', JSON.stringify({ token }), { mode: 0o600 });
+        fs.renameSync(file + '.tmp', file);
+    }
     res.cookie('msj_session', token, { httpOnly: true, sameSite: 'strict', secure: req.secure || (process.env.PUBLIC_ORIGIN || '').startsWith('https://'), path: '/', maxAge: 30 * 24 * 60 * 60 * 1000 });
 }
 function validCredentials(body) {
@@ -1213,7 +1220,7 @@ function startCloudflareTunnel(targetPort = 3000) {
     });
 }
 
-startCloudflareTunnel(3000).catch(() => {});
+// Tunnel startup requires an explicitly configured deployment.
 
 app.post('/api/tunnel/start', async (req, res) => {
     const url = await startCloudflareTunnel(3000);
@@ -1417,6 +1424,7 @@ app.post('/api/system/register_pc_user', (req, res) => {
 // Yalnızca hedef alıcıya veya henüz hiçbir kullanıcıyla giriş yapmamış beklemedeki soketlere uyandırma sinyali gönderir
 // (Başka bir kullanıcı adıyla açık olan bilgisayar veya telefon ekranına diğer kullanıcıların mesaj/araması ASLA düşmez)
 function emitWakeupForRecipient(recipientUsername, payload) {
+    if (payload?.type === 'message' && featureTools.isMuted(recipientUsername, payload.sender)) return;
     if (!globalIo || !recipientUsername) return;
     const recKey = normalizeKey(recipientUsername);
     if (!recKey) return;
@@ -1498,6 +1506,7 @@ app.get('/api/system/notifications/poll', (req, res) => {
         newItems = systemNotificationsQueue
             .filter(n => {
                 if (n.id <= since || !n.recipient) return false;
+                if (n.type === 'message' && featureTools.isMuted(req.user.username, n.sender)) return false;
                 const recKey = normalizeKey(n.recipient);
                 const sndKey = normalizeKey(n.sender);
                 if (recKey === forUserKey && sndKey !== forUserKey) return true;
@@ -1545,7 +1554,7 @@ app.get('/api/system/notifications/poll', (req, res) => {
 app.post('/api/system/quick_reply', async (req, res) => {
     try {
         const { sender, recipient, text } = req.body || {};
-        const cleanSender = (sender || localPcUsername || '').trim();
+        const cleanSender = req.user.username;
         const cleanRecipient = (recipient || '').trim();
         const cleanText = (text || '').trim();
         if (!cleanSender || !cleanRecipient || !cleanText) {
