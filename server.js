@@ -1237,6 +1237,134 @@ app.delete('/api/users/:username', async (req, res) => {
     }
 });
 
+// 5.3 Kişisel Rehberden Kişi Silme ve Kişi Engelleme / Engel Kaldırma API
+async function resolveOwnerUsernameFromReq(req) {
+    const bodyOwner = (req.body && req.body.ownerUsername ? String(req.body.ownerUsername).trim() : '')
+        || (req.query && req.query.ownerUsername ? String(req.query.ownerUsername).trim() : '');
+    if (bodyOwner) return bodyOwner;
+    const token = req.headers['x-auth-token'] || (req.body && req.body.token) || '';
+    if (token) {
+        const session = await db.getSession(token);
+        if (session && session.username) return session.username;
+    }
+    return '';
+}
+
+app.post('/api/contacts/delete', async (req, res) => {
+    try {
+        const ownerUsername = await resolveOwnerUsernameFromReq(req);
+        const contactUsername = ((req.body && req.body.contactUsername) || '').trim();
+        const deleteAccountCompletely = Boolean(req.body && req.body.deleteAccountCompletely);
+
+        if (!contactUsername) {
+            return res.status(400).json({ success: false, error: 'Silinecek kişi belirtilmedi' });
+        }
+
+        if (ownerUsername) {
+            await db.removeContactForUser(ownerUsername, contactUsername, true);
+            if (globalIo) {
+                globalIo.to('user:' + normalizeKey(ownerUsername)).emit('contact:deleted', {
+                    ownerUsername,
+                    contactUsername,
+                    contactKey: normalizeKey(contactUsername)
+                });
+            }
+        }
+
+        if (deleteAccountCompletely) {
+            const delRes = await db.deleteUser(contactUsername);
+            if (delRes && delRes.success) {
+                onlineUserSockets.delete(delRes.userKey);
+                unmarkUserOnline(delRes.username);
+                if (globalIo) {
+                    globalIo.emit('user:deleted', {
+                        username: delRes.username,
+                        userKey: delRes.userKey
+                    });
+                }
+                if (typeof deleteUserOnCloudServer === 'function') {
+                    deleteUserOnCloudServer(contactUsername).catch(() => {});
+                }
+            }
+        }
+
+        res.json({
+            success: true,
+            ownerUsername,
+            contactUsername,
+            contactKey: normalizeKey(contactUsername)
+        });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+app.post('/api/contacts/block', async (req, res) => {
+    try {
+        const ownerUsername = await resolveOwnerUsernameFromReq(req);
+        const targetUsername = ((req.body && req.body.targetUsername) || '').trim();
+        if (!ownerUsername || !targetUsername) {
+            return res.status(400).json({ success: false, error: 'Kullanıcı bilgisi eksik' });
+        }
+        const result = await db.blockUser(ownerUsername, targetUsername);
+        if (!result.success) {
+            return res.status(400).json(result);
+        }
+        if (globalIo) {
+            globalIo.to('user:' + normalizeKey(ownerUsername)).emit('contact:block_changed', {
+                ownerUsername,
+                targetUsername: result.targetUsername,
+                blockedKey: result.blockedKey,
+                isBlocked: true
+            });
+        }
+        res.json(result);
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+app.post('/api/contacts/unblock', async (req, res) => {
+    try {
+        const ownerUsername = await resolveOwnerUsernameFromReq(req);
+        const targetUsername = ((req.body && req.body.targetUsername) || '').trim();
+        if (!ownerUsername || !targetUsername) {
+            return res.status(400).json({ success: false, error: 'Kullanıcı bilgisi eksik' });
+        }
+        const result = await db.unblockUser(ownerUsername, targetUsername);
+        if (!result.success) {
+            return res.status(400).json(result);
+        }
+        if (globalIo) {
+            globalIo.to('user:' + normalizeKey(ownerUsername)).emit('contact:block_changed', {
+                ownerUsername,
+                targetUsername: result.targetUsername,
+                blockedKey: result.blockedKey,
+                isBlocked: false
+            });
+        }
+        res.json(result);
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+app.get('/api/contacts/blocked', async (req, res) => {
+    try {
+        const ownerUsername = await resolveOwnerUsernameFromReq(req);
+        if (!ownerUsername) {
+            return res.json({ success: true, blockedUsers: [] });
+        }
+        const map = await db.getBlockedUsersForUser(ownerUsername);
+        res.json({
+            success: true,
+            blockedUsers: Array.from(map.values())
+        });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
 // 6. Kullanıcının Özel Sohbet Listesi
 // PROGRAM KAPATILIP AÇILSA BİLE TÜM KAYITLI KULLANICILAR VE YAZIŞMALAR LİTÈ SQL İLE KORUNUR!
 app.get('/api/chats', authenticateToken, async (req, res) => {
@@ -1623,12 +1751,87 @@ function setLocalPcUsername(username) {
     } catch (e) {}
 }
 
+let lastDesktopTrayPollTime = 0;
+let lastAutoLaunchedWindowAt = 0;
+
+function findWindowsDesktopBrowserPath() {
+    if (process.platform !== 'win32') return null;
+    const candidates = [
+        path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'Microsoft\\Edge\\Application\\msedge.exe'),
+        path.join(process.env['ProgramFiles'] || 'C:\\Program Files', 'Microsoft\\Edge\\Application\\msedge.exe'),
+        path.join(process.env['ProgramFiles'] || 'C:\\Program Files', 'Google\\Chrome\\Application\\chrome.exe'),
+        path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'Google\\Chrome\\Application\\chrome.exe')
+    ];
+    for (const p of candidates) {
+        try {
+            if (fs.existsSync(p)) return p;
+        } catch (e) {}
+    }
+    return null;
+}
+
+// Program kapalıyken mesaj veya arama geldiğinde (Signal / WhatsApp gibi) pencereyi otomatik açan doğrudan masaüstü tetikleyicisi
+function autoOpenDesktopWindowIfClosed(entry) {
+    if (IS_CLOUD || process.platform !== 'win32' || !entry || !entry.recipient || !entry.sender) return;
+    const recKey = normalizeKey(entry.recipient);
+    const sndKey = normalizeKey(entry.sender);
+    if (!recKey || !sndKey || recKey === sndKey) return;
+
+    // Eğer bu PC'de kayıtlı bir ana kullanıcı varsa ve mesaj/arama başka bir kullanıcıya aitse yalnızca kendi kullanıcısı için aç
+    if (localPcUsername && normalizeKey(localPcUsername) !== recKey) {
+        return;
+    }
+
+    // Alıcı zaten tarayıcıda çevrimiçiyse yeni pencere açmaya gerek yok (soket üzerinden anında ekrana düşer)
+    if (onlineUserSockets.has(recKey) && onlineUserSockets.get(recKey).size > 0) {
+        return;
+    }
+
+    // MSJ.exe arka plan tepsi servisi aktifse 1.5 saniye içinde pencereyi ve bildirim kartını kendisi açar;
+    // eğer MSJ.exe çalışmıyorsa veya 1.8 saniye içinde pencere hala açılmadıysa doğrudan node sunucusu pencereyi açar!
+    const delayMs = (Date.now() - lastDesktopTrayPollTime < 2500) ? 2200 : 400;
+    setTimeout(async () => {
+        try {
+            if (onlineUserSockets.has(recKey) && onlineUserSockets.get(recKey).size > 0) return;
+            if (await db.isUserBlocked(entry.recipient, entry.sender)) return;
+
+            const now = Date.now();
+            if (now - lastAutoLaunchedWindowAt < 4500 && entry.type !== 'call') return;
+            lastAutoLaunchedWindowAt = now;
+
+            const isCall = entry.type === 'call';
+            const targetUrl = `http://localhost:${HTTP_PORT}/?openChat=${encodeURIComponent(entry.sender)}&autoUser=${encodeURIComponent(entry.recipient)}${isCall ? '&incomingCall=1' : ''}`;
+            const browserExe = findWindowsDesktopBrowserPath();
+            const { spawn } = require('child_process');
+
+            if (browserExe) {
+                const child = spawn(browserExe, [`--app=${targetUrl}`, '--window-size=1180,820'], {
+                    detached: true,
+                    stdio: 'ignore',
+                    windowsHide: false
+                });
+                child.unref();
+            } else {
+                const child = spawn('cmd.exe', ['/c', 'start', '', targetUrl], {
+                    detached: true,
+                    stdio: 'ignore',
+                    windowsHide: true
+                });
+                child.unref();
+            }
+        } catch (e) {}
+    }, delayMs);
+}
+
 function addSystemNotification(item) {
     notificationSeq++;
     const entry = { id: notificationSeq, timestamp: Date.now(), ...item };
     systemNotificationsQueue.push(entry);
     if (systemNotificationsQueue.length > 300) {
         systemNotificationsQueue.shift();
+    }
+    if (!entry.isTargetOnline && (entry.type === 'message' || entry.type === 'call')) {
+        autoOpenDesktopWindowIfClosed(entry);
     }
     return entry;
 }
@@ -1709,6 +1912,9 @@ app.get('/api/system/notifications/poll', (req, res) => {
     // Yerel bilgisayarda şu an aktif açık bir tarayıcı soketi var mı kontrol et
     const isLocalUserOnline = forUserKey && onlineUserSockets.has(forUserKey) && onlineUserSockets.get(forUserKey).size > 0;
     const isDesktopTrayPoll = isLocalReq && !rawUser && !isBridge;
+    if (isDesktopTrayPoll) {
+        lastDesktopTrayPollTime = Date.now();
+    }
 
     // 60 saniyeden eski bekleyen aramaları temizle
     const now = Date.now();
@@ -1764,6 +1970,7 @@ app.get('/api/system/notifications/poll', (req, res) => {
         lastId: notificationSeq,
         localPcUsername,
         notifications: newItems,
+        items: newItems,
         activeCalls
     });
 });
@@ -1780,6 +1987,13 @@ app.post('/api/system/quick_reply', async (req, res) => {
         }
         await db.ensureUserExists(cleanSender);
         await db.ensureUserExists(cleanRecipient);
+
+        if (await db.isUserBlocked(cleanSender, cleanRecipient)) {
+            return res.status(403).json({ success: false, error: 'Bu kişiyi engellediniz. Mesaj göndermek için önce engeli kaldırın.' });
+        }
+        if (await db.isUserBlocked(cleanRecipient, cleanSender)) {
+            return res.status(403).json({ success: false, error: 'Bu kullanıcıya mesaj gönderilemiyor.' });
+        }
 
         const encryptedText = encryptE2EETextServer(cleanText, cleanSender, cleanRecipient);
 
@@ -1826,6 +2040,7 @@ app.post('/api/messages/sync', async (req, res) => {
         if (Array.isArray(messages)) {
             for (const m of messages) {
                 if (!m || !m.id || !m.sender || !m.recipient) continue;
+                if (await db.isUserBlocked(m.recipient, m.sender)) continue;
                 m.text = decryptE2EETextServer(m.text || '', m.sender, m.recipient);
                 if (m.file && m.text === '📎 Dosya / Fotoğraf paylaştı') {
                     m.text = '';
@@ -1877,6 +2092,9 @@ app.post('/api/calls/sync', async (req, res) => {
     try {
         const { callPayload } = req.body || {};
         if (callPayload && callPayload.callerUsername && callPayload.recipient) {
+            if (await db.isUserBlocked(callPayload.recipient, callPayload.callerUsername)) {
+                return res.json({ success: false, blocked: true });
+            }
             await db.ensureUserExists(callPayload.callerUsername);
             await db.ensureUserExists(callPayload.recipient);
             const recKey = normalizeKey(callPayload.recipient);
@@ -2218,6 +2436,9 @@ async function pollCloudNotificationsAndMessages() {
                 if (Array.isArray(data.notifications) && data.notifications.length > 0) {
                     for (const item of data.notifications) {
                         if (!item || !item.type) continue;
+                        if (item.recipient && item.sender && await db.isUserBlocked(item.recipient, item.sender)) {
+                            continue;
+                        }
                         if (item.type === 'message') {
                             const msgId = item.msgId || ('cloud_msg_' + item.id + '_' + Date.now());
                             if (seenSyncedMessageIds.has(msgId)) continue;
@@ -2313,6 +2534,47 @@ async function pollCloudNotificationsAndMessages() {
                                     sender: item.sender,
                                     targetUsername: item.recipient,
                                     recipient: item.recipient,
+                                    callType: cloudCallPayload.callType,
+                                    callPayload: cloudCallPayload
+                                });
+                            }
+                        }
+                    }
+                }
+                if (Array.isArray(data.activeCalls) && data.activeCalls.length > 0) {
+                    for (const callObj of data.activeCalls) {
+                        if (!callObj || !callObj.callerUsername || !callObj.recipient) continue;
+                        if (await db.isUserBlocked(callObj.recipient, callObj.callerUsername)) continue;
+                        const recKey = normalizeKey(callObj.recipient);
+                        if (!pendingCalls.has(recKey)) {
+                            const isRecOnline = onlineUserSockets.has(recKey) && onlineUserSockets.get(recKey).size > 0;
+                            const cloudCallPayload = {
+                                callId: callObj.callId || ('cloud_call_' + Date.now()),
+                                callerUsername: callObj.callerUsername,
+                                callerAvatar: callObj.callerAvatar || '/avatars/default.svg',
+                                callType: callObj.callType || 'voice',
+                                callerSocketId: callObj.callerSocketId || null,
+                                recipient: callObj.recipient,
+                                createdAt: callObj.createdAt || Date.now(),
+                                fromCloud: true
+                            };
+                            pendingCalls.set(recKey, cloudCallPayload);
+                            addSystemNotification({
+                                type: 'call',
+                                callId: cloudCallPayload.callId,
+                                sender: callObj.callerUsername,
+                                callerAvatar: cloudCallPayload.callerAvatar,
+                                recipient: callObj.recipient,
+                                callType: cloudCallPayload.callType,
+                                isTargetOnline: isRecOnline
+                            });
+                            if (globalIo) {
+                                globalIo.to('user:' + recKey).emit('call:incoming', cloudCallPayload);
+                                emitWakeupForRecipient(callObj.recipient, {
+                                    type: 'call',
+                                    sender: callObj.callerUsername,
+                                    targetUsername: callObj.recipient,
+                                    recipient: callObj.recipient,
                                     callType: cloudCallPayload.callType,
                                     callPayload: cloudCallPayload
                                 });
@@ -2614,6 +2876,15 @@ async function startServer() {
             const recipientKey = normalizeKey(recipient);
             const cleanText = (msg.text || '').trim();
 
+            if (await db.isUserBlocked(sender.username, recipient)) {
+                if (ack) ack({ success: false, error: 'Bu kişiyi engellediniz. Mesaj göndermek için önce engeli kaldırın.' });
+                return;
+            }
+            if (await db.isUserBlocked(recipient, sender.username)) {
+                if (ack) ack({ success: false, error: 'Bu kullanıcıya şu anda mesaj gönderilemiyor (Engellendiniz).' });
+                return;
+            }
+
             // 1. Mükerrer tempId koruması (Mesajların iki kere gitmesini kesin olarak engeller)
             if (msg.tempId && processedTempIds.has(msg.tempId)) {
                 const existingSaved = processedTempIds.get(msg.tempId);
@@ -2845,6 +3116,14 @@ async function startServer() {
             }
 
             const recipientKey = normalizeKey(recipient);
+            if (await db.isUserBlocked(sender.username, recipient)) {
+                socket.emit('call:error', { message: 'Bu kişiyi engellediniz. Arama yapmak için önce engeli kaldırın.' });
+                return;
+            }
+            if (await db.isUserBlocked(recipient, sender.username)) {
+                socket.emit('call:rejected', { reason: 'Kullanıcı aramaları kabul etmiyor (Engellendiniz)' });
+                return;
+            }
             const isRecipientOnline = onlineUserSockets.has(recipientKey) && onlineUserSockets.get(recipientKey).size > 0;
             const callId = 'call_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5);
 

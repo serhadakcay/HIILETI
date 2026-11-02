@@ -158,9 +158,11 @@ async function runSwPollCycle() {
         }
 
         // 2. Yeni mesaj ve arama bildirimleri
-        if (data.lastId > swLastNotificationId && swLastNotificationId > 0 && Array.isArray(data.notifications)) {
+        const isFirstPoll = swLastNotificationId === 0;
+        if (data.lastId > swLastNotificationId && Array.isArray(data.notifications)) {
             for (const item of data.notifications) {
                 if (!item || !item.recipient) continue;
+                if (isFirstPoll && item.timestamp && (Date.now() - item.timestamp > 90000)) continue;
                 if (item.recipient.toLowerCase() !== swCurrentUser.toLowerCase()) continue;
                 if (item.sender && item.sender.toLowerCase() === swCurrentUser.toLowerCase()) continue;
 

@@ -478,10 +478,13 @@ const chatContactName = document.getElementById('chatContactName');
 const chatContactStatus = document.getElementById('chatContactStatus');
 const btnVideoCall = document.getElementById('btnVideoCall');
 const btnVoiceCall = document.getElementById('btnVoiceCall');
+const btnBlockContact = document.getElementById('btnBlockContact');
+const btnDeleteContact = document.getElementById('btnDeleteContact');
 const btnChatMenu = document.getElementById('btnChatMenu');
 const chatDropdownMenu = document.getElementById('chatDropdownMenu');
 const menuItemChatAudioSettings = document.getElementById('menuItemChatAudioSettings');
 const menuItemClearChat = document.getElementById('menuItemClearChat');
+const menuItemBlockUser = document.getElementById('menuItemBlockUser');
 const menuItemDeleteUser = document.getElementById('menuItemDeleteUser');
 const menuItemContactInfo = document.getElementById('menuItemContactInfo');
 const menuItemCloseChat = document.getElementById('menuItemCloseChat');
@@ -1529,37 +1532,174 @@ async function syncPermanentUsersWithServer() {
     return null;
 }
 
-// Kullanıcı kendi isteğiyle bir kaydı silmek istediğinde çağrılır
-window.requestDeleteUser = async function(usernameToDelete) {
-    if (!usernameToDelete) return;
-    const confirmed = confirm(`"${usernameToDelete}" adlı kayıtlı kullanıcıyı kalıcı olarak silmek istediğinize emin misiniz?\n\n(İptal derseniz kullanıcı kayıtlı kalmaya devam eder.)`);
+// Kullanıcıya özel engellenen kişiler önbelleği (LocalStorage)
+function getLocalBlockedUserKeys() {
+    if (!currentUser || !currentUser.username) return [];
+    try {
+        const raw = localStorage.getItem('msj_blocked_users_' + normalizeKey(currentUser.username));
+        if (raw) {
+            const parsed = JSON.parse(raw);
+            if (Array.isArray(parsed)) return parsed;
+        }
+    } catch (e) {}
+    return [];
+}
+
+function setContactBlockedLocally(targetUsername, isBlocked) {
+    if (!currentUser || !currentUser.username || !targetUsername) return;
+    const tKey = normalizeKey(targetUsername);
+    try {
+        const set = new Set(getLocalBlockedUserKeys());
+        if (isBlocked) set.add(tKey);
+        else set.delete(tKey);
+        localStorage.setItem('msj_blocked_users_' + normalizeKey(currentUser.username), JSON.stringify(Array.from(set)));
+    } catch (e) {}
+}
+
+function isContactBlockedLocally(targetUsername) {
+    const tKey = normalizeKey(targetUsername);
+    if (!tKey) return false;
+    return getLocalBlockedUserKeys().includes(tKey);
+}
+
+function updateActiveContactBlockHeaderUi() {
+    if (!activeContact) return;
+    const isBlocked = Boolean(activeContact.isBlocked || isContactBlockedLocally(activeContact.username));
+    activeContact.isBlocked = isBlocked;
+    if (btnBlockContact) {
+        btnBlockContact.textContent = isBlocked ? '🔓' : '🚫';
+        btnBlockContact.title = isBlocked ? 'Engeli Kaldır' : 'Bu Kişiyi Engelle';
+    }
+    if (menuItemBlockUser) {
+        menuItemBlockUser.textContent = isBlocked ? '🔓 Bu Kişinin Engelini Kaldır' : '🚫 Bu Kişiyi Engelle';
+    }
+    if (chatContactStatus) {
+        if (isBlocked) {
+            chatContactStatus.textContent = '🚫 Engellendi';
+            chatContactStatus.style.color = '#ff6b81';
+        } else {
+            chatContactStatus.textContent = activeContact.isOnline ? 'Online' : 'Offline';
+            chatContactStatus.style.color = '';
+        }
+    }
+}
+
+// Kişiyi Engelle / Engeli Kaldır
+window.toggleBlockContact = async function(targetUsername) {
+    if (!targetUsername || !currentUser || !currentUser.username) return;
+    const tKey = normalizeKey(targetUsername);
+    const contactObj = contactsList.find(c => normalizeKey(c.username) === tKey);
+    const currentlyBlocked = Boolean((contactObj && contactObj.isBlocked) || isContactBlockedLocally(targetUsername));
+    const actionLabel = currentlyBlocked ? 'engelini kaldırmak' : 'engellemek';
+
+    const confirmed = confirm(
+        currentlyBlocked
+            ? `"${targetUsername}" adlı kişinin engelini kaldırmak istediğinize emin misiniz?`
+            : `"${targetUsername}" adlı kişiyi engellemek istediğinize emin misiniz?\n\nEngellenen kişi size mesaj gönderemez ve sizi arayamaz.`
+    );
     if (!confirmed) return;
 
+    const endpoint = currentlyBlocked ? '/api/contacts/unblock' : '/api/contacts/block';
+    const token = localStorage.getItem('msj_token') || sessionStorage.getItem('msj_token') || '';
     try {
-        const res = await fetch('/api/users/' + encodeURIComponent(usernameToDelete), {
-            method: 'DELETE'
+        const res = await fetch(endpoint, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'x-auth-token': token
+            },
+            body: JSON.stringify({
+                ownerUsername: currentUser.username,
+                targetUsername: targetUsername
+            })
         });
         const data = await res.json();
         if (data && data.success) {
-            removePermanentLocalUser(usernameToDelete);
-            contactsList = contactsList.filter(c => normalizeKey(c.username) !== normalizeKey(usernameToDelete));
+            const newBlocked = !currentlyBlocked;
+            setContactBlockedLocally(targetUsername, newBlocked);
+            contactsList.forEach(c => {
+                if (normalizeKey(c.username) === tKey) {
+                    c.isBlocked = newBlocked;
+                }
+            });
+            if (activeContact && normalizeKey(activeContact.username) === tKey) {
+                activeContact.isBlocked = newBlocked;
+                updateActiveContactBlockHeaderUi();
+            }
+            saveCachedContactsForCurrentUser(contactsList);
             renderChatsList(contactsList);
-
-            if (activeContact && normalizeKey(activeContact.username) === normalizeKey(usernameToDelete)) {
-                closeActiveChat();
+            if (newChatModal && newChatModal.style.display === 'flex') {
+                renderNewChatUsers(contactsList);
             }
-
-            if (currentUser && normalizeKey(currentUser.username) === normalizeKey(usernameToDelete)) {
-                currentUser = null;
-                closeProfileModal();
-                await loadRegisteredUsersDropdown();
-                showPasswordPrompt('');
-            } else {
-                await loadRegisteredUsersDropdown();
-                showStatusToast(`${usernameToDelete} kayıtlardan silindi`, false);
-            }
+            showStatusToast(
+                newBlocked ? `🚫 ${targetUsername} engellendi` : `🔓 ${targetUsername} engeli kaldırıldı`,
+                !newBlocked
+            );
         } else {
-            alert((data && data.error) || 'Kullanıcı silinemedi.');
+            alert((data && data.error) || `Kişinin ${actionLabel} işlemi yapılamadı.`);
+        }
+    } catch (e) {
+        alert('Sunucuya bağlanılamadı.');
+    }
+};
+
+// Kullanıcı kendi isteğiyle bir kaydı silmek istediğinde çağrılır
+window.requestDeleteUser = async function(usernameToDelete) {
+    if (!usernameToDelete) return;
+    const isDeletingSelf = currentUser && normalizeKey(currentUser.username) === normalizeKey(usernameToDelete);
+    const confirmed = confirm(
+        isDeletingSelf
+            ? `"${usernameToDelete}" adlı kullanıcı hesabınızı kalıcı olarak silmek istediğinize emin misiniz?`
+            : `"${usernameToDelete}" adlı kayıtlı kişiyi ve sohbet geçmişini silmek istediğinize emin misiniz?\n\n(İptal derseniz kişi kayıtlı kalmaya devam eder.)`
+    );
+    if (!confirmed) return;
+
+    try {
+        const token = localStorage.getItem('msj_token') || sessionStorage.getItem('msj_token') || '';
+        if (!isDeletingSelf && currentUser && currentUser.username) {
+            await fetch('/api/contacts/delete', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-auth-token': token
+                },
+                body: JSON.stringify({
+                    ownerUsername: currentUser.username,
+                    contactUsername: usernameToDelete,
+                    deleteAccountCompletely: false
+                })
+            }).catch(() => {});
+        } else {
+            await fetch('/api/users/' + encodeURIComponent(usernameToDelete), {
+                method: 'DELETE'
+            }).catch(() => {});
+        }
+
+        removePermanentLocalUser(usernameToDelete);
+        try {
+            const pb = getPersonalPhoneBookForCurrentUser().filter(item => normalizeKey(item.username) !== normalizeKey(usernameToDelete));
+            savePersonalPhoneBookForCurrentUser(pb);
+        } catch (e) {}
+
+        contactsList = contactsList.filter(c => normalizeKey(c.username) !== normalizeKey(usernameToDelete));
+        saveCachedContactsForCurrentUser(contactsList);
+        renderChatsList(contactsList);
+        if (newChatModal && newChatModal.style.display === 'flex') {
+            renderNewChatUsers(contactsList);
+        }
+
+        if (activeContact && normalizeKey(activeContact.username) === normalizeKey(usernameToDelete)) {
+            closeActiveChat();
+        }
+
+        if (isDeletingSelf) {
+            currentUser = null;
+            closeProfileModal();
+            await loadRegisteredUsersDropdown();
+            showPasswordPrompt('');
+        } else {
+            await loadRegisteredUsersDropdown();
+            showStatusToast(`🗑️ ${usernameToDelete} rehberden ve kayıtlardan silindi`, false);
         }
     } catch (e) {
         alert('Sunucuya bağlanılamadı.');
@@ -2098,19 +2238,29 @@ function checkUrlDeepLinkActions() {
         const autoAcceptCall = params.get('autoAcceptCall') === '1';
         const incomingCall = params.get('incomingCall') === '1';
         if (openChatUser) {
-            setTimeout(() => {
+            setTimeout(async () => {
                 openChatForSender(openChatUser);
                 if (incomingCall || autoAcceptCall) {
                     if (currentUser) {
                         const token = localStorage.getItem('msj_token') || sessionStorage.getItem('msj_token') || '';
                         socket.emit('user:join', { token, username: currentUser.username });
                     }
+                    let activeCallFromServer = null;
+                    try {
+                        const pollUser = (currentUser && currentUser.username) || localStorage.getItem('msj_saved_username') || '';
+                        const pollRes = await fetch(`/api/system/notifications/poll?since=0&user=${encodeURIComponent(pollUser)}`, { cache: 'no-store' });
+                        const pollData = await pollRes.json();
+                        if (pollData && Array.isArray(pollData.activeCalls)) {
+                            activeCallFromServer = pollData.activeCalls.find(c => normalizeKey(c.callerUsername) === normalizeKey(openChatUser)) || pollData.activeCalls[0];
+                        }
+                    } catch (e) {}
+
                     const contactObj = contactsList.find(c => normalizeKey(c.username) === normalizeKey(openChatUser));
                     triggerIncomingCallUi({
-                        callerUsername: openChatUser,
-                        callerAvatar: (contactObj && contactObj.avatar) || '/avatars/default.svg',
-                        callType: 'voice',
-                        callerSocketId: currentTargetSocketId
+                        callerUsername: (activeCallFromServer && activeCallFromServer.callerUsername) || openChatUser,
+                        callerAvatar: (activeCallFromServer && activeCallFromServer.callerAvatar) || (contactObj && contactObj.avatar) || '/avatars/default.svg',
+                        callType: (activeCallFromServer && activeCallFromServer.callType) || 'voice',
+                        callerSocketId: (activeCallFromServer && activeCallFromServer.callerSocketId) || currentTargetSocketId
                     }, autoAcceptCall);
                 }
             }, 200);
@@ -2417,15 +2567,19 @@ function renderChatsList(chats, rawSearchQuery = '') {
         item.style.cursor = 'pointer';
 
         const displayName = formatContactIntegratedDisplayName(contact);
+        const isBlocked = Boolean(contact.isBlocked || isContactBlockedLocally(contact.username));
+        contact.isBlocked = isBlocked;
 
-        let lastSnippet = contact.phone
-            ? `📱 ${formatPhonePretty(contact.phone)} • ${contact.isOnline ? '🟢 Online' : '🔒 Signal E2EE şifreli sohbet'}`
-            : (contact.isOnline ? '🟢 Online • 🔒 Signal E2EE şifreli sohbet' : '🔒 Signal E2EE şifreli sohbet');
+        let lastSnippet = isBlocked
+            ? '🚫 Bu kişiyi engellediniz (Engeli kaldırmak için 🔓 butonuna dokunun)'
+            : (contact.phone
+                ? `📱 ${formatPhonePretty(contact.phone)} • ${contact.isOnline ? '🟢 Online' : '🔒 Signal E2EE şifreli sohbet'}`
+                : (contact.isOnline ? '🟢 Online • 🔒 Signal E2EE şifreli sohbet' : '🔒 Signal E2EE şifreli sohbet'));
         let isOutgoingLast = false;
         let isLastRead = false;
-        let timeLabel = contact.isOnline ? '🟢 Online' : '';
+        let timeLabel = isBlocked ? '🚫 Engellendi' : (contact.isOnline ? '🟢 Online' : '');
 
-        if (validLastMsg) {
+        if (validLastMsg && !isBlocked) {
             const decryptedPreview = validLastMsg.text
                 ? decryptE2EETextClient(validLastMsg.text, validLastMsg.sender, validLastMsg.recipient)
                 : '';
@@ -2445,28 +2599,40 @@ function renderChatsList(chats, rawSearchQuery = '') {
         item.innerHTML = `
             <div class="chat-avatar-wrap">
                 <img class="avatar" src="${contact.avatar || '/avatars/default.svg'}" alt="${escapeHtml(displayName)}">
-                ${contact.isOnline ? '<span class="online-badge" title="Çevrimiçi (Online)"></span>' : ''}
+                ${contact.isOnline && !isBlocked ? '<span class="online-badge" title="Çevrimiçi (Online)"></span>' : ''}
             </div>
             <div class="chat-content-wrap">
                 <div class="chat-top-line">
                     <span class="chat-title">
                         <strong class="wa-contact-name">${escapeHtml(displayName)}</strong>
                     </span>
-                    <span class="wa-chat-time ${hasUnread ? 'unread' : (contact.isOnline ? 'online-time' : '')}">${escapeHtml(timeLabel)}</span>
+                    <span class="wa-chat-time ${hasUnread ? 'unread' : (contact.isOnline && !isBlocked ? 'online-time' : '')}">${escapeHtml(timeLabel)}</span>
                 </div>
                 <div class="chat-bottom-line">
                     <div class="chat-last-msg-preview ${hasUnread ? 'unread' : ''}" title="${escapeHtml(lastSnippet)}">
                         ${outgoingChecksHtml}
                         <span>${escapeHtml(lastSnippet)}</span>
                     </div>
-                    <div class="wa-chat-badges">
+                    <div class="wa-chat-badges" style="display:flex;align-items:center;gap:6px;">
                         ${hasUnread ? `<span class="wa-unread-count-badge" title="${unreadCount} okunmamış mesaj">${unreadCount}</span>` : ''}
+                        <button type="button" class="btn-row-block" title="${isBlocked ? 'Engeli Kaldır' : 'Bu Kişiyi Engelle'}" style="border:none;background:rgba(255,165,2,0.14);color:${isBlocked ? '#25d366' : '#ffa502'};border-radius:6px;padding:3px 6px;font-size:12px;cursor:pointer;">${isBlocked ? '🔓' : '🚫'}</button>
+                        <button type="button" class="btn-row-delete" title="Bu Kişiyi Sil" style="border:none;background:rgba(234,0,56,0.15);color:#ff6b81;border-radius:6px;padding:3px 6px;font-size:12px;cursor:pointer;">🗑️</button>
                     </div>
                 </div>
             </div>
         `;
 
-        item.addEventListener('click', () => {
+        item.addEventListener('click', (e) => {
+            if (e.target.closest('.btn-row-block')) {
+                e.stopPropagation();
+                window.toggleBlockContact(contact.username);
+                return;
+            }
+            if (e.target.closest('.btn-row-delete')) {
+                e.stopPropagation();
+                window.requestDeleteUser(contact.username);
+                return;
+            }
             selectContact(contact);
         });
 
@@ -2603,6 +2769,7 @@ function renderNewChatUsers(list, rawSearchQuery = '') {
         item.className = 'new-chat-user-item';
 
         const displayTitle = formatContactIntegratedDisplayName(contact);
+        const isBlocked = Boolean(contact.isBlocked || isContactBlockedLocally(contact.username));
         const phoneInfoHtml = contact.phone
             ? ` • 📱 ${escapeHtml(formatPhonePretty(contact.phone))}`
             : '';
@@ -2611,12 +2778,12 @@ function renderNewChatUsers(list, rawSearchQuery = '') {
             <div class="new-chat-user-left">
                 <div class="chat-avatar-wrap" style="position:relative;">
                     <img class="avatar" src="${contact.avatar || '/avatars/default.svg'}" alt="${escapeHtml(displayTitle)}">
-                    ${contact.isOnline ? '<span class="online-badge" title="Online"></span>' : '<span class="offline-badge" title="Offline"></span>'}
+                    ${contact.isOnline && !isBlocked ? '<span class="online-badge" title="Online"></span>' : '<span class="offline-badge" title="Offline"></span>'}
                 </div>
                 <div class="new-chat-user-info">
                     <span class="new-chat-username">${escapeHtml(displayTitle)}</span>
-                    <span class="new-chat-status ${contact.isOnline ? 'online' : 'offline'}">
-                        ${contact.isOnline ? '🟢 Online' : '⚪ Offline (Mesaj & Arama Açık)'}${phoneInfoHtml}
+                    <span class="new-chat-status ${isBlocked ? 'offline' : (contact.isOnline ? 'online' : 'offline')}">
+                        ${isBlocked ? '🚫 Engellendi' : (contact.isOnline ? '🟢 Online' : '⚪ Offline (Mesaj & Arama Açık)')}${phoneInfoHtml}
                     </span>
                 </div>
             </div>
@@ -2630,7 +2797,10 @@ function renderNewChatUsers(list, rawSearchQuery = '') {
                 <button type="button" class="btn-new-chat-action call" title="Görüntülü Ara" data-action="video">
                     📹
                 </button>
-                <button type="button" class="btn-new-chat-action delete" title="Bu Kullanıcıyı Sil" data-action="delete" style="background: rgba(234, 0, 56, 0.16); color: #ff6b81;">
+                <button type="button" class="btn-new-chat-action block" title="${isBlocked ? 'Engeli Kaldır' : 'Bu Kişiyi Engelle'}" data-action="block" style="background: rgba(255, 165, 2, 0.16); color: ${isBlocked ? '#25d366' : '#ffa502'};">
+                    ${isBlocked ? '🔓' : '🚫'}
+                </button>
+                <button type="button" class="btn-new-chat-action delete" title="Bu Kişiyi Sil" data-action="delete" style="background: rgba(234, 0, 56, 0.16); color: #ff6b81;">
                     🗑️
                 </button>
             </div>
@@ -2638,6 +2808,12 @@ function renderNewChatUsers(list, rawSearchQuery = '') {
 
         // Satıra veya butonlara basıldığında doğrudan o kullanıcı seçilip yazışma ekranı açılsın
         item.addEventListener('click', (e) => {
+            const blockBtn = e.target.closest('.btn-new-chat-action.block');
+            if (blockBtn) {
+                e.stopPropagation();
+                window.toggleBlockContact(contact.username);
+                return;
+            }
             const delBtn = e.target.closest('.btn-new-chat-action.delete');
             if (delBtn) {
                 e.stopPropagation();
@@ -2777,6 +2953,7 @@ function selectContact(contact) {
         chatContactStatus.textContent = 'Offline';
         headerOnlineDot.style.display = 'none';
     }
+    updateActiveContactBlockHeaderUi();
 
     // Aktif öğeyi listede vurgula ve rozetleri temizle
     document.querySelectorAll('.chat-list-item').forEach(el => {
@@ -3307,6 +3484,11 @@ socket.on('chat:message', (msg) => {
         return;
     }
 
+    // Engellenen kişiden gelen mesajları yoksay
+    if (recipientKey === myKey && isContactBlockedLocally(msg.sender)) {
+        return;
+    }
+
     if (msg.sender) {
         savePermanentLocalUsers([{ username: msg.sender, avatar: '/avatars/default.svg' }]);
     }
@@ -3623,6 +3805,40 @@ socket.on('user:deleted', (data) => {
     loadRegisteredUsersDropdown();
 });
 
+socket.on('contact:deleted', (data) => {
+    if (!data || !data.contactUsername) return;
+    removePermanentLocalUser(data.contactUsername);
+    contactsList = contactsList.filter(c => normalizeKey(c.username) !== normalizeKey(data.contactUsername));
+    saveCachedContactsForCurrentUser(contactsList);
+    renderChatsList(contactsList);
+    if (newChatModal && newChatModal.style.display === 'flex') {
+        renderNewChatUsers(contactsList);
+    }
+    if (activeContact && normalizeKey(activeContact.username) === normalizeKey(data.contactUsername)) {
+        closeActiveChat();
+    }
+});
+
+socket.on('contact:block_changed', (data) => {
+    if (!data || !data.targetUsername) return;
+    const tKey = normalizeKey(data.targetUsername);
+    const isBlocked = Boolean(data.isBlocked);
+    setContactBlockedLocally(data.targetUsername, isBlocked);
+    contactsList.forEach(c => {
+        if (normalizeKey(c.username) === tKey) {
+            c.isBlocked = isBlocked;
+        }
+    });
+    if (activeContact && normalizeKey(activeContact.username) === tKey) {
+        activeContact.isBlocked = isBlocked;
+        updateActiveContactBlockHeaderUi();
+    }
+    renderChatsList(contactsList);
+    if (newChatModal && newChatModal.style.display === 'flex') {
+        renderNewChatUsers(contactsList);
+    }
+});
+
 // CEP TELEFONU GİBİ OTOMATİK UYANMA VE ONLINE OLMA SİSTEMİ (KULLANICI İZOLASYONLU):
 // Yalnızca bu cihazda oturum açmış olan (veya kaydedilmiş) kullanıcıya mesaj/arama geldiğinde çalışır.
 // Başka kullanıcılara gelen mesaj veya aramalar bu ekranda gösterilmez ve hesabı değiştirmez!
@@ -3632,6 +3848,9 @@ socket.on('system:wakeup', async (data) => {
 
     // Eğer gönderen kişi bizzat bu sekmedeki aktif kullanıcıysa işlem yapma
     if (currentUser && normalizeKey(currentUser.username) === normalizeKey(data.sender)) {
+        return;
+    }
+    if (data.sender && isContactBlockedLocally(data.sender)) {
         return;
     }
 
@@ -5008,8 +5227,31 @@ if (menuItemClearChat) {
     });
 }
 
+if (btnBlockContact) {
+    btnBlockContact.addEventListener('click', () => {
+        if (!activeContact) return;
+        window.toggleBlockContact(activeContact.username);
+    });
+}
+
+if (btnDeleteContact) {
+    btnDeleteContact.addEventListener('click', () => {
+        if (!activeContact) return;
+        window.requestDeleteUser(activeContact.username);
+    });
+}
+
+if (menuItemBlockUser) {
+    menuItemBlockUser.addEventListener('click', () => {
+        if (chatDropdownMenu) chatDropdownMenu.style.display = 'none';
+        if (!activeContact) return;
+        window.toggleBlockContact(activeContact.username);
+    });
+}
+
 if (menuItemDeleteUser) {
     menuItemDeleteUser.addEventListener('click', () => {
+        if (chatDropdownMenu) chatDropdownMenu.style.display = 'none';
         if (!activeContact) return;
         window.requestDeleteUser(activeContact.username);
     });
