@@ -118,9 +118,23 @@
         "publicHex": "5ff2906078c7d49c9cdb2a81c2ab7b3b020d8b8a283336378cd0033e21be6f87"
       }
     ],
-    "akdSeq": 2,
-    "akdPrevHash": "3b796522d533e1d5cb91d5f35edd3f33fa9b9aa31d1220ec3249217a1f6fd6ef",
-    "akdHash": "719a4512a4983eb496be42d955cf17ebca13f312b2fc1c5fe2b1d0acbc5497ba",
-    "updatedAt": "2026-11-02T16:00:44.431Z"
+    "akdSeq": 8,
+    "akdPrevHash": "b2592bb4849a0ce2f817bfed45cec3384093b6adf89e740fa77ca872d5da9eb8",
+    "akdHash": "4869d77c82f0c4b6ad589f249b2b55273db70bde179127ba512db385851e6feb",
+    "updatedAt": "2026-11-06T10:45:59.314Z"
+  },
+  "serhad": {
+    "userKey": "serhad",
+    "username": "Serhad",
+    "protocolVersion": "Signal-X3DH-DoubleRatchet-v2",
+    "identityKey": "a",
+    "signingKey": "b",
+    "signedPreKey": "c",
+    "spkSignature": "d",
+    "oneTimePreKeys": [],
+    "akdSeq": 1,
+    "akdPrevHash": "GENESIS_AKD_ROOT_00000000",
+    "akdHash": "5a1e433c8c154d6faaaa1faeb34f8f95cfe90b67c6ad539b287847c1a1af1363",
+    "updatedAt": "2026-11-02T17:53:55.424Z"
   }
 }

@@ -1,0 +1,299 @@
+{
+  "s1___serhad": [
+    {
+      "id": "msg_1791549750241_xiynlk",
+      "sender": "S1",
+      "recipient": "Serhad",
+      "text": "Denem",
+      "file": null,
+      "timestamp": "15:42",
+      "date": "Bugün",
+      "createdAt": "2026-10-09T12:42:30.273Z",
+      "read": true
+    },
+    {
+      "id": "msg_1791555746943_qyf7p0",
+      "sender": "Serhad",
+      "recipient": "S1",
+      "text": "Test message from Serhad",
+      "file": null,
+      "timestamp": "17:22",
+      "date": "Bugün",
+      "createdAt": "2026-10-09T14:22:26.944Z",
+      "read": true
+    },
+    {
+      "id": "msg_1791556481153_0i9nz6",
+      "sender": "Serhad",
+      "recipient": "S1",
+      "text": "Merhaba S1, yeni bildirim sistemi test mesajı!",
+      "file": null,
+      "timestamp": "17:34",
+      "date": "Bugün",
+      "createdAt": "2026-10-09T14:34:41.174Z",
+      "read": true
+    }
+  ],
+  "ser1___serhad": [
+    {
+      "id": "msg_1791553941545_gbj88z",
+      "sender": "Ser1",
+      "recipient": "Serhad",
+      "text": "S",
+      "file": null,
+      "timestamp": "16:52",
+      "date": "Bugün",
+      "createdAt": "2026-10-09T13:52:21.563Z",
+      "read": true
+    },
+    {
+      "id": "msg_1791554038617_sjxuxm",
+      "sender": "Serhad",
+      "recipient": "Ser1",
+      "text": "deneme",
+      "file": null,
+      "timestamp": "16:53",
+      "date": "Bugün",
+      "createdAt": "2026-10-09T13:53:58.618Z",
+      "read": true
+    },
+    {
+      "id": "msg_1791556694517_hu12nq",
+      "sender": "Serhad",
+      "recipient": "Ser1",
+      "text": "dd",
+      "file": null,
+      "timestamp": "17:38",
+      "date": "Bugün",
+      "createdAt": "2026-10-09T14:38:14.518Z",
+      "read": true
+    },
+    {
+      "id": "msg_1791556715041_qvtj1i",
+      "sender": "Ser1",
+      "recipient": "Serhad",
+      "text": "Dd",
+      "file": null,
+      "timestamp": "17:38",
+      "date": "Bugün",
+      "createdAt": "2026-10-09T14:38:35.041Z",
+      "read": true
+    },
+    {
+      "id": "msg_1791558296409_gwugwv",
+      "sender": "Serhad",
+      "recipient": "Ser1",
+      "text": "sss",
+      "file": null,
+      "timestamp": "18:04",
+      "date": "Bugün",
+      "createdAt": "2026-10-09T15:04:56.410Z",
+      "read": true
+    },
+    {
+      "id": "msg_1791558301281_bvgkqu",
+      "sender": "Ser1",
+      "recipient": "Serhad",
+      "text": "Ddd",
+      "file": null,
+      "timestamp": "18:05",
+      "date": "Bugün",
+      "createdAt": "2026-10-09T15:05:01.282Z",
+      "read": true
+    },
+    {
+      "id": "msg_1792859290167_ez7uae",
+      "sender": "Ser1",
+      "recipient": "Serhad",
+      "text": "ss",
+      "file": null,
+      "timestamp": "19:28",
+      "date": "Bugün",
+      "createdAt": "2026-10-24T16:28:10.916Z",
+      "read": true
+    },
+    {
+      "id": "msg_1792859317258_9yr4bi",
+      "sender": "Serhad",
+      "recipient": "Ser1",
+      "text": "Ddd",
+      "file": null,
+      "timestamp": "19:28",
+      "date": "Bugün",
+      "createdAt": "2026-10-24T16:28:38.945Z",
+      "read": true
+    },
+    {
+      "id": "msg_1792872692190_3ct62f",
+      "sender": "Ser1",
+      "recipient": "Serhad",
+      "text": "dd",
+      "file": null,
+      "timestamp": "20:11",
+      "date": "Bugün",
+      "createdAt": "2026-10-24T20:11:32.285Z",
+      "read": false
+    },
+    {
+      "id": "msg_1792872710775_jfe1l8",
+      "sender": "Ser1",
+      "recipient": "Serhad",
+      "text": "hh",
+      "file": null,
+      "timestamp": "20:11",
+      "date": "Bugün",
+      "createdAt": "2026-10-24T20:11:50.775Z",
+      "read": false
+    },
+    {
+      "id": "msg_1792872928299_31slko",
+      "sender": "Serhad",
+      "recipient": "Ser1",
+      "text": "Dd",
+      "file": null,
+      "timestamp": "20:15",
+      "date": "Bugün",
+      "createdAt": "2026-10-24T20:15:28.300Z",
+      "read": false
+    },
+    {
+      "id": "msg_1792873005230_ctifnv",
+      "sender": "Serhad",
+      "recipient": "Ser1",
+      "text": "",
+      "file": {
+        "url": "/uploads/Screenshot_20261024_231607_Chrome-1792873004936-274595347.jpg",
+        "filename": "Screenshot_20261024_231607_Chrome.jpg",
+        "storedName": "Screenshot_20261024_231607_Chrome-1792873004936-274595347.jpg",
+        "mimetype": "image/jpeg",
+        "size": 395612
+      },
+      "timestamp": "20:16",
+      "date": "Bugün",
+      "createdAt": "2026-10-24T20:16:45.230Z",
+      "read": false
+    }
+  ],
+  "cozucem___serhad akçay": [
+    {
+      "id": "msg_1793633510248_igi98i",
+      "sender": "Serhad AKÇAY",
+      "recipient": "cozucem",
+      "text": "Ddd",
+      "file": null,
+      "timestamp": "15:31",
+      "date": "Bugün",
+      "createdAt": "2026-11-02T15:31:50.248Z",
+      "read": true
+    },
+    {
+      "id": "msg_1793633550331_6qcz87",
+      "sender": "Serhad AKÇAY",
+      "recipient": "cozucem",
+      "text": "Dd",
+      "file": null,
+      "timestamp": "15:32",
+      "date": "Bugün",
+      "createdAt": "2026-11-02T15:32:30.331Z",
+      "read": true
+    },
+    {
+      "id": "msg_1793635097517_rizhvr",
+      "sender": "Serhad AKÇAY",
+      "recipient": "cozucem",
+      "text": "Ddd",
+      "file": null,
+      "timestamp": "18:58",
+      "date": "Bugün",
+      "createdAt": "2026-11-02T15:58:20.203Z",
+      "read": true
+    }
+  ],
+  "cozucem@gmail.com___serhad akçay": [
+    {
+      "id": "msg_invite_1793641631681_vgphjg",
+      "sender": "Serhad AKÇAY",
+      "recipient": "cozucem@gmail.com",
+      "text": "“Serhad AKÇAY Numaralı Kişi Sizi Bu Uygulamayı Kullanmaya Davet Ediyor”",
+      "file": null,
+      "timestamp": "20:47",
+      "date": "Bugün",
+      "createdAt": "2026-11-02T17:47:12.692Z",
+      "read": false
+    },
+    {
+      "id": "msg_invite_1793641715523_rfoej3",
+      "sender": "Serhad AKÇAY",
+      "recipient": "cozucem@gmail.com",
+      "text": "“Serhad AKÇAY Numaralı Kişi Sizi Bu Uygulamayı Kullanmaya Davet Ediyor”",
+      "file": null,
+      "timestamp": "20:48",
+      "date": "Bugün",
+      "createdAt": "2026-11-02T17:48:36.850Z",
+      "read": false
+    },
+    {
+      "id": "msg_invite_1793641843252_sk1aq2",
+      "sender": "Serhad AKÇAY",
+      "recipient": "cozucem@gmail.com",
+      "text": "“Serhad AKÇAY Numaralı Kişi Sizi Bu Uygulamayı Kullanmaya Davet Ediyor”",
+      "file": null,
+      "timestamp": "20:50",
+      "date": "Bugün",
+      "createdAt": "2026-11-02T17:50:46.648Z",
+      "read": false
+    }
+  ],
+  "05551234567___serhad": [
+    {
+      "id": "msg_invite_1793643298144_fcw93h",
+      "sender": "Serhad",
+      "recipient": "05551234567",
+      "text": "“Serhad Numaralı Kişi Sizi Bu Uygulamayı Kullanmaya Davet Ediyor”",
+      "file": null,
+      "timestamp": "21:14",
+      "date": "Bugün",
+      "createdAt": "2026-11-02T18:14:58.145Z",
+      "read": false
+    }
+  ],
+  "cozucem@gmail.com___serhad": [
+    {
+      "id": "msg_invite_1793644479021_elm1ri",
+      "sender": "Serhad",
+      "recipient": "cozucem@gmail.com",
+      "text": "“05559876543 Numaralı Kişi Sizi Bu Uygulamayı Kullanmaya Davet Ediyor”",
+      "file": null,
+      "timestamp": "21:34",
+      "date": "Bugün",
+      "createdAt": "2026-11-02T18:34:39.021Z",
+      "read": false
+    }
+  ],
+  "cozucem@gmail.com___serhad ak�ay": [
+    {
+      "id": "msg_invite_1793644530349_t1zqgi",
+      "sender": "Serhad AK�AY",
+      "recipient": "cozucem@gmail.com",
+      "text": "“Serhad AK�AY Numaralı Kişi Sizi Bu Uygulamayı Kullanmaya Davet Ediyor”",
+      "file": null,
+      "timestamp": "18:35",
+      "date": "Bugün",
+      "createdAt": "2026-11-02T18:35:30.349Z",
+      "read": false
+    }
+  ],
+  "05320524648___serhad": [
+    {
+      "id": "msg_invite_1793644539856_xi1sy1",
+      "sender": "Serhad",
+      "recipient": "05320524648",
+      "text": "“05559876543 Numaralı Kişi Sizi Bu Uygulamayı Kullanmaya Davet Ediyor”",
+      "file": null,
+      "timestamp": "18:35",
+      "date": "Bugün",
+      "createdAt": "2026-11-02T18:35:39.856Z",
+      "read": false
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+# Bağımlılıklar (Bulut ve diğer bilgisayarlar npm install ile otomatik kurar)
+node_modules/
+
+# Windows Masaüstü Çalıştırıcıları ve Büyük Dosyalar (GitHub 100MB sınırına takılır)
+node.exe
+Setup.exe
+MSJ.exe
+*.bat
+
+# C# Masaüstü Kaynak Dosyaları (Yalnızca yerel Windows masaüstü için)
+src/
+
+# Yerel SSL Sertifikaları (Render / Railway kendi HTTPS sertifikasını otomatik verir)
+certs/
+
+# Kullanıcı Dosya Yüklemeleri (Klasör yapısını korur, yüklenen geçici dosyaları atmaz)
+uploads/*
+!uploads/.gitkeep
+
+# SQLite Geçici Kilit Dosyaları (Kullanıcı verileri users.json ve msj.sqlite ile korunur)
+data/*.sqlite-shm
+data/*.sqlite-wal
+
+# Gereksiz Belgeler ve Loglar
+*.docx
+*.log
+.DS_Store
+Thumbs.db

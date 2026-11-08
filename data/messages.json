@@ -174,7 +174,7 @@
       "read": false
     }
   ],
-  "cozucem___serhad akçay": [
+  "cozucem___serhad akcay": [
     {
       "id": "msg_1793633510248_igi98i",
       "sender": "Serhad AKÇAY",
@@ -207,6 +207,93 @@
       "date": "Bugün",
       "createdAt": "2026-11-02T15:58:20.203Z",
       "read": true
+    }
+  ],
+  "cozucem@gmail.com___serhad akcay": [
+    {
+      "id": "msg_invite_1793641631681_vgphjg",
+      "sender": "Serhad AKÇAY",
+      "recipient": "cozucem@gmail.com",
+      "text": "“Serhad AKÇAY Numaralı Kişi Sizi Bu Uygulamayı Kullanmaya Davet Ediyor”",
+      "file": null,
+      "timestamp": "20:47",
+      "date": "Bugün",
+      "createdAt": "2026-11-02T17:47:12.692Z",
+      "read": false
+    },
+    {
+      "id": "msg_invite_1793641715523_rfoej3",
+      "sender": "Serhad AKÇAY",
+      "recipient": "cozucem@gmail.com",
+      "text": "“Serhad AKÇAY Numaralı Kişi Sizi Bu Uygulamayı Kullanmaya Davet Ediyor”",
+      "file": null,
+      "timestamp": "20:48",
+      "date": "Bugün",
+      "createdAt": "2026-11-02T17:48:36.850Z",
+      "read": false
+    },
+    {
+      "id": "msg_invite_1793641843252_sk1aq2",
+      "sender": "Serhad AKÇAY",
+      "recipient": "cozucem@gmail.com",
+      "text": "“Serhad AKÇAY Numaralı Kişi Sizi Bu Uygulamayı Kullanmaya Davet Ediyor”",
+      "file": null,
+      "timestamp": "20:50",
+      "date": "Bugün",
+      "createdAt": "2026-11-02T17:50:46.648Z",
+      "read": false
+    }
+  ],
+  "05551234567___serhad": [
+    {
+      "id": "msg_invite_1793643298144_fcw93h",
+      "sender": "Serhad",
+      "recipient": "05551234567",
+      "text": "“Serhad Numaralı Kişi Sizi Bu Uygulamayı Kullanmaya Davet Ediyor”",
+      "file": null,
+      "timestamp": "21:14",
+      "date": "Bugün",
+      "createdAt": "2026-11-02T18:14:58.145Z",
+      "read": false
+    }
+  ],
+  "cozucem@gmail.com___serhad": [
+    {
+      "id": "msg_invite_1793644479021_elm1ri",
+      "sender": "Serhad",
+      "recipient": "cozucem@gmail.com",
+      "text": "“05559876543 Numaralı Kişi Sizi Bu Uygulamayı Kullanmaya Davet Ediyor”",
+      "file": null,
+      "timestamp": "21:34",
+      "date": "Bugün",
+      "createdAt": "2026-11-02T18:34:39.021Z",
+      "read": false
+    }
+  ],
+  "cozucem@gmail.com___serhad ak�ay": [
+    {
+      "id": "msg_invite_1793644530349_t1zqgi",
+      "sender": "Serhad AKÇAY",
+      "recipient": "cozucem@gmail.com",
+      "text": "“Serhad AK�AY Numaralı Kişi Sizi Bu Uygulamayı Kullanmaya Davet Ediyor”",
+      "file": null,
+      "timestamp": "18:35",
+      "date": "Bugün",
+      "createdAt": "2026-11-02T18:35:30.349Z",
+      "read": false
+    }
+  ],
+  "serhad___serhad akçay": [
+    {
+      "id": "msg_invite_1793644539856_xi1sy1",
+      "sender": "Serhad",
+      "recipient": "Serhad AKÇAY",
+      "text": "“05559876543 Numaralı Kişi Sizi Bu Uygulamayı Kullanmaya Davet Ediyor”",
+      "file": null,
+      "timestamp": "18:35",
+      "date": "Bugün",
+      "createdAt": "2026-11-02T18:35:39.856Z",
+      "read": false
     }
   ]
 }

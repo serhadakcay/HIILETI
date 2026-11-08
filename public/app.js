@@ -2361,6 +2361,11 @@ window.findAndContactByPhone = async function(phoneStr, customName = '', actionT
                 sendInvite: true
             })
         });
+        if (!res.ok) {
+            const errData = await res.json().catch(() => ({}));
+            alert((errData && errData.error) || 'Telefon numarası sorgulanamadı veya kullanıcı bulunamadı.');
+            return;
+        }
         const data = await res.json();
         if (data && data.success && data.user) {
             const u = data.user;
@@ -5343,6 +5348,11 @@ if (btnProfileUpdatePhone) {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ username: currentUser.username, phone: newPhone.trim() })
             });
+            if (!res.ok) {
+                const errData = await res.json().catch(() => ({}));
+                alert((errData && errData.error) || 'Telefon numarası güncellenemedi.');
+                return;
+            }
             const data = await res.json();
             if (data && data.success && data.user) {
                 currentUser.phone = data.user.phone || '';

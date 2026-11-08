@@ -460,14 +460,17 @@ class DatabaseManager {
                             if (!msg || !msg.id) continue;
                             for (const uName of [msg.sender, msg.recipient]) {
                                 if (uName && uName.trim().length >= 2) {
-                                    const uKey = normalizeKey(uName);
+                                    const cleanUName = uName.trim();
+                                    const uKey = normalizeKey(cleanUName);
                                     if (deletedMap[uKey] || uKey.startsWith('test_logout_user_') || uKey.startsWith('testuser_')) continue;
-                                    const ex = await this.getUser(uName.trim());
+                                    // ÖNEMLİ: Telefon numarası olan alıcıları/göndericileri kullanıcı tablosuna otomatik kullanıcı hesabı olarak ekleme!
+                                    if (isLikelyPhoneNumber(cleanUName)) continue;
+                                    const ex = await this.getUser(cleanUName);
                                     if (!ex) {
                                         const salt = crypto.randomBytes(16).toString('hex');
                                         const hash = crypto.pbkdf2Sync('123456', salt, 1000, 64, 'sha512').toString('hex');
                                         await this.insertUserToDb({
-                                            username: uName.trim(),
+                                            username: cleanUName,
                                             salt,
                                             hash,
                                             avatar: '/avatars/default.svg',
@@ -502,6 +505,7 @@ class DatabaseManager {
                     for (const token of Object.keys(rawSessions)) {
                         const s = rawSessions[token];
                         if (!s || !s.username) continue;
+                        if (isLikelyPhoneNumber(s.username)) continue;
                         const uKey = normalizeKey(s.username);
                         if (deletedMap[uKey] || uKey.startsWith('test_logout_user_') || uKey.startsWith('testuser_')) continue;
                         const exUser = await this.getUser(s.username);
@@ -546,13 +550,13 @@ class DatabaseManager {
                 try { usersMap = JSON.parse(fs.readFileSync(usersFile, 'utf8') || '{}'); } catch (e) { usersMap = {}; }
             }
             for (const k of Object.keys(usersMap)) {
-                if (deletedMap[k] || k.startsWith('test_logout_user_') || k.startsWith('testuser_')) {
+                if (deletedMap[k] || k.startsWith('test_logout_user_') || k.startsWith('testuser_') || isLikelyPhoneNumber(k) || (usersMap[k] && isLikelyPhoneNumber(usersMap[k].username))) {
                     delete usersMap[k];
                 }
             }
             const allUsers = await this.getAllUsers();
             for (const u of allUsers) {
-                if (deletedMap[u.userKey] || u.userKey.startsWith('test_logout_user_') || u.userKey.startsWith('testuser_')) continue;
+                if (deletedMap[u.userKey] || u.userKey.startsWith('test_logout_user_') || u.userKey.startsWith('testuser_') || isLikelyPhoneNumber(u.username)) continue;
                 usersMap[u.userKey] = {
                     username: u.username,
                     phone: u.phone || (usersMap[u.userKey] && usersMap[u.userKey].phone) || '',
@@ -800,6 +804,40 @@ class DatabaseManager {
                 }
                 migratedMessagesCount++;
             }
+
+            // 1.1 messages.json dosyasındaki kayıtları ve convo_key'leri de senkronize güncelle
+            try {
+                if (fs.existsSync(messagesFile)) {
+                    const rawM = JSON.parse(fs.readFileSync(messagesFile, 'utf8') || '{}');
+                    let changedM = false;
+                    for (const ck of Object.keys(rawM)) {
+                        const mList = rawM[ck] || [];
+                        for (const m of mList) {
+                            const sKey = normalizeKey(m.sender);
+                            const rKey = normalizeKey(m.recipient);
+                            if (sKey === oldKey || normalizePhone(m.sender) === cleanPhone) {
+                                m.sender = cleanTarget;
+                                changedM = true;
+                            }
+                            if (rKey === oldKey || normalizePhone(m.recipient) === cleanPhone) {
+                                m.recipient = cleanTarget;
+                                changedM = true;
+                            }
+                        }
+                        const otherPart = ck.split('___').find(p => normalizeKey(p) !== oldKey && normalizePhone(p) !== cleanPhone);
+                        if (otherPart && (ck.includes(oldKey) || ck.includes(cleanPhone))) {
+                            const newCk = getConvoKey(cleanTarget, otherPart);
+                            if (newCk !== ck) {
+                                if (!rawM[newCk]) rawM[newCk] = [];
+                                rawM[newCk].push(...mList);
+                                delete rawM[ck];
+                                changedM = true;
+                            }
+                        }
+                    }
+                    if (changedM) fs.writeFileSync(messagesFile, JSON.stringify(rawM, null, 2), 'utf8');
+                }
+            } catch (e) {}
 
             // 2. Kişisel rehber (user_contacts) kayıtlarını eski numaradan yeni kullanıcı adına taşı
             try {
@@ -1063,11 +1101,20 @@ class DatabaseManager {
     }
 
     async updateUserPhone(usernameOrKey, phoneStr) {
+        if (!usernameOrKey) return null;
         const userKey = normalizeKey(usernameOrKey);
         const cleanPhone = normalizePhone(phoneStr);
         if (!userKey) return null;
 
-        const existingUser = await this.getUser(userKey);
+        let existingUser = await this.getUser(userKey);
+        if (!existingUser) {
+            existingUser = await this.ensureUserExists(usernameOrKey);
+        }
+        if (!existingUser) {
+            existingUser = await this.findUserByPhone(usernameOrKey);
+        }
+
+        const effectiveKey = existingUser ? existingUser.userKey : userKey;
         const realUsername = existingUser ? existingUser.username : usernameOrKey.trim();
 
         // Eğer gerçek bir kullanıcı adına telefon numarası tanımlanıyorsa, varsa o numaraya ait placeholder hesabı ve mesajları entegre et
@@ -1080,23 +1127,27 @@ class DatabaseManager {
         }
 
         if (this.type === 'mysql') {
-            await this.mysqlPool.query('UPDATE users SET phone = ? WHERE user_key = ?', [cleanPhone, userKey]);
+            await this.mysqlPool.query('UPDATE users SET phone = ? WHERE user_key = ? OR user_key = ?', [cleanPhone, effectiveKey, userKey]);
         } else {
-            this.sqliteDb.prepare('UPDATE users SET phone = ? WHERE user_key = ?').run(cleanPhone, userKey);
+            this.sqliteDb.prepare('UPDATE users SET phone = ? WHERE user_key = ? OR user_key = ?').run(cleanPhone, effectiveKey, userKey);
             this.checkpointSqlite();
         }
 
         try {
             if (fs.existsSync(usersFile)) {
                 const raw = JSON.parse(fs.readFileSync(usersFile, 'utf8') || '{}');
-                if (raw[userKey]) {
+                if (raw[effectiveKey]) {
+                    raw[effectiveKey].phone = cleanPhone;
+                    fs.writeFileSync(usersFile, JSON.stringify(raw, null, 2), 'utf8');
+                } else if (raw[userKey]) {
                     raw[userKey].phone = cleanPhone;
                     fs.writeFileSync(usersFile, JSON.stringify(raw, null, 2), 'utf8');
                 }
             }
         } catch (e) {}
 
-        return await this.getUser(userKey);
+        const finalUser = (await this.getUser(effectiveKey)) || (await this.getUser(userKey));
+        return finalUser;
     }
 
     async createUser(userData) {
@@ -1165,8 +1216,11 @@ class DatabaseManager {
         // numaradan tekrar mükerrer kayıt açmak yerine entegre edilmiş kullanıcıyı döndür
         if (isLikelyPhoneNumber(clean)) {
             const byPhone = await this.findUserByPhone(clean);
-            if (byPhone && !isLikelyPhoneNumber(byPhone.username)) {
+            if (byPhone) {
                 return byPhone;
+            }
+            if (!extraData || !extraData.allowPhoneAsUsername) {
+                return null;
             }
         }
 
