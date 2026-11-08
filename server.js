@@ -1528,32 +1528,49 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
 });
 
 // ==========================================
-// CLOUDFLARE UZAK ERİŞİM TÜNELİ
+// CLOUDFLARE UZAK ERİŞİM TÜNELİ (YALNIZCA YEREL ÇALIŞIRKEN)
 // ==========================================
 let cloudflaredProc = null;
 let currentTunnelUrl = null;
 
+const isRenderOrCloud = Boolean(
+    process.env.RENDER ||
+    process.env.IS_RENDER ||
+    process.env.RENDER_SERVICE_ID ||
+    (process.env.PORT && process.env.NODE_ENV === 'production')
+);
+
 function findCloudflared() {
+    if (isRenderOrCloud) return null; // Render ortamında tünele gerek yoktur
     const paths = [
         'C:\\Program Files (x86)\\cloudflared\\cloudflared.exe',
         'C:\\Program Files\\cloudflared\\cloudflared.exe',
-        path.join(__dirname, 'cloudflared.exe'),
-        'cloudflared.exe',
-        'cloudflared'
+        path.join(__dirname, 'cloudflared.exe')
     ];
     for (const p of paths) {
-        if (p.includes('\\') && fs.existsSync(p)) return p;
+        if (fs.existsSync(p)) return p;
     }
-    return 'cloudflared';
+    try {
+        const { execSync } = require('child_process');
+        execSync(process.platform === 'win32' ? 'where cloudflared' : 'which cloudflared', { stdio: 'ignore' });
+        return 'cloudflared';
+    } catch (e) {
+        return null;
+    }
 }
 
 function startCloudflareTunnel(targetPort = 3000) {
+    if (isRenderOrCloud) return Promise.resolve(null);
     if (currentTunnelUrl) return Promise.resolve(currentTunnelUrl);
     if (cloudflaredProc) return Promise.resolve(null);
 
+    const cfPath = findCloudflared();
+    if (!cfPath) {
+        return Promise.resolve(null);
+    }
+
     return new Promise((resolve) => {
         try {
-            const cfPath = findCloudflared();
             cloudflaredProc = spawn(cfPath, ['tunnel', '--url', `http://127.0.0.1:${targetPort}`], {
                 windowsHide: true
             });
@@ -1582,7 +1599,6 @@ function startCloudflareTunnel(targetPort = 3000) {
             cloudflaredProc.stderr.on('data', handleOutput);
 
             cloudflaredProc.on('error', (err) => {
-                console.log('Cloudflare tünel başlatılamadı:', err.message);
                 if (!resolved) {
                     resolved = true;
                     clearTimeout(timer);
@@ -1600,7 +1616,9 @@ function startCloudflareTunnel(targetPort = 3000) {
     });
 }
 
-startCloudflareTunnel(3000).catch(() => {});
+if (!isRenderOrCloud) {
+    startCloudflareTunnel(3000).catch(() => {});
+}
 
 app.post('/api/tunnel/start', async (req, res) => {
     const url = await startCloudflareTunnel(3000);

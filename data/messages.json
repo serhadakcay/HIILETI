@@ -1,1 +1,39 @@
-{}
+{
+  "05423832663___serhad akçay": [
+    {
+      "id": "msg_invite_1794166745716_3tud1c",
+      "sender": "Serhad AKÇAY",
+      "recipient": "05423832663",
+      "text": "“Serhad AKÇAY Numaralı Kişi Sizi Bu Uygulamayı Kullanmaya Davet Ediyor”",
+      "file": null,
+      "timestamp": "19:39",
+      "date": "Bugün",
+      "createdAt": "2026-11-08T19:39:05.734Z",
+      "read": false
+    }
+  ],
+  "cozucem@gmail.com___serhad akçay": [
+    {
+      "id": "msg_1794167476303_vj65j8",
+      "sender": "cozucem@gmail.com",
+      "recipient": "Serhad AKÇAY",
+      "text": "Yess",
+      "file": null,
+      "timestamp": "19:51",
+      "date": "Bugün",
+      "createdAt": "2026-11-08T19:51:16.303Z",
+      "read": false
+    },
+    {
+      "id": "msg_1794167484501_zl25tg",
+      "sender": "cozucem@gmail.com",
+      "recipient": "Serhad AKÇAY",
+      "text": "Elooo",
+      "file": null,
+      "timestamp": "19:51",
+      "date": "Bugün",
+      "createdAt": "2026-11-08T19:51:24.501Z",
+      "read": false
+    }
+  ]
+}
