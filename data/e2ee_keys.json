@@ -118,10 +118,10 @@
         "publicHex": "5ff2906078c7d49c9cdb2a81c2ab7b3b020d8b8a283336378cd0033e21be6f87"
       }
     ],
-    "akdSeq": 8,
-    "akdPrevHash": "b2592bb4849a0ce2f817bfed45cec3384093b6adf89e740fa77ca872d5da9eb8",
-    "akdHash": "4869d77c82f0c4b6ad589f249b2b55273db70bde179127ba512db385851e6feb",
-    "updatedAt": "2026-11-06T10:45:59.314Z"
+    "akdSeq": 9,
+    "akdPrevHash": "4869d77c82f0c4b6ad589f249b2b55273db70bde179127ba512db385851e6feb",
+    "akdHash": "70b2afed831e1f03091b4a875ceac113ba777c775ae7fd592729727b89e80d8c",
+    "updatedAt": "2026-11-08T15:19:51.730Z"
   },
   "serhad": {
     "userKey": "serhad",

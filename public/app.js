@@ -1496,7 +1496,7 @@ function removePermanentLocalUser(usernameToRemove) {
 async function syncPermanentUsersWithServer() {
     try {
         const deletedSet = new Set(getDeletedLocalUserKeys());
-        const localUsers = getPermanentLocalUsers();
+        const localUsers = getPermanentLocalUsers().filter(u => u && u.username && !deletedSet.has(normalizeKey(u.username)));
         const savedUsername = localStorage.getItem('msj_saved_username');
         if (savedUsername && !deletedSet.has(normalizeKey(savedUsername))) {
             localUsers.push({ username: savedUsername, avatar: '/avatars/default.svg' });
@@ -1752,6 +1752,8 @@ async function initAuth() {
     // Kalıcı kullanıcıları sunucuyla senkronize et (hiçbir kayıtlı kullanıcı kaybolmasın - AWAIT ile yarış durumunu önle)
     await syncPermanentUsersWithServer();
 
+    const delSetAfterSync = new Set(getDeletedLocalUserKeys());
+
     const urlParams = new URLSearchParams(window.location.search);
     const autoUserParam = urlParams.get('autoUser') || '';
 
@@ -1760,6 +1762,15 @@ async function initAuth() {
     let savedUsername = localStorage.getItem('msj_saved_username') || '';
     if (!savedUsername && savedUserStr) {
         try { savedUsername = JSON.parse(savedUserStr).username || ''; } catch (e) {}
+    }
+
+    // Eğer bu kullanıcı sunucu tarafından silinmişse yerel hafızadan da temizle
+    if (savedUsername && delSetAfterSync.has(normalizeKey(savedUsername))) {
+        localStorage.removeItem('msj_saved_username');
+        localStorage.removeItem('msj_user');
+        localStorage.removeItem('msj_token');
+        sessionStorage.removeItem('msj_token');
+        savedUsername = '';
     }
 
     // Eğer bu cihaz yerel bilgisayar (localhost) ise ve önceki hatadan dolayı "ENER OSMAN AKÇAY" kalmışsa gerçek PC kullanıcısını yükle
