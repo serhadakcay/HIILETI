@@ -995,6 +995,24 @@ app.post('/api/contacts/add', async (req, res) => {
     }
 });
 
+// Toplu Telefon Rehberi İçe Aktarma API (Mobile Contact Picker / .vcf desteği)
+app.post('/api/contacts/import_batch', async (req, res) => {
+    try {
+        const ownerUsername = ((req.body && req.body.ownerUsername) || '').trim();
+        const contacts = (req.body && req.body.contacts) || [];
+        if (!ownerUsername) {
+            return res.status(400).json({ success: false, error: 'Sahip kullanıcı adı gerekli' });
+        }
+        if (!Array.isArray(contacts) || contacts.length === 0) {
+            return res.json({ success: true, count: 0, contacts: [] });
+        }
+        const result = await db.importContactsBatch(ownerUsername, contacts);
+        res.json(result);
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
 // ==========================================
 // SIGNAL X3DH / DOUBLE RATCHET & AKD (AUDITABLE KEY DIRECTORY) API
 // ==========================================

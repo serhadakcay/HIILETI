@@ -9,13 +9,17 @@ function normalizeKey(str) {
 
 function normalizePhone(phoneStr) {
     if (!phoneStr) return '';
-    const digits = String(phoneStr).replace(/\D+/g, '');
+    let digits = String(phoneStr).replace(/\D+/g, '');
     if (!digits) return '';
-    if (digits.length === 12 && digits.startsWith('905')) {
-        return '0' + digits.slice(2);
+    if (digits.startsWith('0090')) {
+        digits = digits.slice(4);
+    } else if (digits.startsWith('090')) {
+        digits = digits.slice(3);
+    } else if (digits.startsWith('90') && digits.length >= 12) {
+        digits = digits.slice(2);
     }
     if (digits.length === 10 && digits.startsWith('5')) {
-        return '0' + digits;
+        digits = '0' + digits;
     }
     return digits;
 }
@@ -134,7 +138,13 @@ function ensureDataDir() {
 function getDeletedUsersMap() {
     try {
         if (fs.existsSync(deletedUsersFile)) {
-            return JSON.parse(fs.readFileSync(deletedUsersFile, 'utf8') || '{}');
+            const raw = JSON.parse(fs.readFileSync(deletedUsersFile, 'utf8') || '{}');
+            if (Array.isArray(raw)) {
+                const map = {};
+                raw.forEach(k => { if (k) map[normalizeKey(k)] = true; });
+                return map;
+            }
+            return (raw && typeof raw === 'object') ? raw : {};
         }
     } catch (e) {}
     return {};
@@ -1823,6 +1833,43 @@ class DatabaseManager {
         return true;
     }
 
+    async importContactsBatch(ownerUsername, contacts) {
+        const ownerKey = normalizeKey(ownerUsername);
+        if (!ownerKey || !Array.isArray(contacts)) {
+            return { success: false, error: 'Geçersiz parametreler' };
+        }
+
+        const results = [];
+        for (const item of contacts) {
+            const rawPhone = item.phone || '';
+            const cleanPhone = normalizePhone(rawPhone);
+            const rawName = String(item.name || '').trim();
+            if (!cleanPhone || cleanPhone.length < 7) continue;
+
+            unmarkUserDeletedInFile(normalizeKey(cleanPhone));
+            if (rawName) unmarkUserDeletedInFile(normalizeKey(rawName));
+
+            // Sistemde kayıtlı kullanıcı var mı kontrol et
+            const existingUser = await this.findUserByPhone(cleanPhone);
+            const contactUsername = existingUser ? existingUser.username : (rawName || cleanPhone);
+            const contactKey = normalizeKey(contactUsername);
+
+            if (contactKey && contactKey !== ownerKey) {
+                await this.addContactForUser(ownerUsername, contactUsername, rawName, cleanPhone);
+                results.push({
+                    username: contactUsername,
+                    customName: rawName || (existingUser ? existingUser.username : ''),
+                    phone: cleanPhone,
+                    avatar: (existingUser && existingUser.avatar) || '/avatars/default.svg',
+                    isRegistered: !!existingUser,
+                    isOnline: false
+                });
+            }
+        }
+
+        return { success: true, count: results.length, contacts: results };
+    }
+
     getRemovedContactsForUser(ownerUsername) {
         const ownerKey = normalizeKey(ownerUsername);
         const set = new Set();
@@ -2290,6 +2337,7 @@ class DatabaseManager {
         const blockedUsersMap = await this.getBlockedUsersForUser(currentUsername);
         const removedContactsSet = this.getRemovedContactsForUser(currentUsername);
         const chatItems = [];
+        const seenKeys = new Set();
 
         // Rehberdeki telefon numaralarından da hızlı eşleştirme haritası oluştur
         const personalContactsByPhone = new Map();
@@ -2381,6 +2429,74 @@ class DatabaseManager {
                 } : null,
                 unreadCount
             });
+            seenKeys.add(contact.userKey);
+        }
+
+        // 2. Kişisel rehbere (user_contacts) eklenmiş ancak henüz users tablosunda tam hesabı olmayan kişileri de sohbet listesine dahil et
+        for (const [cKey, cInfo] of personalContactsMap.entries()) {
+            if (cKey === currentKey || seenKeys.has(cKey)) continue;
+            if (removedContactsSet.has(cKey)) continue;
+
+            const contactUsername = cInfo.contactUsername || cInfo.customName || cInfo.phone;
+            if (!contactUsername) continue;
+
+            const convoKey = getConvoKey(currentUsername, contactUsername);
+            let lastRow = null;
+            let unreadCount = 0;
+
+            if (this.type === 'mysql') {
+                const [mRows] = await this.mysqlPool.query(
+                    'SELECT * FROM messages WHERE convo_key = ? ORDER BY created_at DESC LIMIT 1',
+                    [convoKey]
+                );
+                if (mRows.length > 0) lastRow = mRows[0];
+
+                const [uRows] = await this.mysqlPool.query(
+                    'SELECT COUNT(*) as cnt FROM messages WHERE convo_key = ? AND (LOWER(recipient) = ? OR recipient = ?) AND is_read = 0',
+                    [convoKey, currentKey, currentUsername]
+                );
+                unreadCount = uRows[0] ? uRows[0].cnt : 0;
+            } else {
+                lastRow = this.sqliteDb.prepare(
+                    'SELECT * FROM messages WHERE convo_key = ? ORDER BY created_at DESC LIMIT 1'
+                ).get(convoKey);
+
+                const uRow = this.sqliteDb.prepare(
+                    'SELECT COUNT(*) as cnt FROM messages WHERE convo_key = ? AND (LOWER(recipient) = ? OR recipient = ?) AND is_read = 0'
+                ).get(convoKey, currentKey, currentUsername);
+                unreadCount = uRow ? uRow.cnt : 0;
+            }
+
+            const lastMsg = lastRow ? this.formatMessageRow(lastRow) : null;
+            const isOnline = Boolean(
+                onlineUserKeysMap &&
+                onlineUserKeysMap.has(cKey) &&
+                onlineUserKeysMap.get(cKey).size > 0
+            );
+
+            chatItems.push({
+                username: contactUsername,
+                customName: cInfo.customName || '',
+                phone: cInfo.phone || '',
+                avatar: '/avatars/default.svg',
+                isOnline,
+                isBlocked: blockedUsersMap.has(cKey),
+                statusText: isOnline ? 'Online' : 'Offline',
+                lastSeen: isOnline ? 'Online' : 'Offline',
+                lastMessage: lastMsg ? {
+                    id: lastMsg.id,
+                    sender: lastMsg.sender,
+                    recipient: lastMsg.recipient,
+                    text: lastMsg.text,
+                    file: lastMsg.file,
+                    timestamp: lastMsg.timestamp,
+                    date: lastMsg.date || 'Bugün',
+                    createdAt: lastMsg.createdAt || '',
+                    isOutgoing: normalizeKey(lastMsg.sender) === currentKey
+                } : null,
+                unreadCount
+            });
+            seenKeys.add(cKey);
         }
 
         // Sıralama: Önce okunmamış mesajı olanlar ve Online olanlar, ardından son mesaj tarihine göre

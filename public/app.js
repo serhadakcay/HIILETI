@@ -208,15 +208,18 @@ window.showE2EEVerificationDialog = function() {
 };
 
 function normalizePhoneClient(phoneStr) {
-    if (!phoneStr || typeof phoneStr !== 'string') return '';
-    let digits = phoneStr.replace(/\D+/g, '');
+    if (!phoneStr) return '';
+    let digits = String(phoneStr).replace(/\D+/g, '');
     if (!digits) return '';
-    if (digits.length === 12 && digits.startsWith('905')) {
-        digits = '0' + digits.slice(2);
-    } else if (digits.length === 10 && digits.startsWith('5')) {
+    if (digits.startsWith('0090')) {
+        digits = digits.slice(4);
+    } else if (digits.startsWith('090')) {
+        digits = digits.slice(3);
+    } else if (digits.startsWith('90') && digits.length >= 12) {
+        digits = digits.slice(2);
+    }
+    if (digits.length === 10 && digits.startsWith('5')) {
         digits = '0' + digits;
-    } else if (digits.length === 13 && digits.startsWith('0905')) {
-        digits = '0' + digits.slice(3);
     }
     return digits;
 }
@@ -1192,9 +1195,10 @@ function isMessageForCurrentUserAndContact(msg, contactKey) {
 }
 
 function getPersonalPhoneBookForCurrentUser() {
-    if (!currentUser || !currentUser.username) return [];
+    const uName = (currentUser && currentUser.username) || localStorage.getItem('msj_saved_username') || '';
+    if (!uName) return [];
     try {
-        const key = 'msj_phone_book_' + normalizeKey(currentUser.username);
+        const key = 'msj_phone_book_' + normalizeKey(uName);
         const raw = localStorage.getItem(key);
         if (raw) {
             const parsed = JSON.parse(raw);
@@ -1205,9 +1209,10 @@ function getPersonalPhoneBookForCurrentUser() {
 }
 
 function savePersonalPhoneBookForCurrentUser(list) {
-    if (!currentUser || !currentUser.username || !Array.isArray(list)) return;
+    const uName = (currentUser && currentUser.username) || localStorage.getItem('msj_saved_username') || '';
+    if (!uName || !Array.isArray(list)) return;
     try {
-        const key = 'msj_phone_book_' + normalizeKey(currentUser.username);
+        const key = 'msj_phone_book_' + normalizeKey(uName);
         localStorage.setItem(key, JSON.stringify(list));
     } catch (e) {}
 }
@@ -1343,6 +1348,7 @@ function integratePhoneContactOnClient(oldUsernameOrPhone, newUsername, phone, a
 function mergeContactsWithPermanentUsers(serverChats) {
     const deletedSet = new Set(getDeletedLocalUserKeys());
     const myKey = currentUser ? normalizeKey(currentUser.username) : '';
+    const effectiveMyKey = myKey || normalizeKey(localStorage.getItem('msj_saved_username') || '');
     const map = new Map();
     const phoneKeyToUserKey = new Map();
 
@@ -1351,7 +1357,7 @@ function mergeContactsWithPermanentUsers(serverChats) {
         serverChats.forEach(c => {
             if (!c || !c.username) return;
             const k = normalizeKey(c.username);
-            if (k && k !== myKey && !deletedSet.has(k)) {
+            if (k && k !== effectiveMyKey && !deletedSet.has(k)) {
                 const validMsg = isMessageForCurrentUserAndContact(c.lastMessage, k) ? c.lastMessage : null;
                 const pKey = getPhoneMatchKeyClient(c.phone || (isPhoneQueryClient(c.username) ? c.username : ''));
                 // Eğer aynı telefon numarasına sahip hem numara kaydı hem gerçek kullanıcı adı varsa gerçek kullanıcı adını tut
@@ -1382,7 +1388,7 @@ function mergeContactsWithPermanentUsers(serverChats) {
 
     // 2. Yalnızca şu anki aktif kullanıcıya ait kişisel rehberdeki (msj_phone_book_<user>) ve önbellekteki (msj_cached_contacts_<user>) kişileri koru
     // Eğer numaradan bulunan kişi kullanıcı adıyla entegre olmuşsa telefon numarası üzerinden eşleştirip birleştir!
-    if (myKey) {
+    if (effectiveMyKey) {
         try {
             const phoneBook = getPersonalPhoneBookForCurrentUser();
             let phoneBookNeedsUpdate = false;
@@ -1407,7 +1413,7 @@ function mergeContactsWithPermanentUsers(serverChats) {
                         }
                         return;
                     }
-                    if (k && k !== myKey && !deletedSet.has(k) && !map.has(k)) {
+                    if (k && k !== effectiveMyKey && !deletedSet.has(k) && !map.has(k)) {
                         if (pKey) phoneKeyToUserKey.set(pKey, k);
                         map.set(k, {
                             username: c.username,
@@ -1443,7 +1449,7 @@ function mergeContactsWithPermanentUsers(serverChats) {
                     }
                     const validMsg = isMessageForCurrentUserAndContact(c.lastMessage, k) ? c.lastMessage : null;
                     const hasPhoneOrMsg = Boolean(validMsg || c.phone || c.customName);
-                    if (k && k !== myKey && !deletedSet.has(k) && !map.has(k) && hasPhoneOrMsg) {
+                    if (k && k !== effectiveMyKey && !deletedSet.has(k) && !map.has(k) && hasPhoneOrMsg) {
                         if (pKey) phoneKeyToUserKey.set(pKey, k);
                         map.set(k, {
                             username: c.username,
@@ -2439,33 +2445,35 @@ window.findAndContactByPhone = async function(phoneStr, customName = '', actionT
             if (inputLookupCustomName) inputLookupCustomName.value = '';
 
             renderChatsList(contactsList);
-            closeNewChatModal();
-            selectContact(contactObj);
+            if (actionType !== 'none') {
+                closeNewChatModal();
+                selectContact(contactObj);
 
-            const inviterLabel = formatPhonePretty(myPhone || myUsername);
-            const inviteMsgStr = data.inviteText || `“${inviterLabel} Numaralı Kişi Sizi Bu Uygulamayı Kullanmaya Davet Ediyor”`;
-            showStatusToast(`📨 ${inviteMsgStr} mesajı gönderildi!`, true);
+                const inviterLabel = formatPhonePretty(myPhone || myUsername);
+                const inviteMsgStr = data.inviteText || `“${inviterLabel} Numaralı Kişi Sizi Bu Uygulamayı Kullanmaya Davet Ediyor”`;
+                showStatusToast(`📨 ${inviteMsgStr} mesajı gönderildi!`, true);
 
-            // Eğer karşı taraf henüz uygulamada çevrimiçi değilse tek tıkla SMS davet çubuğu göster
-            if (!u.isOnline && messagesContainer) {
-                setTimeout(() => {
-                    const smsBanner = document.createElement('div');
-                    smsBanner.style.cssText = 'align-self:center;max-width:92%;background:rgba(0,168,132,0.16);border:1px solid #00a884;border-radius:10px;padding:10px 14px;margin:8px auto;text-align:center;font-size:12.5px;color:#e9edef;';
-                    const smsBody = encodeURIComponent(`${inviteMsgStr} - Bağlantı: ${window.location.origin}`);
-                    smsBanner.innerHTML = `
-                        <div style="margin-bottom:6px;color:#25d366;font-weight:700;">📨 Uygulama içi davet mesajı gönderildi!</div>
-                        <div style="margin-bottom:8px;color:#d1d7db;">${escapeHtml(inviteMsgStr)}</div>
-                        <a href="sms:${escapeHtml(cleanPhone)}?body=${smsBody}" style="display:inline-block;padding:6px 12px;border-radius:8px;background:#00a884;color:#fff;text-decoration:none;font-weight:700;font-size:12px;">📱 SMS Olarak da Gönder (${escapeHtml(formatPhonePretty(cleanPhone))})</a>
-                    `;
-                    messagesContainer.appendChild(smsBanner);
-                    scrollToBottom();
-                }, 450);
-            }
+                // Eğer karşı taraf henüz uygulamada çevrimiçi değilse tek tıkla SMS davet çubuğu göster
+                if (!u.isOnline && messagesContainer) {
+                    setTimeout(() => {
+                        const smsBanner = document.createElement('div');
+                        smsBanner.style.cssText = 'align-self:center;max-width:92%;background:rgba(0,168,132,0.16);border:1px solid #00a884;border-radius:10px;padding:10px 14px;margin:8px auto;text-align:center;font-size:12.5px;color:#e9edef;';
+                        const smsBody = encodeURIComponent(`${inviteMsgStr} - Bağlantı: ${window.location.origin}`);
+                        smsBanner.innerHTML = `
+                            <div style="margin-bottom:6px;color:#25d366;font-weight:700;">📨 Uygulama içi davet mesajı gönderildi!</div>
+                            <div style="margin-bottom:8px;color:#d1d7db;">${escapeHtml(inviteMsgStr)}</div>
+                            <a href="sms:${escapeHtml(cleanPhone)}?body=${smsBody}" style="display:inline-block;padding:6px 12px;border-radius:8px;background:#00a884;color:#fff;text-decoration:none;font-weight:700;font-size:12px;">📱 SMS Olarak da Gönder (${escapeHtml(formatPhonePretty(cleanPhone))})</a>
+                        `;
+                        messagesContainer.appendChild(smsBanner);
+                        scrollToBottom();
+                    }, 450);
+                }
 
-            if (actionType === 'voice' || actionType === 'video') {
-                setTimeout(() => initiateCall(actionType), 250);
-            } else if (messageInput) {
-                setTimeout(() => messageInput.focus(), 150);
+                if (actionType === 'voice' || actionType === 'video') {
+                    setTimeout(() => initiateCall(actionType), 250);
+                } else if (messageInput) {
+                    setTimeout(() => messageInput.focus(), 150);
+                }
             }
         } else {
             alert((data && data.error) || 'Telefon numarası sorgulanamadı.');
@@ -6116,10 +6124,21 @@ setInterval(async () => {
     const btnAddFilter = document.getElementById('btnAddFilter');
     const vcfContactsFileInput = document.getElementById('vcfContactsFileInput');
 
+    function decodeQuotedPrintable(str) {
+        if (!str) return '';
+        try {
+            const hexDecoded = str.replace(/=([0-9A-Fa-f]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+            return decodeURIComponent(escape(hexDecoded));
+        } catch (e) {
+            return str.replace(/=([0-9A-Fa-f]{2})/g, '');
+        }
+    }
+
     async function processImportedPhoneEntries(entries) {
         if (!Array.isArray(entries) || entries.length === 0) return;
         const myUsername = currentUser ? currentUser.username : (localStorage.getItem('msj_saved_username') || '');
         const myPhoneBook = getPersonalPhoneBookForCurrentUser();
+        const validEntries = [];
         const hashes = [];
 
         for (const item of entries) {
@@ -6127,56 +6146,176 @@ setInterval(async () => {
             if (!cleanPhone || cleanPhone.length < 7) continue;
             const cName = (item.name || '').trim();
 
-            if (window.MSJCryptoEngine && typeof window.MSJCryptoEngine.hashPhoneForPrivateDiscovery === 'function') {
-                const h = await window.MSJCryptoEngine.hashPhoneForPrivateDiscovery(cleanPhone);
-                if (h) hashes.push(h);
+            removeDeletedLocalUserKey(cleanPhone);
+            if (cName) removeDeletedLocalUserKey(cName);
+
+            validEntries.push({ name: cName, phone: cleanPhone });
+
+            // Kişisel telefon rehberine (msj_phone_book_<user>) anında kaydet
+            const existingPbIdx = myPhoneBook.findIndex(pb =>
+                (pb.phone && normalizePhoneClient(pb.phone) === cleanPhone) ||
+                (cName && normalizeKey(pb.customName || pb.username) === normalizeKey(cName))
+            );
+            const pbEntry = {
+                username: cName || cleanPhone,
+                customName: cName,
+                phone: cleanPhone,
+                avatar: '/avatars/default.svg'
+            };
+            if (existingPbIdx >= 0) {
+                myPhoneBook[existingPbIdx] = { ...myPhoneBook[existingPbIdx], ...pbEntry };
+            } else {
+                myPhoneBook.push(pbEntry);
             }
 
-            // Telefon numarasından bul ve rehbere kaydet
-            await window.findAndContactByPhone(cleanPhone, cName, 'none');
+            // Aktif contactsList içine ekle/güncelle
+            let contactObj = contactsList.find(c =>
+                (c.phone && normalizePhoneClient(c.phone) === cleanPhone) ||
+                (cName && normalizeKey(c.customName || c.username) === normalizeKey(cName))
+            );
+            if (!contactObj) {
+                contactObj = {
+                    username: cName || cleanPhone,
+                    customName: cName,
+                    avatar: '/avatars/default.svg',
+                    phone: cleanPhone,
+                    isOnline: false,
+                    statusText: 'Offline',
+                    lastSeen: 'Offline',
+                    lastMessage: null,
+                    unreadCount: 0
+                };
+                contactsList.unshift(contactObj);
+            } else {
+                contactObj.phone = cleanPhone;
+                if (cName) contactObj.customName = cName;
+            }
+
+            if (window.MSJCryptoEngine && typeof window.MSJCryptoEngine.hashPhoneForPrivateDiscovery === 'function') {
+                try {
+                    const h = await window.MSJCryptoEngine.hashPhoneForPrivateDiscovery(cleanPhone);
+                    if (h) hashes.push(h);
+                } catch (e) {}
+            }
         }
 
-        if (hashes.length > 0 && myUsername) {
+        if (validEntries.length === 0) {
+            showStatusToast('⚠️ Rehberde geçerli telefon numarası bulunamadı.', false);
+            return;
+        }
+
+        // 1. ANINDA YEREL KAYDET VE ARAYÜZDE GÖSTER (Sıfır gecikme!)
+        savePersonalPhoneBookForCurrentUser(myPhoneBook);
+        saveCachedContactsForCurrentUser(contactsList);
+        renderChatsList(contactsList);
+        closeNewChatModal();
+
+        // 2. SUNUCUYA TOPLU SENKRONİZE ET (/api/contacts/import_batch)
+        if (myUsername) {
             try {
-                await fetch('/api/users/match_hashed_phones', {
+                const token = localStorage.getItem('msj_token') || sessionStorage.getItem('msj_token');
+                const res = await fetch('/api/contacts/import_batch', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ phoneHashes: hashes, ownerUsername: myUsername })
+                    headers: {
+                        'Content-Type': 'application/json',
+                        ...(token ? { 'x-auth-token': token } : {})
+                    },
+                    body: JSON.stringify({
+                        ownerUsername: myUsername,
+                        contacts: validEntries
+                    })
                 });
-            } catch (e) {}
+                if (res.ok) {
+                    const data = await res.json();
+                    if (data && data.success && Array.isArray(data.contacts)) {
+                        data.contacts.forEach(srvC => {
+                            const pNorm = normalizePhoneClient(srvC.phone);
+                            const found = contactsList.find(c => normalizePhoneClient(c.phone) === pNorm);
+                            if (found && srvC.isRegistered) {
+                                found.username = srvC.username;
+                                if (srvC.avatar) found.avatar = srvC.avatar;
+                                if (srvC.isOnline) {
+                                    found.isOnline = true;
+                                    found.statusText = 'Online';
+                                    found.lastSeen = 'Online';
+                                }
+                            }
+                        });
+                        saveCachedContactsForCurrentUser(contactsList);
+                        renderChatsList(contactsList);
+                    }
+                }
+            } catch (err) {
+                console.warn('Batch contact sync error:', err);
+            }
+
+            if (hashes.length > 0) {
+                try {
+                    await fetch('/api/users/match_hashed_phones', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ phoneHashes: hashes, ownerUsername: myUsername })
+                    });
+                } catch (e) {}
+            }
         }
 
-        await loadChatsList();
-        showStatusToast(`📒 ${entries.length} kişi telefon rehberinizden eklendi!`, true);
+        showStatusToast(`📒 ${validEntries.length} kişi telefon rehberinizden başarıyla aktarıldı!`, true);
     }
 
     async function triggerDeviceContactsImport() {
         if (headerDropdown) headerDropdown.style.display = 'none';
 
-        // 1. Mobil Tarayıcı Native Contact Picker API (Android Chrome / iOS destekli)
-        if ('contacts' in navigator && 'ContactsManager' in window) {
+        // 1. Mobil Tarayıcı Native Contact Picker API (Android Chrome / Uyumlu Mobil Tarayıcılar)
+        if ('contacts' in navigator && typeof navigator.contacts.select === 'function') {
             try {
-                const selected = await navigator.contacts.select(['name', 'tel'], { multiple: true });
+                let props = ['name', 'tel'];
+                if (typeof navigator.contacts.getProperties === 'function') {
+                    const supported = await navigator.contacts.getProperties();
+                    props = ['name', 'tel'].filter(p => supported.includes(p));
+                    if (props.length === 0) props = ['tel'];
+                }
+                const selected = await navigator.contacts.select(props, { multiple: true });
                 if (selected && selected.length > 0) {
                     const parsed = [];
                     selected.forEach(c => {
-                        const name = (c.name && c.name[0]) || '';
-                        const tels = c.tel || [];
+                        let name = '';
+                        if (Array.isArray(c.name) && c.name.length > 0) {
+                            name = String(c.name[0] || '').trim();
+                        } else if (typeof c.name === 'string') {
+                            name = c.name.trim();
+                        }
+                        let tels = [];
+                        if (Array.isArray(c.tel)) {
+                            tels = c.tel;
+                        } else if (typeof c.tel === 'string') {
+                            tels = [c.tel];
+                        }
                         tels.forEach(t => {
-                            if (t) parsed.push({ name, phone: t });
+                            const clean = normalizePhoneClient(t);
+                            if (clean && clean.length >= 7) {
+                                parsed.push({ name, phone: clean });
+                            }
                         });
                     });
-                    await processImportedPhoneEntries(parsed);
-                    return;
+                    if (parsed.length > 0) {
+                        await processImportedPhoneEntries(parsed);
+                        return;
+                    }
                 }
-            } catch (e) {}
+            } catch (err) {
+                if (err && (err.name === 'AbortError' || err.code === 20)) {
+                    return; // Kullanıcı geri veya iptal bastı, modal açma
+                }
+                console.warn('Native contact picker error, fallback açılıyor:', err);
+            }
         }
 
-        // 2. Masaüstü veya Contact Picker desteklemeyen tarayıcılar için Rehber (.vcf) dosyası veya hızlı numara girişi
+        // 2. Masaüstü veya Contact Picker desteklemeyen tarayıcılar (iOS Safari vb.) için Rehber (.vcf) dosyası veya hızlı numara girişi
         const choice = confirm(
-            '📒 Kendi Telefon Rehberinizden Kişi Aktarımı\n\n' +
-            '• Telefon rehber dosyanızdan (.vcf / vCard) toplu aktarmak için "Tamam"a basın.\n' +
-            '• Tek bir telefon numarasını rehberinize ekleyip davet göndermek için "İptal"e basın.'
+            '📒 Telefon Rehberinden Kişi Aktarımı\n\n' +
+            '• Rehber yedeğinizi (.vcf / vCard dosyası) seçerek toplu aktarmak için "Tamam"a basın.\n' +
+            '• Tek tek numara veya isim eklemek için "İptal"e basın.'
         );
         if (choice && vcfContactsFileInput) {
             vcfContactsFileInput.click();
@@ -6197,7 +6336,10 @@ setInterval(async () => {
                 cards.forEach(card => {
                     const fnMatch = card.match(/FN[^:]*:(.+)/i);
                     const telMatches = card.match(/TEL[^:]*:([^\r\n]+)/gi) || [];
-                    const name = fnMatch ? fnMatch[1].trim() : '';
+                    let name = fnMatch ? fnMatch[1].trim() : '';
+                    if (/QUOTED-PRINTABLE/i.test(card) || /=([0-9A-Fa-f]{2})/.test(name)) {
+                        name = decodeQuotedPrintable(name);
+                    }
                     telMatches.forEach(tLine => {
                         const parts = tLine.split(':');
                         const rawTel = parts.slice(1).join(':').trim();
