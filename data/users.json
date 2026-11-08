@@ -1,1 +1,29 @@
-{}
+{
+  "ener osman akçay": {
+    "username": "ENER OSMAN AKÇAY",
+    "phone": "",
+    "salt": "e5a22bbdfaa9862c1e62712ced84d16d",
+    "hash": "f441b51f9b0830d76e9d439b7829876127e48f8161bdc4b94da9f198f3bf83be02271b59d41bc894799905ce4374857653ed995f06f8a771ee343af7431aa6ff",
+    "avatar": "/avatars/default.svg",
+    "lastSeen": "Offline",
+    "createdAt": "2026-11-08T19:37:03.146Z"
+  },
+  "serhad akçay": {
+    "username": "Serhad AKÇAY",
+    "phone": "",
+    "salt": "cba8a5db4809ef2cdf34d0341b40f187",
+    "hash": "adf471135f1c58e87a29c24a055986e336d1bde63d9830cc81c619341755e6a259c589c0a08d2a44dbe76101901cd8c0b9759967b44c86d5f9fc912c47a00b80",
+    "avatar": "/avatars/default.svg",
+    "lastSeen": "Offline",
+    "createdAt": "2026-11-08T19:37:05.758Z"
+  },
+  "cozucem@gmail.com": {
+    "username": "cozucem@gmail.com",
+    "phone": "",
+    "salt": "7b654430ec3c860fd25ce8192d78fb9f",
+    "hash": "ea531190e4e742a0816a0158a3a0dbc222208f2316d259494e22b35f5452c9383bae1e95d30cecdc42d3746109e09d61d5118c71f179d6c20c07a492926d5fbd",
+    "avatar": "/avatars/default.svg",
+    "lastSeen": "Offline",
+    "createdAt": "2026-11-08T19:50:53.500Z"
+  }
+}
