@@ -594,7 +594,7 @@ namespace MSJ
                         // Program penceresi kapalıysa veya hedef kullanıcı offline ise otomatik aç; simge durumundaysa öne getir!
                         if (existingWnd == IntPtr.Zero || !isTargetOnline)
                         {
-                            string q = "?openChat=" + Uri.EscapeDataString(sender);
+                            string q = "?openChat=" + Uri.EscapeDataString(sender) + (!string.IsNullOrEmpty(recipient) ? "&autoUser=" + Uri.EscapeDataString(recipient) : "");
                             OpenAppWindow(q);
                         }
                         else
@@ -636,7 +636,7 @@ namespace MSJ
                         IntPtr existingWnd = FindExistingAppWindowHandle();
                         if (existingWnd == IntPtr.Zero || !isTargetOnline)
                         {
-                            string q = "?openChat=" + Uri.EscapeDataString(caller) + "&incomingCall=1";
+                            string q = "?openChat=" + Uri.EscapeDataString(caller) + "&incomingCall=1" + (!string.IsNullOrEmpty(recipient) ? "&autoUser=" + Uri.EscapeDataString(recipient) : "");
                             OpenAppWindow(q);
                         }
                         else

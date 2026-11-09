@@ -13,7 +13,7 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="HIHaberleşme">
     <meta name="mobile-web-app-capable" content="yes">
-    <link rel="stylesheet" href="/style.css?v=22">
+    <link rel="stylesheet" href="/style.css?v=23">
 </head>
 <body>
     <!-- ==========================================
@@ -61,6 +61,11 @@
                         <svg viewBox="0 0 24 24" width="21" height="21" fill="currentColor">
                             <path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/>
                         </svg>
+                    </button>
+                    <!-- Sesi Dışarı Verme (Hoparlör Güçlendirici) Hızlı Aç/Kapat -->
+                    <button class="icon-btn" id="btnHeaderSpeakerToggle" title="Sesi Dışarı Ver (Hoparlör Modu Aç / Kapat)" style="font-size:13px;font-weight:700;padding:4px 8px;border-radius:8px;background:rgba(0,168,132,0.18);color:#25d366;border:1px solid rgba(0,168,132,0.45);display:flex;align-items:center;gap:4px;">
+                        <span id="lblHeaderSpeakerIcon">🔊</span>
+                        <span id="lblHeaderSpeakerText" style="font-size:11.5px;">Dış Ses</span>
                     </button>
                     <!-- Ses / Mikrofon & Hoparlör Hızlı Ayar Butonu -->
                     <button class="icon-btn" id="btnHeaderAudioSettings" title="Mikrofon ve Hoparlör Ayarları">
@@ -162,6 +167,11 @@
                     <div class="chat-user-status" id="chatContactStatus">Offline</div>
                 </div>
                 <div class="chat-header-actions">
+                    <!-- Sesi Dışarı Verme (Hoparlör / Ahize Geçiş Butonu) -->
+                    <button class="icon-btn" id="btnChatSpeakerToggle" title="Sesi Dışarı Ver (Hoparlör / Ahize Değiştir)" style="font-size:12px;font-weight:700;padding:5px 8px;border-radius:8px;background:rgba(0,168,132,0.18);color:#25d366;border:1px solid rgba(0,168,132,0.45);display:flex;align-items:center;gap:4px;">
+                        <span id="lblChatSpeakerIcon">🔊</span>
+                        <span id="lblChatSpeakerText" style="font-size:11px;">Dış Ses</span>
+                    </button>
                     <!-- Görüntülü Arama -->
                     <button class="icon-btn" id="btnVideoCall" title="Görüntülü Arama (DTLS-SRTP E2EE)">
                         <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor">
@@ -292,6 +302,22 @@
                 <p id="authSubtitle">Devam etmek için şifrenizi girin</p>
             </div>
 
+            <!-- BİLGİSAYARDAN AÇILIRKEN CEP TELEFONU QR KODU İLE ENTEGRELİ GİRİŞ PANELİ (MADDE 4) -->
+            <div id="pcQrAuthSection" style="display:none;background:rgba(0,168,132,0.12);border:1px solid rgba(0,168,132,0.45);border-radius:12px;padding:12px;margin-bottom:12px;text-align:center;">
+                <div style="font-size:13.5px;font-weight:700;color:#25d366;margin-bottom:4px;">
+                    📱 Cep Telefonu ile Entegreli Aç (QR Kod Okut)
+                </div>
+                <div style="font-size:11.5px;color:#d1d7db;margin-bottom:8px;line-height:1.35;">
+                    Bilgisayarda ayrı kullanıcı açmak yerine cep telefonunuzun kamerasıyla aşağıdaki QR kodu okutun; bilgisayarınız telefonunuzdaki hesabınızla anında entegreli açılır:
+                </div>
+                <div style="background:#fff;padding:8px;border-radius:10px;display:inline-block;margin-bottom:6px;">
+                    <img id="authQrImage" src="" alt="Telefon Eşleştirme QR Kodu" style="width:150px;height:150px;display:block;" />
+                </div>
+                <div id="authQrStatusText" style="font-size:11.5px;color:#25d366;font-weight:600;">
+                    📲 Cep telefonunuzdan QR kodu okutmanız bekleniyor...
+                </div>
+            </div>
+
             <!-- GİRİŞ YAP / YENİ KULLANICI EKLE SEKMELERİ -->
             <div class="auth-tabs-header">
                 <button type="button" class="auth-tab-btn active" id="tabAuthLogin">🔑 Giriş Yap</button>
@@ -325,10 +351,11 @@
                     </div>
                 </div>
 
-                <!-- Yeni Kayıt İçin Telefon Numarası -->
+                <!-- Yeni Kayıt ve Numara Entegrasyonu İçin Telefon Numarası -->
                 <div class="form-field" id="fieldPhone" style="display:none;">
-                    <label for="inputPhone">📱 Telefon Numaranız (Davet ve rehber eşleşmesi için)</label>
+                    <label for="inputPhone">📱 Telefon Numaranız (Numara ile kullanıcı entegrasyonu için)</label>
                     <input type="tel" id="inputPhone" class="auth-input" placeholder="Örn: 05XX XXX XX XX" autocomplete="tel" />
+                    <div id="pendingPhonesChipsBox" style="display:none;margin-top:6px;font-size:11.5px;color:#25d366;"></div>
                 </div>
 
                 <!-- Şifre Alanı -->
@@ -455,8 +482,12 @@
                 <img id="incomingCallerAvatar" class="avatar incoming-pulse-avatar" src="/avatars/default.svg" alt="Arayan">
             </div>
 
-            <!-- ARA SEÇENEKLER (HATIRLAT / MESAJ / CİHAZ SEÇ) -->
+            <!-- ARA SEÇENEKLER (SESİ DIŞARI VER / HATIRLAT / MESAJ / CİHAZ SEÇ) -->
             <div class="call-secondary-actions">
+                <div class="call-sec-btn" id="btnIncomingSpeakerToggle" title="Sesi Dışarı Ver (Hoparlör Aç/Kapat)" style="color:#25d366;">
+                    <span style="font-size:20px;">🔊</span>
+                    <span id="lblIncomingSpeakerText">Dış Ses: Açık</span>
+                </div>
                 <div class="call-sec-btn" id="btnIncomingAudioDevices" title="Mikrofon ve Hoparlör Seç">
                     <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor">
                         <path d="M12 1a9 9 0 0 0-9 9v7c0 1.66 1.34 3 3 3h3v-8H5v-2c0-3.87 3.13-7 7-7s7 3.13 7 7v2h-4v8h3c1.66 0 3-1.34 3-3v-7a9 9 0 0 0-9-9z"/>
@@ -518,7 +549,11 @@
                 <img id="outgoingTargetAvatar" class="avatar incoming-pulse-avatar" src="/avatars/default.svg" alt="Aranan">
             </div>
 
-            <div class="call-secondary-actions" style="justify-content: center;">
+            <div class="call-secondary-actions" style="justify-content: center; gap: 18px;">
+                <div class="call-sec-btn" id="btnOutgoingSpeakerToggle" title="Sesi Dışarı Ver (Hoparlör Aç/Kapat)" style="color:#25d366;">
+                    <span style="font-size:20px;">🔊</span>
+                    <span id="lblOutgoingSpeakerText">Sesi Dışarı Ver: Açık</span>
+                </div>
                 <div class="call-sec-btn" id="btnOutgoingAudioDevices" title="Mikrofon ve Hoparlör Seç">
                     <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor">
                         <path d="M12 1a9 9 0 0 0-9 9v7c0 1.66 1.34 3 3 3h3v-8H5v-2c0-3.87 3.13-7 7-7s7 3.13 7 7v2h-4v8h3c1.66 0 3-1.34 3-3v-7a9 9 0 0 0-9-9z"/>
@@ -563,6 +598,10 @@
                     <div class="active-device-chip" id="activeAudioDeviceBadge" title="Mikrofon veya Hoparlör değiştirmek için tıklayın">
                         🎧 Varsayılan Mikrofon & Hoparlör
                     </div>
+                    <button type="button" id="btnActiveSpeakerBanner" style="margin-top:8px;width:100%;padding:9px 14px;border-radius:10px;border:1px solid #00a884;background:rgba(0,168,132,0.25);color:#25d366;font-weight:700;font-size:13.5px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;">
+                        <span>🔊</span>
+                        <span id="lblActiveSpeakerBannerText">Sesi Dışarı Ver (Hoparlör: AÇIK)</span>
+                    </button>
                 </div>
             </div>
             <div class="local-video-pip" id="localVideoContainer">
@@ -786,7 +825,8 @@
                     <input type="text" id="inputLookupCustomName" placeholder="Rehber İsmi (İsteğe bağlı)" autocomplete="off" style="flex:1;min-width:120px;padding:9px 12px;border-radius:8px;border:1px solid #2a3942;background:#111b21;color:#e9edef;font-size:13px;outline:none;" />
                 </div>
                 <div style="display:flex;gap:8px;flex-wrap:wrap;">
-                    <button type="button" id="btnLookupStartChat" style="flex:2;padding:9px 12px;border-radius:8px;border:none;background:#00a884;color:#fff;font-weight:700;font-size:13px;cursor:pointer;">💬 Numarayı Bul & Davet Gönder</button>
+                    <button type="button" id="btnLookupSaveContactOnly" style="flex:2;min-width:150px;padding:9px 12px;border-radius:8px;border:none;background:#25d366;color:#111b21;font-weight:800;font-size:13px;cursor:pointer;">➕ Rehbere Kaydet & Programa Ekle</button>
+                    <button type="button" id="btnLookupStartChat" style="flex:2;min-width:150px;padding:9px 12px;border-radius:8px;border:none;background:#00a884;color:#fff;font-weight:700;font-size:13px;cursor:pointer;">💬 Mesaj & Davet Gönder</button>
                     <button type="button" id="btnLookupVoiceCall" style="flex:1;padding:9px 10px;border-radius:8px;border:1px solid rgba(0,168,132,0.5);background:#1f2c34;color:#25d366;font-weight:600;font-size:13px;cursor:pointer;">📞 Sesli Ara</button>
                     <button type="button" id="btnLookupVideoCall" style="flex:1;padding:9px 10px;border-radius:8px;border:1px solid rgba(0,168,132,0.5);background:#1f2c34;color:#25d366;font-weight:600;font-size:13px;cursor:pointer;">📹 Görüntülü</button>
                 </div>
@@ -797,8 +837,15 @@
                 <div class="new-chat-action-item" id="btnImportPhoneContactsModal" style="background:rgba(83,189,235,0.08);border:1px solid rgba(83,189,235,0.28);border-radius:10px;">
                     <div class="action-icon-circle" style="background:#00a884;">📒</div>
                     <div class="action-text">
-                        <strong>Telefon Rehberimden Kişileri Aktar / Seç</strong>
-                        <span>Yalnızca kendi telefonunuzda kayıtlı olan kişileri listenize ekleyin (SHA-256 Gizli Eşleşme)</span>
+                        <strong>Cep Telefonu Rehberimden Kişileri Seç / Aktar</strong>
+                        <span>Telefonunuzda kayıtlı kişileri seçerek tek dokunuşla programa ekleyin</span>
+                    </div>
+                </div>
+                <div class="new-chat-action-item" id="btnImportVcfContactsModal" style="background:rgba(0,168,132,0.06);border:1px solid rgba(0,168,132,0.25);border-radius:10px;">
+                    <div class="action-icon-circle" style="background:#1f2c34;color:#25d366;">📂</div>
+                    <div class="action-text">
+                        <strong>Rehber Dosyasından (.vcf / vCard) Toplu Kişi Yükle</strong>
+                        <span>iPhone / Android rehber yedeği dosyasından tüm kişileri toplu ekleyin</span>
                     </div>
                 </div>
                 <div class="new-chat-action-item" id="btnActionCreateNewUser">
@@ -1072,7 +1119,7 @@
         })();
     </script>
     <script src="/socket.io/socket.io.js"></script>
-    <script src="/crypto-e2ee.js?v=22"></script>
-    <script src="/app.js?v=22"></script>
+    <script src="/crypto-e2ee.js?v=23"></script>
+    <script src="/app.js?v=23"></script>
 </body>
 </html>

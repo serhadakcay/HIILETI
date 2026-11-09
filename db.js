@@ -508,7 +508,28 @@ class DatabaseManager {
                 }
             }
 
-            // 3. Oturumlar (Oturumu olan kullanıcılar veritabanında yoksa otomatik geri yükle)
+            // 3. Kişisel rehber (user_contacts.json -> veritabanı)
+            if (fs.existsSync(userContactsFile)) {
+                try {
+                    const rawContacts = JSON.parse(fs.readFileSync(userContactsFile, 'utf8') || '{}');
+                    for (const ownerKey of Object.keys(rawContacts)) {
+                        if (!ownerKey || ownerKey.startsWith('_removed_')) continue;
+                        const ownerContacts = rawContacts[ownerKey] || {};
+                        for (const contactKey of Object.keys(ownerContacts)) {
+                            const item = ownerContacts[contactKey];
+                            if (!item) continue;
+                            const cUsername = (item.contactUsername || contactKey || '').trim();
+                            if (!cUsername) continue;
+                            const cleanP = normalizePhone(item.phone || (isLikelyPhoneNumber(cUsername) ? cUsername : ''));
+                            await this.addContactForUser(ownerKey, cUsername, item.customName || '', cleanP);
+                        }
+                    }
+                } catch (e) {
+                    console.error('[Sync] user_contacts.json okuma hatası:', e.message);
+                }
+            }
+
+            // 4. Oturumlar (Oturumu olan kullanıcılar veritabanında yoksa otomatik geri yükle)
             if (fs.existsSync(sessionsFile)) {
                 try {
                     const rawSessions = JSON.parse(fs.readFileSync(sessionsFile, 'utf8') || '{}');
@@ -541,6 +562,9 @@ class DatabaseManager {
                 }
             }
 
+            // 5. Numara ile kaydedilmiş / mesaj atılmış kişileri mevcut kayıtlı kullanıcılarla otomatik entegre et
+            await this.reconcileAllPhoneIntegrations();
+
             // B) Veritabanından JSON dosyalarına tam yansıtma (Her zaman güncel yedek)
             await this.exportDbToJson();
             this.checkpointSqlite();
@@ -559,14 +583,32 @@ class DatabaseManager {
             if (fs.existsSync(usersFile)) {
                 try { usersMap = JSON.parse(fs.readFileSync(usersFile, 'utf8') || '{}'); } catch (e) { usersMap = {}; }
             }
+            const allUsers = await this.getAllUsers();
+            // Gerçek kullanıcıların sahip olduğu telefon numaralarını topla (entegre olmuş numaraların eski placeholder kayıtlarını temizlemek için)
+            const claimedPhones = new Set();
+            for (const u of allUsers) {
+                if (!isLikelyPhoneNumber(u.username) && u.phone) {
+                    const p = normalizePhone(u.phone);
+                    if (p.length >= 10) claimedPhones.add(p.slice(-10));
+                    else if (p) claimedPhones.add(p);
+                }
+            }
             for (const k of Object.keys(usersMap)) {
-                if (deletedMap[k] || k.startsWith('test_logout_user_') || k.startsWith('testuser_') || isLikelyPhoneNumber(k) || (usersMap[k] && isLikelyPhoneNumber(usersMap[k].username))) {
+                const uObj = usersMap[k];
+                const isPhoneKey = isLikelyPhoneNumber(k) || (uObj && isLikelyPhoneNumber(uObj.username));
+                const pNorm = isPhoneKey ? normalizePhone((uObj && (uObj.phone || uObj.username)) || k) : '';
+                const pLast10 = pNorm.length >= 10 ? pNorm.slice(-10) : pNorm;
+                if (deletedMap[k] || k.startsWith('test_logout_user_') || k.startsWith('testuser_') || (isPhoneKey && pLast10 && claimedPhones.has(pLast10))) {
                     delete usersMap[k];
                 }
             }
-            const allUsers = await this.getAllUsers();
             for (const u of allUsers) {
-                if (deletedMap[u.userKey] || u.userKey.startsWith('test_logout_user_') || u.userKey.startsWith('testuser_') || isLikelyPhoneNumber(u.username)) continue;
+                if (deletedMap[u.userKey] || u.userKey.startsWith('test_logout_user_') || u.userKey.startsWith('testuser_')) continue;
+                if (isLikelyPhoneNumber(u.username)) {
+                    const pNorm = normalizePhone(u.phone || u.username);
+                    const pLast10 = pNorm.length >= 10 ? pNorm.slice(-10) : pNorm;
+                    if (pLast10 && claimedPhones.has(pLast10)) continue;
+                }
                 usersMap[u.userKey] = {
                     username: u.username,
                     phone: u.phone || (usersMap[u.userKey] && usersMap[u.userKey].phone) || '',
@@ -578,6 +620,35 @@ class DatabaseManager {
                 };
             }
             fs.writeFileSync(usersFile, JSON.stringify(usersMap, null, 2), 'utf8');
+
+            // 1.5 Tüm kişisel rehber kayıtlarını user_contacts.json ile birleştirerek yaz
+            try {
+                let contactsMap = {};
+                if (fs.existsSync(userContactsFile)) {
+                    try { contactsMap = JSON.parse(fs.readFileSync(userContactsFile, 'utf8') || '{}'); } catch (e) { contactsMap = {}; }
+                }
+                let allContactRows = [];
+                if (this.type === 'mysql') {
+                    const [cRows] = await this.mysqlPool.query('SELECT * FROM user_contacts');
+                    allContactRows = cRows;
+                } else {
+                    allContactRows = this.sqliteDb.prepare('SELECT * FROM user_contacts').all();
+                }
+                for (const r of allContactRows) {
+                    if (!r.owner_key || !r.contact_key) continue;
+                    if (!contactsMap[r.owner_key]) contactsMap[r.owner_key] = {};
+                    const prev = contactsMap[r.owner_key][r.contact_key] || {};
+                    contactsMap[r.owner_key][r.contact_key] = {
+                        contactUsername: r.contact_username || prev.contactUsername || r.contact_key,
+                        customName: r.custom_name || prev.customName || '',
+                        phone: r.phone || prev.phone || '',
+                        addedAt: r.added_at || prev.addedAt || new Date().toISOString()
+                    };
+                }
+                fs.writeFileSync(userContactsFile, JSON.stringify(contactsMap, null, 2), 'utf8');
+            } catch (ce) {
+                console.error('[exportDbToJson] user_contacts.json yazma hatası:', ce.message);
+            }
 
             // 2. Tüm mesajları messages.json dosyasına yaz
             let allMsgs = [];
@@ -669,38 +740,139 @@ class DatabaseManager {
         return fallbackPhoneUser;
     }
 
-    // Henüz bir kullanıcı adıyla entegre edilmemiş (kullanıcı adı telefon numarası olan) davetli kayıtları döndürür
+    // Bir kullanıcı kaydının sadece telefon rehberinden eklenmiş geçici/varsayılan placeholder olup olmadığını kontrol eder
+    isPlaceholderAccount(u) {
+        if (!u) return false;
+        if (isLikelyPhoneNumber(u.username)) return true;
+        try {
+            const crypto = require('crypto');
+            if (u.salt && u.hash) {
+                const defaultHash = crypto.pbkdf2Sync('123456', u.salt, 1000, 64, 'sha512').toString('hex');
+                if (u.hash === defaultHash) {
+                    // Aktif oturumu yoksa rehberden otomatik oluşturulmuş placeholder kayıttır
+                    if (this.type !== 'mysql' && this.sqliteDb) {
+                        const sess = this.sqliteDb.prepare('SELECT 1 FROM sessions WHERE user_key = ? LIMIT 1').get(u.userKey);
+                        if (!sess) return true;
+                    }
+                }
+            }
+        } catch (e) {}
+        return false;
+    }
+
+    // Henüz gerçek bir kullanıcı adıyla entegre edilmemiş davetli / rehbere kayıtlı numaraları döndürür
     async getUnclaimedPhoneUsers(excludeUsername = '') {
         const exKey = normalizeKey(excludeUsername);
         const all = await this.getAllUsers();
         const realPhones = new Set();
         for (const u of all) {
-            if (!isLikelyPhoneNumber(u.username) && u.phone) {
+            if (!this.isPlaceholderAccount(u) && u.phone) {
                 const p = normalizePhone(u.phone);
                 if (p.length >= 10) realPhones.add(p.slice(-10));
                 else if (p) realPhones.add(p);
             }
         }
-        const unclaimed = [];
+        const unclaimedMap = new Map();
+        const addCandidate = (phoneRaw, displayName, avatar, createdAt) => {
+            const cleanP = normalizePhone(phoneRaw);
+            if (!cleanP || cleanP.length < 7) return;
+            const pKey = cleanP.length >= 10 ? cleanP.slice(-10) : cleanP;
+            if (realPhones.has(pKey)) return;
+            if (!unclaimedMap.has(pKey)) {
+                unclaimedMap.set(pKey, {
+                    username: displayName || cleanP,
+                    phone: cleanP,
+                    avatar: avatar || '/avatars/default.svg',
+                    createdAt: createdAt || new Date().toISOString()
+                });
+            }
+        };
+
         for (const u of all) {
             if (exKey && u.userKey === exKey) continue;
-            if (isLikelyPhoneNumber(u.username)) {
-                const cleanP = normalizePhone(u.phone || u.username);
-                const pKey = cleanP.length >= 10 ? cleanP.slice(-10) : cleanP;
-                if (cleanP && !realPhones.has(pKey)) {
-                    unclaimed.push({
-                        username: u.username,
-                        phone: cleanP,
-                        avatar: u.avatar || '/avatars/default.svg',
-                        createdAt: u.createdAt
-                    });
-                }
+            if (this.isPlaceholderAccount(u)) {
+                addCandidate(u.phone || u.username, u.username, u.avatar, u.createdAt);
             }
         }
-        return unclaimed;
+
+        // Kişisel rehberdeki (user_contacts) sahipsiz numaraları da dahil et
+        try {
+            let cRows = [];
+            if (this.type === 'mysql') {
+                const [rows] = await this.mysqlPool.query('SELECT * FROM user_contacts');
+                cRows = rows;
+            } else {
+                cRows = this.sqliteDb.prepare('SELECT * FROM user_contacts').all();
+            }
+            for (const cr of cRows) {
+                const cPhone = cr.phone || (isLikelyPhoneNumber(cr.contact_username) ? cr.contact_username : '');
+                if (cPhone) addCandidate(cPhone, cr.custom_name || cr.contact_username, '/avatars/default.svg', cr.added_at);
+            }
+        } catch (e) {}
+
+        // Mesajlardaki sahipsiz telefon numaralarını da dahil et
+        try {
+            let mRows = [];
+            if (this.type === 'mysql') {
+                const [rows] = await this.mysqlPool.query('SELECT sender, recipient, created_at FROM messages ORDER BY created_at DESC');
+                mRows = rows;
+            } else {
+                mRows = this.sqliteDb.prepare('SELECT sender, recipient, created_at FROM messages ORDER BY created_at DESC').all();
+            }
+            for (const mr of mRows) {
+                if (isLikelyPhoneNumber(mr.recipient)) addCandidate(mr.recipient, mr.recipient, '/avatars/default.svg', mr.created_at);
+                if (isLikelyPhoneNumber(mr.sender)) addCandidate(mr.sender, mr.sender, '/avatars/default.svg', mr.created_at);
+            }
+        } catch (e) {}
+
+        return Array.from(unclaimedMap.values());
     }
 
-    // Numaradan bulunan ve mesaj gönderilen kullanıcı programı kurduğunda numarası ile kullanıcı adını tek hesapta entegre eder
+    // Veritabanındaki tüm numara ve kullanıcı kayıtlarını tarayarak eşleşen numara/kullanıcıları otomatik entegre eder
+    async reconcileAllPhoneIntegrations() {
+        try {
+            const allUsers = await this.getAllUsers();
+            // 1. Rehberde kullanıcı adı ile kayıtlı olup telefon numarası rehberde yazılı olan gerçek kullanıcıların numarasını tamamla
+            let contactRows = [];
+            if (this.type === 'mysql') {
+                const [rows] = await this.mysqlPool.query('SELECT * FROM user_contacts');
+                contactRows = rows;
+            } else {
+                contactRows = this.sqliteDb.prepare('SELECT * FROM user_contacts').all();
+            }
+
+            for (const u of allUsers) {
+                if (isLikelyPhoneNumber(u.username)) continue;
+                if (!u.phone) {
+                    const matchedContact = contactRows.find(cr =>
+                        cr.phone &&
+                        normalizePhone(cr.phone).length >= 7 &&
+                        (cr.contact_key === u.userKey ||
+                         normalizeKey(cr.contact_username) === u.userKey ||
+                         (cr.custom_name && normalizeKey(cr.custom_name) === u.userKey))
+                    );
+                    if (matchedContact) {
+                        const foundPhone = normalizePhone(matchedContact.phone);
+                        await this.updateUserPhone(u.username, foundPhone);
+                        u.phone = foundPhone;
+                    }
+                }
+            }
+
+            // 2. Telefon numarası belli olan tüm gerçek kullanıcıları eski numara/placeholder kayıtlarıyla entegre et
+            const refreshedUsers = await this.getAllUsers();
+            for (const u of refreshedUsers) {
+                if (this.isPlaceholderAccount(u)) continue;
+                if (u.phone && normalizePhone(u.phone).length >= 7) {
+                    await this.integratePhoneWithUsername(u.phone, u.username);
+                }
+            }
+        } catch (e) {
+            console.error('[reconcileAllPhoneIntegrations] Hata:', e.message);
+        }
+    }
+
+    // Numaradan bulunan / rehbere kaydedilen ve mesaj gönderilen kullanıcı programa kayıt olduğunda numarası ile kullanıcı adını tek hesapta entegre eder
     async integratePhoneWithUsername(phoneStr, targetUsername, extraData = {}) {
         const cleanPhone = normalizePhone(phoneStr);
         const cleanTarget = (targetUsername || '').trim();
@@ -712,14 +884,13 @@ class DatabaseManager {
         const last10 = cleanPhone.length >= 10 ? cleanPhone.slice(-10) : cleanPhone;
         const allUsers = await this.getAllUsers();
 
-        // Bu telefon numarasına ait eski (placeholder veya başka) kayıtları bul
+        // Bu telefon numarasına ait eski (placeholder veya isimle kaydedilmiş geçici) kayıtları bul
         const phoneUsers = allUsers.filter(u => {
             if (u.userKey === targetKey) return false;
             const uPhone = normalizePhone(u.phone);
             const uNamePhone = isLikelyPhoneNumber(u.username) ? normalizePhone(u.username) : '';
             const m1 = uPhone && (uPhone === cleanPhone || (uPhone.length >= 10 && uPhone.slice(-10) === last10));
             const m2 = uNamePhone && (uNamePhone === cleanPhone || (uNamePhone.length >= 10 && uNamePhone.slice(-10) === last10));
-            // Eğer başka gerçek bir kullanıcı adı varsa ve sadece telefon numarası placeholder'ı arıyorsak placeholder olanları veya eşleşenleri al
             return m1 || m2;
         });
 
@@ -750,42 +921,70 @@ class DatabaseManager {
         if (phoneKey && phoneKey !== targetKey) {
             oldKeysToCleanup.add(phoneKey);
         }
+        if (last10 && last10 !== targetKey) {
+            oldKeysToCleanup.add(last10);
+        }
         for (const pu of phoneUsers) {
-            if (pu.userKey !== targetKey && isLikelyPhoneNumber(pu.username)) {
+            if (pu.userKey !== targetKey && (isLikelyPhoneNumber(pu.username) || this.isPlaceholderAccount(pu))) {
                 oldKeysToCleanup.add(pu.userKey);
                 oldUsernames.push(pu.username);
             }
         }
 
+        // Ayrıca user_contacts tablosunda bu telefon numarasıyla kayıtlı olan eski contact_key'leri de temizlik ve taşıma listesine ekle
+        try {
+            let allContactRows = [];
+            if (this.type === 'mysql') {
+                const [cRows] = await this.mysqlPool.query('SELECT * FROM user_contacts');
+                allContactRows = cRows;
+            } else {
+                allContactRows = this.sqliteDb.prepare('SELECT * FROM user_contacts').all();
+            }
+            for (const cr of allContactRows) {
+                const crPhone = normalizePhone(cr.phone || (isLikelyPhoneNumber(cr.contact_username) ? cr.contact_username : ''));
+                const crLast10 = crPhone.length >= 10 ? crPhone.slice(-10) : crPhone;
+                if (crLast10 && crLast10 === last10 && cr.contact_key && cr.contact_key !== targetKey) {
+                    oldKeysToCleanup.add(cr.contact_key);
+                    if (cr.contact_username && !oldUsernames.some(n => normalizeKey(n) === cr.contact_key)) {
+                        oldUsernames.push(cr.contact_username);
+                    }
+                }
+            }
+        } catch (e) {}
+
         let migratedMessagesCount = 0;
         const affectedPartners = new Set();
 
-        for (const oldKey of oldKeysToCleanup) {
-            if (!oldKey || oldKey === targetKey) continue;
-            if (!oldUsernames.some(n => normalizeKey(n) === oldKey)) {
-                oldUsernames.push(oldKey);
+        const matchesTargetPhone = (val) => {
+            if (!val) return false;
+            const k = normalizeKey(val);
+            if (oldKeysToCleanup.has(k)) return true;
+            if (isLikelyPhoneNumber(val)) {
+                const p = normalizePhone(val);
+                const p10 = p.length >= 10 ? p.slice(-10) : p;
+                if (p === cleanPhone || (p10 && p10 === last10)) return true;
             }
+            return false;
+        };
 
-            // 1. Mesajları eski numaradan yeni kullanıcı adına taşı (convo_key ve E2EE metinleriyle birlikte)
-            let msgRows = [];
+        // 1. Tüm mesajlarda eski numara veya placeholder adına ait kayıtları yeni kullanıcı adına taşı
+        try {
+            let allMsgRows = [];
             if (this.type === 'mysql') {
-                const [rows] = await this.mysqlPool.query(
-                    'SELECT * FROM messages WHERE LOWER(sender) = ? OR LOWER(recipient) = ? OR sender = ? OR recipient = ?',
-                    [oldKey, oldKey, cleanPhone, cleanPhone]
-                );
-                msgRows = rows;
+                const [rows] = await this.mysqlPool.query('SELECT * FROM messages');
+                allMsgRows = rows;
             } else {
-                msgRows = this.sqliteDb.prepare(
-                    'SELECT * FROM messages WHERE LOWER(sender) = ? OR LOWER(recipient) = ? OR sender = ? OR recipient = ?'
-                ).all(oldKey, oldKey, cleanPhone, cleanPhone);
+                allMsgRows = this.sqliteDb.prepare('SELECT * FROM messages').all();
             }
 
-            for (const row of msgRows) {
+            for (const row of allMsgRows) {
+                const senderMatches = matchesTargetPhone(row.sender);
+                const recipientMatches = matchesTargetPhone(row.recipient);
+                if (!senderMatches && !recipientMatches) continue;
+
                 const formatted = this.formatMessageRow(row);
-                const sKey = normalizeKey(row.sender);
-                const rKey = normalizeKey(row.recipient);
-                const newSender = (sKey === oldKey || normalizePhone(row.sender) === cleanPhone) ? cleanTarget : row.sender;
-                const newRecipient = (rKey === oldKey || normalizePhone(row.recipient) === cleanPhone) ? cleanTarget : row.recipient;
+                const newSender = senderMatches ? cleanTarget : row.sender;
+                const newRecipient = recipientMatches ? cleanTarget : row.recipient;
 
                 if (normalizeKey(newSender) === normalizeKey(newRecipient)) {
                     if (this.type === 'mysql') {
@@ -814,113 +1013,102 @@ class DatabaseManager {
                 }
                 migratedMessagesCount++;
             }
+        } catch (e) {}
 
-            // 1.1 messages.json dosyasındaki kayıtları ve convo_key'leri de senkronize güncelle
-            try {
-                if (fs.existsSync(messagesFile)) {
-                    const rawM = JSON.parse(fs.readFileSync(messagesFile, 'utf8') || '{}');
-                    let changedM = false;
-                    for (const ck of Object.keys(rawM)) {
-                        const mList = rawM[ck] || [];
-                        for (const m of mList) {
-                            const sKey = normalizeKey(m.sender);
-                            const rKey = normalizeKey(m.recipient);
-                            if (sKey === oldKey || normalizePhone(m.sender) === cleanPhone) {
-                                m.sender = cleanTarget;
-                                changedM = true;
-                            }
-                            if (rKey === oldKey || normalizePhone(m.recipient) === cleanPhone) {
-                                m.recipient = cleanTarget;
-                                changedM = true;
-                            }
+        // 1.1 messages.json dosyasındaki kayıtları ve convo_key'leri de senkronize güncelle
+        try {
+            if (fs.existsSync(messagesFile)) {
+                const rawM = JSON.parse(fs.readFileSync(messagesFile, 'utf8') || '{}');
+                let changedM = false;
+                for (const ck of Object.keys(rawM)) {
+                    const mList = rawM[ck] || [];
+                    let convoTouched = false;
+                    for (const m of mList) {
+                        if (matchesTargetPhone(m.sender)) {
+                            m.sender = cleanTarget;
+                            changedM = true;
+                            convoTouched = true;
                         }
-                        const otherPart = ck.split('___').find(p => normalizeKey(p) !== oldKey && normalizePhone(p) !== cleanPhone);
-                        if (otherPart && (ck.includes(oldKey) || ck.includes(cleanPhone))) {
+                        if (matchesTargetPhone(m.recipient)) {
+                            m.recipient = cleanTarget;
+                            changedM = true;
+                            convoTouched = true;
+                        }
+                    }
+                    const parts = ck.split('___');
+                    if (convoTouched || parts.some(p => matchesTargetPhone(p))) {
+                        const otherPart = parts.find(p => !matchesTargetPhone(p) && normalizeKey(p) !== targetKey);
+                        if (otherPart) {
                             const newCk = getConvoKey(cleanTarget, otherPart);
                             if (newCk !== ck) {
                                 if (!rawM[newCk]) rawM[newCk] = [];
-                                rawM[newCk].push(...mList);
+                                const existingIds = new Set(rawM[newCk].map(x => x.id));
+                                for (const item of mList) {
+                                    if (!existingIds.has(item.id)) rawM[newCk].push(item);
+                                }
+                                rawM[newCk].sort((a, b) => new Date(a.createdAt || 0) - new Date(b.createdAt || 0));
                                 delete rawM[ck];
                                 changedM = true;
                             }
                         }
                     }
-                    if (changedM) fs.writeFileSync(messagesFile, JSON.stringify(rawM, null, 2), 'utf8');
                 }
-            } catch (e) {}
+                if (changedM) fs.writeFileSync(messagesFile, JSON.stringify(rawM, null, 2), 'utf8');
+            }
+        } catch (e) {}
 
-            // 2. Kişisel rehber (user_contacts) kayıtlarını eski numaradan yeni kullanıcı adına taşı
-            try {
-                let contactRows = [];
-                if (this.type === 'mysql') {
-                    const [cRows] = await this.mysqlPool.query(
-                        'SELECT * FROM user_contacts WHERE owner_key = ? OR contact_key = ? OR phone = ?',
-                        [oldKey, oldKey, cleanPhone]
-                    );
-                    contactRows = cRows;
-                } else {
-                    contactRows = this.sqliteDb.prepare(
-                        'SELECT * FROM user_contacts WHERE owner_key = ? OR contact_key = ? OR phone = ?'
-                    ).all(oldKey, oldKey, cleanPhone);
-                }
+        // 2. Kişisel rehber (user_contacts) kayıtlarını eski numaradan / geçici isimden yeni kullanıcı adına taşı
+        try {
+            let contactRows = [];
+            if (this.type === 'mysql') {
+                const [cRows] = await this.mysqlPool.query('SELECT * FROM user_contacts');
+                contactRows = cRows;
+            } else {
+                contactRows = this.sqliteDb.prepare('SELECT * FROM user_contacts').all();
+            }
 
-                for (const cr of contactRows) {
-                    if (cr.owner_key === oldKey) {
+            for (const cr of contactRows) {
+                const ownerMatches = matchesTargetPhone(cr.owner_key);
+                const contactMatches = matchesTargetPhone(cr.contact_key) || matchesTargetPhone(cr.phone) || matchesTargetPhone(cr.contact_username);
+
+                if (ownerMatches) {
+                    if (cr.contact_key !== targetKey) {
+                        await this.addContactForUser(cleanTarget, cr.contact_username, cr.custom_name || '', cr.phone || '');
+                        affectedPartners.add(cr.contact_username);
+                    }
+                    if (this.type === 'mysql') {
+                        await this.mysqlPool.query('DELETE FROM user_contacts WHERE owner_key = ? AND contact_key = ?', [cr.owner_key, cr.contact_key]);
+                    } else {
+                        this.sqliteDb.prepare('DELETE FROM user_contacts WHERE owner_key = ? AND contact_key = ?').run(cr.owner_key, cr.contact_key);
+                    }
+                } else if (contactMatches) {
+                    if (cr.owner_key !== targetKey) {
+                        let customLabel = '';
+                        if (cr.custom_name && !isLikelyPhoneNumber(cr.custom_name) && normalizeKey(cr.custom_name) !== targetKey) {
+                            customLabel = cr.custom_name;
+                        } else if (cr.contact_username && !isLikelyPhoneNumber(cr.contact_username) && normalizeKey(cr.contact_username) !== targetKey) {
+                            customLabel = cr.contact_username;
+                        }
                         if (cr.contact_key !== targetKey) {
-                            await this.addContactForUser(cleanTarget, cr.contact_username, cr.custom_name || '', cr.phone || '');
-                            affectedPartners.add(cr.contact_username);
-                        }
-                        if (this.type === 'mysql') {
-                            await this.mysqlPool.query('DELETE FROM user_contacts WHERE owner_key = ? AND contact_key = ?', [oldKey, cr.contact_key]);
-                        } else {
-                            this.sqliteDb.prepare('DELETE FROM user_contacts WHERE owner_key = ? AND contact_key = ?').run(oldKey, cr.contact_key);
-                        }
-                    } else if (cr.contact_key === oldKey || normalizePhone(cr.phone) === cleanPhone) {
-                        if (cr.owner_key !== targetKey) {
-                            const customLabel = (cr.custom_name && !isLikelyPhoneNumber(cr.custom_name)) ? cr.custom_name : '';
-                            await this.addContactForUser(cr.owner_key, cleanTarget, customLabel, cleanPhone);
-                            await this.addContactForUser(cleanTarget, cr.owner_key, '', '');
-                            affectedPartners.add(cr.owner_key);
-                        }
-                        if (cr.contact_key === oldKey) {
                             if (this.type === 'mysql') {
-                                await this.mysqlPool.query('DELETE FROM user_contacts WHERE owner_key = ? AND contact_key = ?', [cr.owner_key, oldKey]);
+                                await this.mysqlPool.query('DELETE FROM user_contacts WHERE owner_key = ? AND contact_key = ?', [cr.owner_key, cr.contact_key]);
                             } else {
-                                this.sqliteDb.prepare('DELETE FROM user_contacts WHERE owner_key = ? AND contact_key = ?').run(cr.owner_key, oldKey);
+                                this.sqliteDb.prepare('DELETE FROM user_contacts WHERE owner_key = ? AND contact_key = ?').run(cr.owner_key, cr.contact_key);
                             }
                         }
+                        await this.addContactForUser(cr.owner_key, cleanTarget, customLabel, cleanPhone);
+                        await this.addContactForUser(cleanTarget, cr.owner_key, '', '');
+                        affectedPartners.add(cr.owner_key);
                     }
                 }
+            }
+        } catch (e) {}
 
-                // user_contacts.json dosyasını da güncelle
-                if (fs.existsSync(userContactsFile)) {
-                    const rawContacts = JSON.parse(fs.readFileSync(userContactsFile, 'utf8') || '{}');
-                    if (rawContacts[oldKey]) {
-                        if (!rawContacts[targetKey]) rawContacts[targetKey] = {};
-                        for (const [ck, cv] of Object.entries(rawContacts[oldKey])) {
-                            if (ck !== targetKey && !rawContacts[targetKey][ck]) {
-                                rawContacts[targetKey][ck] = cv;
-                            }
-                        }
-                        delete rawContacts[oldKey];
-                    }
-                    for (const ownerK of Object.keys(rawContacts)) {
-                        if (rawContacts[ownerK] && rawContacts[ownerK][oldKey]) {
-                            const oldEntry = rawContacts[ownerK][oldKey];
-                            delete rawContacts[ownerK][oldKey];
-                            if (ownerK !== targetKey) {
-                                rawContacts[ownerK][targetKey] = {
-                                    contactUsername: cleanTarget,
-                                    customName: (oldEntry.customName && !isLikelyPhoneNumber(oldEntry.customName)) ? oldEntry.customName : '',
-                                    phone: cleanPhone,
-                                    addedAt: oldEntry.addedAt || new Date().toISOString()
-                                };
-                            }
-                        }
-                    }
-                    fs.writeFileSync(userContactsFile, JSON.stringify(rawContacts, null, 2), 'utf8');
-                }
-            } catch (e) {}
+        for (const oldKey of oldKeysToCleanup) {
+            if (!oldKey || oldKey === targetKey) continue;
+            if (!oldUsernames.some(n => normalizeKey(n) === oldKey)) {
+                oldUsernames.push(oldKey);
+            }
 
             // 3. Oturumları (sessions) yeni kullanıcı adına taşı
             try {
@@ -942,7 +1130,7 @@ class DatabaseManager {
                 }
             } catch (e) {}
 
-            // 4. Eski telefon numarası placeholder kaydını sil (telefon numarasını deleted_users.json listesine ekleme ki numara tekrar eklenebilsin)
+            // 4. Eski telefon numarası placeholder kaydını sil
             unmarkUserDeletedInFile(oldKey);
             if (this.type === 'mysql') {
                 await this.mysqlPool.query('DELETE FROM users WHERE user_key = ?', [oldKey]);
@@ -959,6 +1147,28 @@ class DatabaseManager {
                 }
             } catch (e) {}
         }
+
+        // user_contacts.json içerisindeki eski anahtarları da temizle
+        try {
+            if (fs.existsSync(userContactsFile)) {
+                const rawContacts = JSON.parse(fs.readFileSync(userContactsFile, 'utf8') || '{}');
+                let changedC = false;
+                for (const oldKey of oldKeysToCleanup) {
+                    if (rawContacts[oldKey]) {
+                        delete rawContacts[oldKey];
+                        changedC = true;
+                    }
+                    for (const ownerK of Object.keys(rawContacts)) {
+                        if (ownerK.startsWith('_removed_')) continue;
+                        if (rawContacts[ownerK] && rawContacts[ownerK][oldKey]) {
+                            delete rawContacts[ownerK][oldKey];
+                            changedC = true;
+                        }
+                    }
+                }
+                if (changedC) fs.writeFileSync(userContactsFile, JSON.stringify(rawContacts, null, 2), 'utf8');
+            }
+        } catch (e) {}
 
         // Mesajlaşılan tüm kişilerle karşılıklı rehber kaydını garantiye al
         for (const partner of affectedPartners) {
@@ -1022,17 +1232,21 @@ class DatabaseManager {
             return { success: true, user: existing, isNew: false };
         }
 
-        const displayUsername = (customName && customName.trim().length >= 2 && (!exOwnerKey || normalizeKey(customName) !== exOwnerKey))
-            ? customName.trim()
-            : cleanPhone;
-
-        unmarkUserDeletedInFile(normalizeKey(displayUsername));
-        const byName = await this.getUser(displayUsername);
-        if (byName && (!exOwnerKey || byName.userKey !== exOwnerKey)) {
-            await this.updateUserPhone(byName.username, cleanPhone);
-            byName.phone = cleanPhone;
-            return { success: true, user: byName, isNew: false };
+        // Eğer girilen özel isim zaten sistemde kayıtlı gerçek bir kullanıcıya aitse numarasını o kullanıcıyla entegre et
+        if (customName && customName.trim().length >= 2 && (!exOwnerKey || normalizeKey(customName) !== exOwnerKey)) {
+            const byName = await this.getUser(customName.trim());
+            if (byName && (!exOwnerKey || byName.userKey !== exOwnerKey) && !byName.phone) {
+                await this.updateUserPhone(byName.username, cleanPhone);
+                await this.integratePhoneWithUsername(cleanPhone, byName.username);
+                const updatedByName = await this.getUser(byName.username);
+                return { success: true, user: updatedByName || byName, isNew: false };
+            }
         }
+
+        // Kullanıcı henüz programa kayıt olmadıysa users tablosunda telefon numarası ile placeholder aç (özel isim user_contacts'ta tutulur)
+        // Böylece kullanıcı kendi gerçek kullanıcı adıyla kayıt olduğunda numarasıyla %100 sorunsuz entegre olur!
+        const displayUsername = cleanPhone;
+        unmarkUserDeletedInFile(normalizeKey(displayUsername));
 
         const crypto = require('crypto');
         const salt = crypto.randomBytes(16).toString('hex');
@@ -1046,7 +1260,12 @@ class DatabaseManager {
             lastSeen: 'Offline',
             createdAt: new Date().toISOString()
         });
-        if (created) created._wasCreated = true;
+        if (created) {
+            created._wasCreated = true;
+            if (customName && customName.trim()) {
+                created.customName = customName.trim();
+            }
+        }
         return { success: true, user: created, isNew: true };
     }
 
@@ -1780,12 +1999,27 @@ class DatabaseManager {
     // ========================================================
     async addContactForUser(ownerUsername, contactUsername, customName = '', phone = '') {
         const ownerKey = normalizeKey(ownerUsername);
-        const contactKey = normalizeKey(contactUsername);
+        let effectiveContactUsername = String(contactUsername || '').trim();
+        let cName = String(customName || '').trim();
+        let cPhone = normalizePhone(phone || (isLikelyPhoneNumber(effectiveContactUsername) ? effectiveContactUsername : ''));
+
+        // Eğer telefon numarası sistemde kayıtlı gerçek bir kullanıcıya aitse otomatik o kullanıcı adıyla entegre kaydet!
+        if (cPhone && cPhone.length >= 7) {
+            try {
+                const registeredOwner = await this.findUserByPhone(cPhone);
+                if (registeredOwner && !isLikelyPhoneNumber(registeredOwner.username) && registeredOwner.userKey !== ownerKey) {
+                    if (!cName && effectiveContactUsername && !isLikelyPhoneNumber(effectiveContactUsername) && normalizeKey(effectiveContactUsername) !== registeredOwner.userKey) {
+                        cName = effectiveContactUsername;
+                    }
+                    effectiveContactUsername = registeredOwner.username;
+                }
+            } catch (e) {}
+        }
+
+        const contactKey = normalizeKey(effectiveContactUsername);
         if (!ownerKey || !contactKey || ownerKey === contactKey) return false;
 
         const now = new Date().toISOString();
-        const cName = String(customName || '').trim();
-        const cPhone = normalizePhone(phone || '');
 
         if (this.type === 'mysql') {
             await this.mysqlPool.query(
@@ -1795,7 +2029,7 @@ class DatabaseManager {
                      contact_username = VALUES(contact_username),
                      custom_name = IF(VALUES(custom_name) != '', VALUES(custom_name), custom_name),
                      phone = IF(VALUES(phone) != '', VALUES(phone), phone)`,
-                [ownerKey, contactKey, contactUsername.trim(), cName, cPhone, now]
+                [ownerKey, contactKey, effectiveContactUsername, cName, cPhone, now]
             );
         } else {
             this.sqliteDb.prepare(`
@@ -1805,7 +2039,7 @@ class DatabaseManager {
                     contact_username = excluded.contact_username,
                     custom_name = CASE WHEN excluded.custom_name != '' THEN excluded.custom_name ELSE user_contacts.custom_name END,
                     phone = CASE WHEN excluded.phone != '' THEN excluded.phone ELSE user_contacts.phone END
-            `).run(ownerKey, contactKey, contactUsername.trim(), cName, cPhone, now);
+            `).run(ownerKey, contactKey, effectiveContactUsername, cName, cPhone, now);
             this.checkpointSqlite();
         }
 
@@ -1822,7 +2056,7 @@ class DatabaseManager {
             }
             const prev = raw[ownerKey][contactKey] || {};
             raw[ownerKey][contactKey] = {
-                contactUsername: contactUsername.trim(),
+                contactUsername: effectiveContactUsername,
                 customName: cName || prev.customName || '',
                 phone: cPhone || prev.phone || '',
                 addedAt: prev.addedAt || now
@@ -1841,32 +2075,54 @@ class DatabaseManager {
 
         const results = [];
         for (const item of contacts) {
+            if (!item) continue;
             const rawPhone = item.phone || '';
             const cleanPhone = normalizePhone(rawPhone);
-            const rawName = String(item.name || '').trim();
-            if (!cleanPhone || cleanPhone.length < 7) continue;
+            const rawName = String(item.name || item.customName || item.username || '').trim();
 
-            unmarkUserDeletedInFile(normalizeKey(cleanPhone));
-            if (rawName) unmarkUserDeletedInFile(normalizeKey(rawName));
+            if (!cleanPhone && !rawName) continue;
 
-            // Sistemde kayıtlı kullanıcı var mı kontrol et
-            const existingUser = await this.findUserByPhone(cleanPhone);
-            const contactUsername = existingUser ? existingUser.username : (rawName || cleanPhone);
-            const contactKey = normalizeKey(contactUsername);
+            if (cleanPhone && cleanPhone.length >= 7) {
+                unmarkUserDeletedInFile(normalizeKey(cleanPhone));
+                if (rawName) unmarkUserDeletedInFile(normalizeKey(rawName));
 
-            if (contactKey && contactKey !== ownerKey) {
-                await this.addContactForUser(ownerUsername, contactUsername, rawName, cleanPhone);
-                results.push({
-                    username: contactUsername,
-                    customName: rawName || (existingUser ? existingUser.username : ''),
-                    phone: cleanPhone,
-                    avatar: (existingUser && existingUser.avatar) || '/avatars/default.svg',
-                    isRegistered: !!existingUser,
-                    isOnline: false
-                });
+                // Kullanıcıyı telefon numarasından bul veya placeholder oluştur ki sohbet listesinde ve aramalarda anında görünsün
+                const lookupRes = await this.findOrCreateUserByPhone(cleanPhone, rawName, ownerUsername);
+                const resolvedUser = (lookupRes && lookupRes.user) ? lookupRes.user : await this.findUserByPhone(cleanPhone);
+                const contactUsername = resolvedUser ? resolvedUser.username : cleanPhone;
+                const contactKey = normalizeKey(contactUsername);
+
+                if (contactKey && contactKey !== ownerKey) {
+                    await this.addContactForUser(ownerUsername, contactUsername, rawName, cleanPhone);
+                    results.push({
+                        username: contactUsername,
+                        customName: (rawName && !isLikelyPhoneNumber(rawName)) ? rawName : '',
+                        phone: cleanPhone,
+                        avatar: (resolvedUser && resolvedUser.avatar) || '/avatars/default.svg',
+                        isRegistered: Boolean(resolvedUser && !isLikelyPhoneNumber(resolvedUser.username)),
+                        isOnline: false
+                    });
+                }
+            } else if (rawName && rawName.length >= 2) {
+                unmarkUserDeletedInFile(normalizeKey(rawName));
+                const existingByName = await this.getUser(rawName);
+                const contactUsername = existingByName ? existingByName.username : rawName;
+                const contactKey = normalizeKey(contactUsername);
+                if (contactKey && contactKey !== ownerKey) {
+                    await this.addContactForUser(ownerUsername, contactUsername, rawName, (existingByName && existingByName.phone) || '');
+                    results.push({
+                        username: contactUsername,
+                        customName: rawName,
+                        phone: (existingByName && existingByName.phone) || '',
+                        avatar: (existingByName && existingByName.avatar) || '/avatars/default.svg',
+                        isRegistered: Boolean(existingByName),
+                        isOnline: false
+                    });
+                }
             }
         }
 
+        await this.exportDbToJson();
         return { success: true, count: results.length, contacts: results };
     }
 

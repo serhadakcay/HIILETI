@@ -1,5 +1,5 @@
 // MSJ Service Worker - Arka Plan Mesaj ve Arama Bildirimleri (WhatsApp / Signal / Telegram Tarzı Kalıcı Uyandırma)
-const CACHE_NAME = 'msj-cache-v22';
+const CACHE_NAME = 'msj-cache-v23';
 const SW_DB_NAME = 'msj_sw_state_db';
 const SW_STORE_NAME = 'sw_kv';
 
@@ -97,15 +97,19 @@ async function notifyAndWakeClients(item, targetUrl) {
 async function runSwPollCycle() {
     try {
         await ensureSwUserLoaded();
-        if (!swCurrentUser) return;
 
         const clientList = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
         const hasFocusedClient = clientList.some(c => c.focused && c.visibilityState === 'visible');
 
-        const url = `/api/system/notifications/poll?since=${swLastNotificationId}&user=${encodeURIComponent(swCurrentUser)}`;
+        const url = `/api/system/notifications/poll?since=${swLastNotificationId}&user=${encodeURIComponent(swCurrentUser || '')}`;
         const res = await fetch(url, { cache: 'no-store' });
         const data = await res.json();
         if (!data || !data.success) return;
+
+        if (!swCurrentUser && data.localPcUser) {
+            swCurrentUser = data.localPcUser;
+            await swSetKv('swCurrentUser', swCurrentUser);
+        }
 
         if (typeof data.lastId === 'number' && data.lastId < swLastNotificationId) {
             swLastNotificationId = 0;
@@ -113,7 +117,8 @@ async function runSwPollCycle() {
             return;
         }
 
-        const autoUserSuffix = `&autoUser=${encodeURIComponent(swCurrentUser)}`;
+        const effectiveUser = swCurrentUser || data.localPcUser || '';
+        const autoUserSuffix = effectiveUser ? `&autoUser=${encodeURIComponent(effectiveUser)}` : '';
 
         // 1. Bekleyen aktif arama varsa (uygulama kapalıyken gelen arama)
         if (Array.isArray(data.activeCalls) && data.activeCalls.length > 0 && !hasFocusedClient) {
@@ -163,14 +168,15 @@ async function runSwPollCycle() {
             for (const item of data.notifications) {
                 if (!item || !item.recipient) continue;
                 if (isFirstPoll && item.timestamp && (Date.now() - item.timestamp > 90000)) continue;
-                if (item.recipient.toLowerCase() !== swCurrentUser.toLowerCase()) continue;
-                if (item.sender && item.sender.toLowerCase() === swCurrentUser.toLowerCase()) continue;
+                if (swCurrentUser && item.recipient.toLowerCase() !== swCurrentUser.toLowerCase()) continue;
+                if (swCurrentUser && item.sender && item.sender.toLowerCase() === swCurrentUser.toLowerCase()) continue;
+                const itemAutoUserSuffix = `&autoUser=${encodeURIComponent(item.recipient || effectiveUser)}`;
 
                 if (item.type === 'call') {
                     const callKey = item.callId || (item.sender + '_' + item.id);
                     swSeenCallIds.add(callKey);
-                    const callUrl = `/?openChat=${encodeURIComponent(item.sender)}&incomingCall=1${autoUserSuffix}`;
-                    const acceptUrl = `/?openChat=${encodeURIComponent(item.sender)}&incomingCall=1&autoAcceptCall=1${autoUserSuffix}`;
+                    const callUrl = `/?openChat=${encodeURIComponent(item.sender)}&incomingCall=1${itemAutoUserSuffix}`;
+                    const acceptUrl = `/?openChat=${encodeURIComponent(item.sender)}&incomingCall=1&autoAcceptCall=1${itemAutoUserSuffix}`;
 
                     await notifyAndWakeClients(item, callUrl);
 
@@ -197,7 +203,7 @@ async function runSwPollCycle() {
                         });
                     }
                 } else if (item.type === 'message') {
-                    const msgUrl = `/?openChat=${encodeURIComponent(item.sender)}${autoUserSuffix}`;
+                    const msgUrl = `/?openChat=${encodeURIComponent(item.sender)}${itemAutoUserSuffix}`;
                     const previewText = (item.text && !String(item.text).startsWith('e2ee1:'))
                         ? item.text
                         : '🔒 Yeni bir mesajınız var';

@@ -1738,6 +1738,85 @@ async function quickLoginAsRegisteredUser(username) {
     return false;
 }
 
+let activeQrPairId = '';
+let pcQrPollTimer = null;
+
+function isLocalPcClient() {
+    const h = window.location.hostname;
+    return h === 'localhost' || h === '127.0.0.1' || h === '::1';
+}
+
+function applyMobilePairedSessionOnPc(userObj, tokenStr) {
+    if (!userObj || !userObj.username) return;
+    if (pcQrPollTimer) {
+        clearInterval(pcQrPollTimer);
+        pcQrPollTimer = null;
+    }
+    const effectiveToken = tokenStr || localStorage.getItem('msj_token') || 'qr_paired_session';
+    localStorage.setItem('msj_saved_username', userObj.username);
+    localStorage.setItem('msj_auto_login', 'true');
+    localStorage.setItem('msj_token', effectiveToken);
+    sessionStorage.setItem('msj_token', effectiveToken);
+    localStorage.setItem('msj_user', JSON.stringify(userObj));
+    savePermanentLocalUsers([userObj]);
+    if (authModal) authModal.style.display = 'none';
+    if (qrModal) qrModal.style.display = 'none';
+    onUserAuthenticated(userObj, effectiveToken);
+    showStatusToast(`📱✅ Cep telefonunuz (${userObj.username}) ile bilgisayar entegre olarak açıldı!`, true);
+}
+
+async function initPcQrPairingSection() {
+    const pcQrSection = document.getElementById('pcQrAuthSection');
+    const authQrImg = document.getElementById('authQrImage');
+    const authQrStatus = document.getElementById('authQrStatusText');
+    if (!pcQrSection || !authQrImg) return;
+
+    const isMobileScreen = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '') || window.innerWidth < 680;
+    if (isMobileScreen && !isLocalPcClient()) {
+        pcQrSection.style.display = 'none';
+        return;
+    }
+
+    pcQrSection.style.display = 'block';
+    try {
+        const res = await fetch('/api/info');
+        const info = await res.json();
+        if (info && info.qrCode) {
+            activeQrPairId = info.pairId || '';
+            authQrImg.src = info.qrCode;
+            if (authQrStatus) {
+                authQrStatus.textContent = '📲 Cep telefonunuzdan QR kodu okuttuğunuzda bilgisayar otomatik olarak telefon hesabınızla açılır.';
+            }
+        }
+    } catch (e) {}
+
+    if (pcQrPollTimer) clearInterval(pcQrPollTimer);
+    pcQrPollTimer = setInterval(async () => {
+        if (!authModal || authModal.style.display === 'none') {
+            clearInterval(pcQrPollTimer);
+            pcQrPollTimer = null;
+            return;
+        }
+        try {
+            const pRes = await fetch('/api/auth/qr_pair_status?pairId=' + encodeURIComponent(activeQrPairId || ''));
+            const pData = await pRes.json();
+            if (pData && pData.paired && pData.user) {
+                applyMobilePairedSessionOnPc(pData.user, pData.token);
+            }
+        } catch (e) {}
+    }, 2000);
+}
+
+socket.on('auth:qr_paired', (data) => {
+    if (!data || !data.user || !data.user.username) return;
+    const isMobileDevice = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '');
+    if (!isMobileDevice || isLocalPcClient()) {
+        if (!currentUser || normalizeKey(currentUser.username) !== normalizeKey(data.user.username) || (authModal && authModal.style.display !== 'none')) {
+            applyMobilePairedSessionOnPc(data.user, data.token);
+        }
+    }
+});
+
 async function initAuth() {
     // Eski ortak önbelleği ve yanlışlıkla silinenler listesine girmiş telefon numaralarını temizle
     try {
@@ -1762,8 +1841,13 @@ async function initAuth() {
 
     const urlParams = new URLSearchParams(window.location.search);
     const autoUserParam = urlParams.get('autoUser') || '';
+    const qrPairParam = urlParams.get('qrPair') || urlParams.get('pairId') || '';
+    if (qrPairParam) {
+        activeQrPairId = qrPairParam;
+        sessionStorage.setItem('msj_qr_pair_id', qrPairParam);
+    }
 
-    const token = localStorage.getItem('msj_token') || sessionStorage.getItem('msj_token');
+    let token = localStorage.getItem('msj_token') || sessionStorage.getItem('msj_token');
     const savedUserStr = localStorage.getItem('msj_user');
     let savedUsername = localStorage.getItem('msj_saved_username') || '';
     if (!savedUsername && savedUserStr) {
@@ -1779,30 +1863,38 @@ async function initAuth() {
         savedUsername = '';
     }
 
-    // Eğer bu cihaz yerel bilgisayar (localhost) ise ve önceki hatadan dolayı "ENER OSMAN AKÇAY" kalmışsa gerçek PC kullanıcısını yükle
-    if ((window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') && (!savedUsername || normalizeKey(savedUsername) === normalizeKey('ENER OSMAN AKÇAY'))) {
+    // Eğer URL'de autoUser parametresiyle (kapalıyken gelen mesaj veya arama için) uyandırılmışsa doğrudan o kullanıcıyla aç!
+    if (autoUserParam) {
+        const loggedIn = await quickLoginAsRegisteredUser(autoUserParam);
+        if (loggedIn) return;
+        savedUsername = autoUserParam;
+    }
+
+    // MADDE 4: Bilgisayardan açılırken ayrı kullanıcı olarak değil, QR kod okutulan cep telefonu ile entegreli açılmalı!
+    if (isLocalPcClient() && !autoUserParam) {
         try {
-            const pcRes = await fetch('/api/system/notifications/poll?since=0');
-            const pcData = await pcRes.json();
-            if (pcData && pcData.localPcUsername && normalizeKey(pcData.localPcUsername) !== normalizeKey('ENER OSMAN AKÇAY')) {
-                savedUsername = pcData.localPcUsername;
+            const pairRes = await fetch('/api/auth/qr_pair_status');
+            const pairData = await pairRes.json();
+            const targetMobileUser = (pairData && pairData.paired && pairData.user)
+                ? pairData.user
+                : (pairData && pairData.availablePcUser ? pairData.availablePcUser : null);
+            const targetMobileToken = (pairData && pairData.token) || (pairData && pairData.availableToken) || '';
+
+            if (targetMobileUser && targetMobileUser.username) {
+                savedUsername = targetMobileUser.username;
                 localStorage.setItem('msj_saved_username', savedUsername);
+                localStorage.setItem('msj_user', JSON.stringify(targetMobileUser));
+                if (targetMobileToken) {
+                    token = targetMobileToken;
+                    localStorage.setItem('msj_token', targetMobileToken);
+                    sessionStorage.setItem('msj_token', targetMobileToken);
+                }
             }
         } catch (e) {}
     }
 
-    if (!savedUsername && autoUserParam) {
-        savedUsername = autoUserParam;
-    }
-
     // Varsayılan olarak kayıtlı kullanıcı varsa otomatik girişi açık tut (Böylece mesaj/arama geldiğinde anında Online olur)
     const isAutoLogin = localStorage.getItem('msj_auto_login') !== 'false' || Boolean(autoUserParam);
-
-    // Eğer URL'de autoUser parametresiyle uyandırılmışsa ve cihazda başka bir kullanıcı kayıtlı değilse o kullanıcıyla giriş yap
-    if (autoUserParam && (!savedUsername || normalizeKey(savedUsername) === normalizeKey(autoUserParam))) {
-        const loggedIn = await quickLoginAsRegisteredUser(autoUserParam);
-        if (loggedIn) return;
-    }
 
     // 1. Eğer yerel hafızada kalıcı token varsa doğrudan giriş yapmayı dene
     if (token && isAutoLogin) {
@@ -1855,7 +1947,7 @@ async function initAuth() {
     // 3. Kullanıcı listesini yükle
     const userCount = await loadRegisteredUsersDropdown();
 
-    // 4. Otomatik giriş yapılmadıysa şifre veya kayıt modunu aç
+    // 4. Otomatik giriş yapılmadıysa şifre veya kayıt modunu aç (Bilgisayarda QR kod ile entegre açılış panelini de göster)
     if (userCount === 0 && !savedUsername) {
         showRegisterPrompt();
     } else {
@@ -1863,16 +1955,32 @@ async function initAuth() {
     }
 }
 
-// Numaradan bulunup davet/mesaj gönderilmiş bir kullanıcı programı kurduğunda telefon numarasını otomatik doldur
+// Numaradan bulunup davet/mesaj gönderilmiş bir kullanıcı programı kurduğunda telefon numarasını otomatik doldur ve seçilebilir göster
 async function autoFillPendingInvitedPhone() {
-    if (!inputPhone || (inputPhone.value && inputPhone.value.trim().length >= 7)) return;
+    if (!inputPhone) return;
+    const chipsBox = document.getElementById('pendingPhonesChipsBox');
     try {
         const res = await fetch('/api/users/pending_phones');
         const data = await res.json();
-        if (data && data.success && Array.isArray(data.pendingPhones) && data.pendingPhones.length === 1) {
+        if (data && data.success && Array.isArray(data.pendingPhones) && data.pendingPhones.length > 0) {
             if (!inputPhone.value || !inputPhone.value.trim()) {
                 inputPhone.value = data.pendingPhones[0].phone || '';
             }
+            if (chipsBox) {
+                chipsBox.style.display = 'block';
+                chipsBox.innerHTML = '📲 <strong>Davet edilen / kaydedilen numaranızı seçin:</strong> ' +
+                    data.pendingPhones.map(p =>
+                        `<button type="button" data-pick-phone="${escapeHtml(p.phone)}" style="margin:3px 4px 0 0;padding:3px 8px;border-radius:6px;border:1px solid #00a884;background:rgba(0,168,132,0.2);color:#25d366;font-size:11.5px;font-weight:700;cursor:pointer;">${escapeHtml(formatPhonePretty(p.phone))}</button>`
+                    ).join('');
+                chipsBox.querySelectorAll('[data-pick-phone]').forEach(btn => {
+                    btn.addEventListener('click', () => {
+                        inputPhone.value = btn.getAttribute('data-pick-phone') || '';
+                    });
+                });
+            }
+        } else if (chipsBox) {
+            chipsBox.style.display = 'none';
+            chipsBox.innerHTML = '';
         }
     } catch (e) {}
 }
@@ -1898,6 +2006,7 @@ function showRegisterPrompt() {
     inputConfirmPassword.value = '';
     if (inputPhone) inputPhone.value = '';
     autoFillPendingInvitedPhone();
+    initPcQrPairingSection();
     inputUsername.focus();
 }
 
@@ -1914,9 +2023,10 @@ function showPasswordPrompt(username) {
     btnToggleAuthMode.textContent = 'Hesabınız yok mu? Yeni Kullanıcı Aç';
 
     loadRegisteredUsersDropdown();
+    initPcQrPairingSection();
 
     if (username) {
-        authSubtitle.textContent = 'Kayıtlı hesabınıza giriş yapın veya listeden seçin';
+        authSubtitle.textContent = 'Kayıtlı hesabınıza giriş yapın veya cep telefonunuzdan QR okutun';
         rememberedUserBox.style.display = 'flex';
         rememberedName.textContent = username;
         rememberedAvatar.src = `/avatars/default.svg`;
@@ -2265,6 +2375,27 @@ function onUserAuthenticated(user, token) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ username: user.username })
         }).catch(() => {});
+    } else {
+        // Eğer cep telefonundan QR kod okutularak açılmışsa bilgisayarı anında bu cep telefonu hesabıyla entegre aç!
+        const pendingPairId = activeQrPairId || sessionStorage.getItem('msj_qr_pair_id') || '';
+        const isMobileDevice = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '');
+        if (pendingPairId || isMobileDevice) {
+            fetch('/api/auth/qr_pair_confirm', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    pairId: pendingPairId,
+                    username: user.username,
+                    phone: user.phone || '',
+                    token: token || ''
+                })
+            }).then(() => {
+                if (pendingPairId) {
+                    sessionStorage.removeItem('msj_qr_pair_id');
+                    showStatusToast(`📱✅ Bilgisayarınız cep telefonunuz (${user.username}) ile entegre edildi!`, true);
+                }
+            }).catch(() => {});
+        }
     }
 
     // Ses cihazlarını (Mikrofon & Hoparlör/Kulaklık) başlangıçta listele
@@ -4389,7 +4520,7 @@ function setupCallAudioMetersAndRelay() {
     }
 }
 
-// Karşı taraftan gelen WebRTC ses akışını hem <audio> elementine hem de Web Audio yükselticisine bağla
+// Karşı taraftan gelen WebRTC ses akışını hem <audio> elementine hem de Web Audio Dış Ses (Hoparlör) güçlendiricisine bağla
 function attachIncomingAudioStream(stream) {
     if (!stream) return;
 
@@ -4399,19 +4530,19 @@ function attachIncomingAudioStream(stream) {
             remoteAudio.srcObject = stream;
         }
         remoteAudio.muted = false;
-        remoteAudio.volume = 1.0;
+        remoteAudio.volume = isSpeakerphoneOn ? 1.0 : 0.45;
         if (selectedSpeakerDeviceId && selectedSpeakerDeviceId !== 'default' && typeof remoteAudio.setSinkId === 'function') {
             remoteAudio.setSinkId(selectedSpeakerDeviceId).catch(() => {});
         }
         remoteAudio.play().catch(e => console.warn('remoteAudio play uyarısı:', e));
     }
 
-    // 2. Web Audio API üzerinden de ses çıkışını destekle ve seviye göstergesine bağla
+    // 2. Web Audio API üzerinden Dış Ses (Hoparlör Güçlendirici + Compressor) hattını her zaman aktif bağla!
     try {
         const AudioCtx = window.AudioContext || window.webkitAudioContext;
         if (AudioCtx) {
             if (!callAudioContext || callAudioContext.state === 'closed') {
-                callAudioContext = new AudioCtx();
+                callAudioContext = new AudioCtx({ latencyHint: 'interactive' });
             }
             if (callAudioContext.state === 'suspended') {
                 callAudioContext.resume().catch(() => {});
@@ -4421,20 +4552,26 @@ function attachIncomingAudioStream(stream) {
             remoteAnalyser = callAudioContext.createAnalyser();
             remoteAnalyser.fftSize = 256;
 
+            const compressor = callAudioContext.createDynamicsCompressor();
+            compressor.threshold.value = -24;
+            compressor.knee.value = 18;
+            compressor.ratio.value = 4;
+            compressor.attack.value = 0.003;
+            compressor.release.value = 0.20;
+
             remoteGainNode = callAudioContext.createGain();
-            // Hoparlör modundaysa sesi ekstra güçlendir
-            remoteGainNode.gain.value = isSpeakerphoneOn ? (speakerGainBoost * 1.25) : speakerGainBoost;
+            // Sesi Dışarı Ver (Hoparlör) açıksa yüksek dış ses kazancı uygula; kapalıysa (Ahize modu) ek hoparlör kazancını kapat
+            remoteGainNode.gain.value = isSpeakerphoneOn ? Math.max(1.8, speakerGainBoost * 1.45) : 0.0;
 
             remSource.connect(remoteAnalyser);
-            // Eğer <audio> elementi tarayıcı politikası yüzünden sessiz kalırsa Web Audio doğrudan hoparlöre verir
-            if (remoteAudio && remoteAudio.paused) {
-                remSource.connect(remoteGainNode);
-                remoteGainNode.connect(callAudioContext.destination);
-            }
+            remSource.connect(compressor);
+            compressor.connect(remoteGainNode);
+            remoteGainNode.connect(callAudioContext.destination);
         }
     } catch (err) {
         console.warn('Gelen ses Web Audio bağlantısı uyarısı:', err);
     }
+    syncAllSpeakerToggleButtonsUI();
 }
 
 // Socket.IO üzerinden gelen yedek gerçek zamanlı ses paketlerini (PCM16) E2EE çözerek anında hoparlörden çal
@@ -4620,7 +4757,7 @@ if (rangeAudioBoost) {
         localStorage.setItem('msj_mic_gain', String(micGainBoost));
         if (lblAudioBoostValue) lblAudioBoostValue.textContent = `%${val}`;
         if (micGainNode) micGainNode.gain.value = micGainBoost;
-        if (remoteGainNode) remoteGainNode.gain.value = isSpeakerphoneOn ? (speakerGainBoost * 1.25) : speakerGainBoost;
+        if (remoteGainNode) remoteGainNode.gain.value = isSpeakerphoneOn ? Math.max(1.8, speakerGainBoost * 1.45) : 0.0;
     });
 }
 if (btnTestSpeakerSound) {
@@ -4631,23 +4768,163 @@ if (btnTestSpeakerSound) {
     });
 }
 
-// Hoparlör (Eller Serbest / Dış Ses) Aç-Kapat Butonu
-if (btnToggleSpeaker) {
-    btnToggleSpeaker.addEventListener('click', () => {
-        isSpeakerphoneOn = !isSpeakerphoneOn;
+// ==========================================================
+// MADDE 3: SESİ DIŞARI VERME (HOPARLÖR / ELLER SERBEST) ÖZELLİĞİ
+// ==========================================================
+const voiceMsgGainNodes = new WeakMap();
+
+function syncAllSpeakerToggleButtonsUI() {
+    if (btnToggleSpeaker) {
         btnToggleSpeaker.classList.toggle('active-speaker', isSpeakerphoneOn);
-        if (remoteGainNode) {
-            remoteGainNode.gain.value = isSpeakerphoneOn ? (speakerGainBoost * 1.35) : speakerGainBoost;
-        }
-        if (remoteAudio) {
-            remoteAudio.volume = isSpeakerphoneOn ? 1.0 : 0.85;
-            remoteAudio.muted = false;
-            remoteAudio.play().catch(() => {});
-        }
-        updateActiveDeviceLabelBadge();
-        showStatusToast(isSpeakerphoneOn ? '🔊 Hoparlör (Yüksek Ses) Aktif' : '🎧 Kulaklık / Ahize Modu Aktif', true);
-    });
+        btnToggleSpeaker.title = isSpeakerphoneOn
+            ? 'Sesi Dışarı Ver: AÇIK (Hoparlör Aktif)'
+            : 'Sesi Dışarı Ver: KAPALI (Ahize / Kulaklık Modu)';
+    }
+    const btnActiveBanner = document.getElementById('btnActiveSpeakerBanner');
+    const lblActiveBanner = document.getElementById('lblActiveSpeakerBannerText');
+    if (btnActiveBanner) {
+        btnActiveBanner.style.background = isSpeakerphoneOn ? 'rgba(0,168,132,0.28)' : 'rgba(255,255,255,0.08)';
+        btnActiveBanner.style.color = isSpeakerphoneOn ? '#25d366' : '#8696a0';
+        btnActiveBanner.style.borderColor = isSpeakerphoneOn ? '#00a884' : '#3b4a54';
+    }
+    if (lblActiveBanner) {
+        lblActiveBanner.textContent = isSpeakerphoneOn
+            ? 'Sesi Dışarı Ver (Hoparlör: AÇIK)'
+            : 'Sesi Dışarı Ver (Hoparlör: KAPALI / Ahize)';
+    }
+    const lblInc = document.getElementById('lblIncomingSpeakerText');
+    const btnInc = document.getElementById('btnIncomingSpeakerToggle');
+    if (lblInc) lblInc.textContent = isSpeakerphoneOn ? 'Dış Ses: Açık' : 'Dış Ses: Kapalı';
+    if (btnInc) btnInc.style.color = isSpeakerphoneOn ? '#25d366' : '#8696a0';
+
+    const lblOut = document.getElementById('lblOutgoingSpeakerText');
+    const btnOut = document.getElementById('btnOutgoingSpeakerToggle');
+    if (lblOut) lblOut.textContent = isSpeakerphoneOn ? 'Sesi Dışarı Ver: Açık' : 'Sesi Dışarı Ver: Kapalı';
+    if (btnOut) btnOut.style.color = isSpeakerphoneOn ? '#25d366' : '#8696a0';
+
+    const btnChatSpk = document.getElementById('btnChatSpeakerToggle');
+    const lblChatSpkIcon = document.getElementById('lblChatSpeakerIcon');
+    const lblChatSpkText = document.getElementById('lblChatSpeakerText');
+    if (btnChatSpk) {
+        btnChatSpk.style.background = isSpeakerphoneOn ? 'rgba(0,168,132,0.22)' : 'rgba(255,255,255,0.06)';
+        btnChatSpk.style.color = isSpeakerphoneOn ? '#25d366' : '#8696a0';
+        btnChatSpk.style.borderColor = isSpeakerphoneOn ? 'rgba(0,168,132,0.55)' : 'rgba(134,150,160,0.3)';
+    }
+    if (lblChatSpkIcon) lblChatSpkIcon.textContent = isSpeakerphoneOn ? '🔊' : '🔈';
+    if (lblChatSpkText) lblChatSpkText.textContent = isSpeakerphoneOn ? 'Dış Ses Açık' : 'Dış Ses Kapalı';
+
+    const btnHdrSpk = document.getElementById('btnHeaderSpeakerToggle');
+    const lblHdrSpkIcon = document.getElementById('lblHeaderSpeakerIcon');
+    const lblHdrSpkText = document.getElementById('lblHeaderSpeakerText');
+    if (btnHdrSpk) {
+        btnHdrSpk.style.background = isSpeakerphoneOn ? 'rgba(0,168,132,0.22)' : 'rgba(255,255,255,0.06)';
+        btnHdrSpk.style.color = isSpeakerphoneOn ? '#25d366' : '#8696a0';
+        btnHdrSpk.style.borderColor = isSpeakerphoneOn ? 'rgba(0,168,132,0.55)' : 'rgba(134,150,160,0.3)';
+    }
+    if (lblHdrSpkIcon) lblHdrSpkIcon.textContent = isSpeakerphoneOn ? '🔊' : '🔈';
+    if (lblHdrSpkText) lblHdrSpkText.textContent = isSpeakerphoneOn ? 'Dış Ses Açık' : 'Dış Ses Kapalı';
 }
+
+async function toggleExternalSpeakerphoneMode() {
+    isSpeakerphoneOn = !isSpeakerphoneOn;
+    localStorage.setItem('msj_speakerphone_on', isSpeakerphoneOn ? 'true' : 'false');
+    unlockAudio();
+
+    const ctx = getAudioCtx();
+    if (ctx && ctx.state === 'suspended') {
+        ctx.resume().catch(() => {});
+    }
+
+    if (remoteGainNode) {
+        remoteGainNode.gain.value = isSpeakerphoneOn ? Math.max(1.8, speakerGainBoost * 1.45) : 0.0;
+    }
+
+    // Uygun dış hoparlör veya ahize/kulaklık çıkış cihazını otomatik seç (setSinkId destekleyen tarayıcılarda)
+    if (Array.isArray(availableSpeakerDevices) && availableSpeakerDevices.length > 0) {
+        let targetDev = null;
+        if (isSpeakerphoneOn) {
+            targetDev = availableSpeakerDevices.find(d => /speaker|hoparlör|realtek|high definition|default/i.test(d.label || '') && !/headset|earpiece|kulaklık/i.test(d.label || ''))
+                || availableSpeakerDevices[0];
+        } else {
+            targetDev = availableSpeakerDevices.find(d => /headset|earpiece|kulaklık|communications/i.test(d.label || ''))
+                || availableSpeakerDevices[0];
+        }
+        if (targetDev && targetDev.deviceId) {
+            await applySpeakerOutputDevice(targetDev.deviceId).catch(() => {});
+        }
+    }
+
+    if (remoteAudio) {
+        remoteAudio.volume = isSpeakerphoneOn ? 1.0 : 0.45;
+        remoteAudio.muted = false;
+        if (remoteAudio.srcObject) remoteAudio.play().catch(() => {});
+    }
+    if (remoteVideo) {
+        remoteVideo.volume = isSpeakerphoneOn ? 1.0 : 0.45;
+    }
+
+    // Sohbet içindeki sesli mesajların (<audio>) ses seviyesini de dış ses moduna göre güncelle
+    document.querySelectorAll('#messagesContainer audio').forEach(aud => {
+        aud.volume = isSpeakerphoneOn ? 1.0 : 0.5;
+        const gNode = voiceMsgGainNodes.get(aud);
+        if (gNode) {
+            gNode.gain.value = isSpeakerphoneOn ? Math.max(1.8, speakerGainBoost * 1.4) : 0.85;
+        }
+    });
+
+    syncAllSpeakerToggleButtonsUI();
+    updateActiveDeviceLabelBadge();
+    showStatusToast(
+        isSpeakerphoneOn
+            ? '🔊 Sesi Dışarı Verme (Hoparlör / Yüksek Dış Ses) AÇILDI'
+            : '🔈 Sesi Dışarı Verme KAPATILDI (Ahize / Kulaklık Modu)',
+        true
+    );
+}
+
+[
+    btnToggleSpeaker,
+    document.getElementById('btnActiveSpeakerBanner'),
+    document.getElementById('btnIncomingSpeakerToggle'),
+    document.getElementById('btnOutgoingSpeakerToggle'),
+    document.getElementById('btnChatSpeakerToggle'),
+    document.getElementById('btnHeaderSpeakerToggle')
+].forEach(btn => {
+    if (btn) {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            toggleExternalSpeakerphoneMode();
+        });
+    }
+});
+
+// Sohbetteki sesli mesajlar (<audio>) çalındığında Sesi Dışarı Ver (Hoparlör) güçlendiricisine bağla
+document.addEventListener('play', (e) => {
+    const target = e.target;
+    if (!target || target.tagName !== 'AUDIO' || target.id === 'remoteAudio' || target.id === 'audioRingtone' || target.id === 'audioRingback') return;
+    try {
+        target.volume = isSpeakerphoneOn ? 1.0 : 0.5;
+        if (selectedSpeakerDeviceId && selectedSpeakerDeviceId !== 'default' && typeof target.setSinkId === 'function') {
+            target.setSinkId(selectedSpeakerDeviceId).catch(() => {});
+        }
+        if (!voiceMsgGainNodes.has(target)) {
+            const ctx = getAudioCtx();
+            if (ctx) {
+                const src = ctx.createMediaElementSource(target);
+                const gNode = ctx.createGain();
+                gNode.gain.value = isSpeakerphoneOn ? Math.max(1.8, speakerGainBoost * 1.4) : 0.85;
+                src.connect(gNode);
+                gNode.connect(ctx.destination);
+                voiceMsgGainNodes.set(target, gNode);
+            }
+        } else {
+            const gNode = voiceMsgGainNodes.get(target);
+            if (gNode) gNode.gain.value = isSpeakerphoneOn ? Math.max(1.8, speakerGainBoost * 1.4) : 0.85;
+        }
+    } catch (err) {}
+}, true);
+
+syncAllSpeakerToggleButtonsUI();
 
 btnVideoCall.addEventListener('click', () => initiateCall('video'));
 btnVoiceCall.addEventListener('click', () => initiateCall('voice'));
@@ -6121,6 +6398,8 @@ setInterval(async () => {
 (function setupPersonalPhoneContactsImport() {
     const menuItemImportContacts = document.getElementById('menuItemImportContacts');
     const btnImportPhoneContactsModal = document.getElementById('btnImportPhoneContactsModal');
+    const btnImportVcfContactsModal = document.getElementById('btnImportVcfContactsModal');
+    const btnLookupSaveContactOnly = document.getElementById('btnLookupSaveContactOnly');
     const btnAddFilter = document.getElementById('btnAddFilter');
     const vcfContactsFileInput = document.getElementById('vcfContactsFileInput');
 
@@ -6157,7 +6436,7 @@ setInterval(async () => {
                 (cName && normalizeKey(pb.customName || pb.username) === normalizeKey(cName))
             );
             const pbEntry = {
-                username: cName || cleanPhone,
+                username: cleanPhone,
                 customName: cName,
                 phone: cleanPhone,
                 avatar: '/avatars/default.svg'
@@ -6165,17 +6444,18 @@ setInterval(async () => {
             if (existingPbIdx >= 0) {
                 myPhoneBook[existingPbIdx] = { ...myPhoneBook[existingPbIdx], ...pbEntry };
             } else {
-                myPhoneBook.push(pbEntry);
+                myPhoneBook.unshift(pbEntry);
             }
 
             // Aktif contactsList içine ekle/güncelle
             let contactObj = contactsList.find(c =>
                 (c.phone && normalizePhoneClient(c.phone) === cleanPhone) ||
+                normalizeKey(c.username) === normalizeKey(cleanPhone) ||
                 (cName && normalizeKey(c.customName || c.username) === normalizeKey(cName))
             );
             if (!contactObj) {
                 contactObj = {
-                    username: cName || cleanPhone,
+                    username: cleanPhone,
                     customName: cName,
                     avatar: '/avatars/default.svg',
                     phone: cleanPhone,
@@ -6200,7 +6480,7 @@ setInterval(async () => {
         }
 
         if (validEntries.length === 0) {
-            showStatusToast('⚠️ Rehberde geçerli telefon numarası bulunamadı.', false);
+            showStatusToast('⚠️ Lütfen geçerli bir telefon numarası girin veya seçin.', false);
             return;
         }
 
@@ -6231,8 +6511,9 @@ setInterval(async () => {
                         data.contacts.forEach(srvC => {
                             const pNorm = normalizePhoneClient(srvC.phone);
                             const found = contactsList.find(c => normalizePhoneClient(c.phone) === pNorm);
-                            if (found && srvC.isRegistered) {
-                                found.username = srvC.username;
+                            if (found) {
+                                found.username = srvC.username || found.username;
+                                if (srvC.customName) found.customName = srvC.customName;
                                 if (srvC.avatar) found.avatar = srvC.avatar;
                                 if (srvC.isOnline) {
                                     found.isOnline = true;
@@ -6258,24 +6539,20 @@ setInterval(async () => {
                     });
                 } catch (e) {}
             }
+
+            await loadChatsList().catch(() => {});
         }
 
-        showStatusToast(`📒 ${validEntries.length} kişi telefon rehberinizden başarıyla aktarıldı!`, true);
+        showStatusToast(`📒 ${validEntries.length} kişi programa ve rehberinize başarıyla eklendi!`, true);
     }
 
     async function triggerDeviceContactsImport() {
         if (headerDropdown) headerDropdown.style.display = 'none';
 
-        // 1. Mobil Tarayıcı Native Contact Picker API (Android Chrome / Uyumlu Mobil Tarayıcılar)
+        // 1. Mobil Tarayıcı Native Contact Picker API (ÖNEMLİ: Kullanıcı dokunuşu kaybolmaması için öncesinde await KULLANILMAZ!)
         if ('contacts' in navigator && typeof navigator.contacts.select === 'function') {
             try {
-                let props = ['name', 'tel'];
-                if (typeof navigator.contacts.getProperties === 'function') {
-                    const supported = await navigator.contacts.getProperties();
-                    props = ['name', 'tel'].filter(p => supported.includes(p));
-                    if (props.length === 0) props = ['tel'];
-                }
-                const selected = await navigator.contacts.select(props, { multiple: true });
+                const selected = await navigator.contacts.select(['name', 'tel'], { multiple: true });
                 if (selected && selected.length > 0) {
                     const parsed = [];
                     selected.forEach(c => {
@@ -6303,25 +6580,48 @@ setInterval(async () => {
                         return;
                     }
                 }
+                return;
             } catch (err) {
                 if (err && (err.name === 'AbortError' || err.code === 20)) {
-                    return; // Kullanıcı geri veya iptal bastı, modal açma
+                    return;
                 }
-                console.warn('Native contact picker error, fallback açılıyor:', err);
+                console.warn('Native contact picker uyarısı, rehber ekleme ekranı açılıyor:', err);
             }
         }
 
-        // 2. Masaüstü veya Contact Picker desteklemeyen tarayıcılar (iOS Safari vb.) için Rehber (.vcf) dosyası veya hızlı numara girişi
-        const choice = confirm(
-            '📒 Telefon Rehberinden Kişi Aktarımı\n\n' +
-            '• Rehber yedeğinizi (.vcf / vCard dosyası) seçerek toplu aktarmak için "Tamam"a basın.\n' +
-            '• Tek tek numara veya isim eklemek için "İptal"e basın.'
-        );
-        if (choice && vcfContactsFileInput) {
-            vcfContactsFileInput.click();
-        } else {
-            openNewChatModal(true);
+        // 2. Eğer numara kutusuna zaten numara yazılmışsa doğrudan ekle; değilse Kişi Ekleme ekranını aç ve odakla
+        const typedPhone = inputLookupPhone ? inputLookupPhone.value.trim() : '';
+        const typedName = inputLookupCustomName ? inputLookupCustomName.value.trim() : '';
+        if (typedPhone && normalizePhoneClient(typedPhone).length >= 7) {
+            await processImportedPhoneEntries([{ name: typedName, phone: typedPhone }]);
+            if (inputLookupPhone) inputLookupPhone.value = '';
+            if (inputLookupCustomName) inputLookupCustomName.value = '';
+            return;
         }
+
+        openNewChatModal(true);
+        showStatusToast('📱 Eklemek istediğiniz kişinin telefon numarasını ve adını yazıp "➕ Rehbere Kaydet & Programa Ekle" butonuna dokunun', true);
+    }
+
+    if (btnLookupSaveContactOnly) {
+        btnLookupSaveContactOnly.addEventListener('click', async () => {
+            const rawP = inputLookupPhone ? inputLookupPhone.value.trim() : '';
+            const rawN = inputLookupCustomName ? inputLookupCustomName.value.trim() : '';
+            if (!rawP || normalizePhoneClient(rawP).length < 7) {
+                alert('Lütfen programa eklenecek kişinin telefon numarasını girin (Örn: 05XX XXX XX XX).');
+                if (inputLookupPhone) inputLookupPhone.focus();
+                return;
+            }
+            await processImportedPhoneEntries([{ name: rawN, phone: rawP }]);
+            if (inputLookupPhone) inputLookupPhone.value = '';
+            if (inputLookupCustomName) inputLookupCustomName.value = '';
+        });
+    }
+
+    if (btnImportVcfContactsModal && vcfContactsFileInput) {
+        btnImportVcfContactsModal.addEventListener('click', () => {
+            vcfContactsFileInput.click();
+        });
     }
 
     if (vcfContactsFileInput) {

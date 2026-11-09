@@ -180,15 +180,39 @@ function getEffectiveOnlineMap() {
     return map;
 }
 
-// Numaradan bulunan ve mesaj gönderilen kullanıcı programı kurduğunda numarası ile kullanıcı adını otomatik entegre eder
+// Numaradan bulunan / rehbere kaydedilen ve mesaj gönderilen kullanıcı programa kayıt olduğunda numarası ile kullanıcı adını otomatik entegre eder
 async function integrateUserWithPhoneIfApplicable(cleanUser, explicitPhone = '', extraData = {}) {
     if (!cleanUser || isLikelyPhoneNumber(cleanUser)) return null;
-    const targetPhone = explicitPhone ? normalizePhone(explicitPhone) : '';
+    let targetPhone = explicitPhone ? normalizePhone(explicitPhone) : '';
+
+    // Eğer kayıt/giriş sırasında telefon numarası boş bırakılmışsa:
+    // 1) Kullanıcının veritabanındaki mevcut numarasını veya rehberde bu isimle kaydedilmiş numarayı kontrol et
+    if (!targetPhone || targetPhone.length < 7) {
+        const currentObj = await db.getUser(cleanUser);
+        if (currentObj && currentObj.phone && normalizePhone(currentObj.phone).length >= 7) {
+            targetPhone = normalizePhone(currentObj.phone);
+        }
+    }
+    if (!targetPhone || targetPhone.length < 7) {
+        // 2) Eğer yeni kayıt oluyorsa ve sistemde davet gönderilmiş/kaydedilmiş tek bir bekleyen numara varsa otomatik o numarayla entegre et
+        if (extraData && extraData.isRegistration) {
+            const pendingList = await db.getUnclaimedPhoneUsers(cleanUser);
+            if (Array.isArray(pendingList) && pendingList.length === 1 && pendingList[0].phone) {
+                targetPhone = normalizePhone(pendingList[0].phone);
+            }
+        }
+    }
     if (!targetPhone || targetPhone.length < 7) return null;
 
-    // Eğer bu numara sistemde zaten başka bir gerçek kullanıcı adına kayıtlıysa yanlışlıkla o kullanıcının numarasını alma
+    // Eğer bu numara sistemde zaten başka bir gerçek (aktif oturumlu) kullanıcı adına kayıtlıysa yanlışlıkla o kullanıcının numarasını alma;
+    // ancak rehberden eklenmiş geçici bir placeholder kaydıysa entegrasyona izin ver!
     const existingPhoneOwner = await db.findUserByPhone(targetPhone);
-    if (existingPhoneOwner && !isLikelyPhoneNumber(existingPhoneOwner.username) && normalizeKey(existingPhoneOwner.username) !== normalizeKey(cleanUser)) {
+    if (
+        existingPhoneOwner &&
+        !isLikelyPhoneNumber(existingPhoneOwner.username) &&
+        !(typeof db.isPlaceholderAccount === 'function' && db.isPlaceholderAccount(existingPhoneOwner)) &&
+        normalizeKey(existingPhoneOwner.username) !== normalizeKey(cleanUser)
+    ) {
         return null;
     }
 
@@ -415,7 +439,8 @@ app.post('/api/auth/register', async (req, res) => {
                 salt,
                 hash,
                 avatar,
-                lastSeen: 'Online'
+                lastSeen: 'Online',
+                isRegistration: true
             });
             if (intRes && intRes.user) {
                 newUser = intRes.user;
@@ -427,6 +452,12 @@ app.post('/api/auth/register', async (req, res) => {
         await db.saveSession(token, finalUser.username);
 
         broadcastUserOnlineStatus(finalUser, true);
+
+        const pairId = (req.body && (req.body.pairId || req.body.qrPair)) || '';
+        const isMobileReq = Boolean(pairId) || /Android|iPhone|iPad|iPod|Mobile/i.test(req.headers['user-agent'] || '');
+        if (isMobileReq && typeof notifyPcOfMobilePairing === 'function') {
+            notifyPcOfMobilePairing(finalUser, token, pairId);
+        }
 
         if (typeof syncWithCloudServer === 'function') {
             syncWithCloudServer().catch(() => {});
@@ -473,7 +504,8 @@ app.post('/api/auth/login', async (req, res) => {
                         salt,
                         hash,
                         avatar,
-                        lastSeen: 'Online'
+                        lastSeen: 'Online',
+                        isRegistration: true
                     });
                     if (intRes && intRes.user) existing = intRes.user;
                 }
@@ -519,6 +551,12 @@ app.post('/api/auth/login', async (req, res) => {
         await db.saveSession(token, existing.username);
 
         broadcastUserOnlineStatus(existing, false);
+
+        const pairId = (req.body && (req.body.pairId || req.body.qrPair)) || '';
+        const isMobileReq = Boolean(pairId) || /Android|iPhone|iPad|iPod|Mobile/i.test(req.headers['user-agent'] || '');
+        if (isMobileReq && typeof notifyPcOfMobilePairing === 'function') {
+            notifyPcOfMobilePairing(existing, token, pairId);
+        }
 
         res.json({
             success: true,
@@ -602,11 +640,17 @@ app.post('/api/auth/auto_login', async (req, res) => {
         }
         markUserOnline(user.username);
 
+        const pairId = (req.body && (req.body.pairId || req.body.qrPair)) || '';
+        const isMobileReq = Boolean(pairId) || /Android|iPhone|iPad|iPod|Mobile/i.test(req.headers['user-agent'] || '');
+
         // Eğer mevcut bir token gönderilmişse ve geçerliyse
         if (token) {
             const session = await db.getSession(token);
             if (session && normalizeKey(session.username) === normalizeKey(user.username)) {
                 await db.updateSessionLastUsed(token);
+                if (isMobileReq && typeof notifyPcOfMobilePairing === 'function') {
+                    notifyPcOfMobilePairing(user, token, pairId);
+                }
                 return res.json({
                     success: true,
                     token,
@@ -618,6 +662,10 @@ app.post('/api/auth/auto_login', async (req, res) => {
         const lastSession = await db.getLastSessionForUser(user.username);
         const newToken = (lastSession && lastSession.token) ? lastSession.token : crypto.randomBytes(32).toString('hex');
         await db.saveSession(newToken, user.username);
+
+        if (isMobileReq && typeof notifyPcOfMobilePairing === 'function') {
+            notifyPcOfMobilePairing(user, newToken, pairId);
+        }
 
         res.json({
             success: true,
@@ -1630,29 +1678,85 @@ app.post('/api/tunnel/start', async (req, res) => {
 });
 
 // ==========================================
-// AĞ & BAĞLANTI BİLGİSİ
+// AĞ & BAĞLANTI BİLGİSİ + CEP TELEFONU QR KOD ENTEGRASYONU (WHATSAPP WEB TARZI)
 // ==========================================
 const HTTP_PORT = process.env.PORT || 3000;
 const HTTPS_PORT = 3443;
 const IS_CLOUD = !!process.env.PORT || process.env.NODE_ENV === 'production';
 
+// Bilgisayar ile QR okutan cep telefonu oturum eşleştirme deposu
+const qrPairSessions = new Map(); // pairId -> { pairId, createdAt, paired: boolean, user, token, pairedAt }
+let lastPairedMobileSession = null; // { user, token, pairedAt }
+
+function notifyPcOfMobilePairing(userObj, tokenStr, pairId = '') {
+    if (!userObj || !userObj.username || isLikelyPhoneNumber(userObj.username)) return;
+    const cleanUserPayload = {
+        username: userObj.username,
+        phone: userObj.phone || '',
+        avatar: userObj.avatar || '/avatars/default.svg'
+    };
+    const now = Date.now();
+    lastPairedMobileSession = {
+        user: cleanUserPayload,
+        token: tokenStr || '',
+        pairedAt: now
+    };
+    if (pairId) {
+        qrPairSessions.set(pairId, {
+            pairId,
+            createdAt: now,
+            paired: true,
+            user: cleanUserPayload,
+            token: tokenStr || '',
+            pairedAt: now
+        });
+    }
+    // Tüm bekleyen açık QR oturumlarını da bu cep telefonu kullanıcısıyla eşleştir
+    for (const [k, sess] of qrPairSessions.entries()) {
+        if (!sess.paired) {
+            sess.paired = true;
+            sess.user = cleanUserPayload;
+            sess.token = tokenStr || '';
+            sess.pairedAt = now;
+            qrPairSessions.set(k, sess);
+        }
+    }
+    setLocalPcUsername(cleanUserPayload.username);
+
+    if (globalIo) {
+        globalIo.emit('auth:qr_paired', {
+            pairId: pairId || '',
+            user: cleanUserPayload,
+            token: tokenStr || '',
+            pairedAt: now
+        });
+    }
+}
+
 app.get('/api/info', async (req, res) => {
     try {
         const localIps = getLocalIpAddresses();
         const primaryIp = getPrimaryIp();
+        const pairId = (req.query.pairId || req.query.qrPair || ('qr_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8))).trim();
+
+        if (!qrPairSessions.has(pairId)) {
+            qrPairSessions.set(pairId, { pairId, createdAt: Date.now(), paired: false, user: null, token: '' });
+        }
 
         const isCloudHost = req.headers['x-forwarded-proto'] || (req.headers.host && !req.headers.host.includes('localhost') && !req.headers.host.match(/^[0-9.:]+$/));
         const cloudUrl = isCloudHost ? `${req.headers['x-forwarded-proto'] || 'https'}://${req.headers.host}` : null;
 
-        const httpsUrl = cloudUrl || `https://${primaryIp}:${HTTPS_PORT}`;
-        const httpUrl = cloudUrl || `http://${primaryIp}:${HTTP_PORT}`;
+        const baseHttpsUrl = cloudUrl || `https://${primaryIp}:${HTTPS_PORT}`;
+        const baseHttpUrl = cloudUrl || `http://${primaryIp}:${HTTP_PORT}`;
+        const httpsUrlWithPair = `${baseHttpsUrl}/?qrPair=${encodeURIComponent(pairId)}`;
 
-        const qrDataUrl = await qrcode.toDataURL(httpsUrl);
+        const qrDataUrl = await qrcode.toDataURL(httpsUrlWithPair);
 
         let tunnelQr = null;
-        if (currentTunnelUrl) {
+        let tunnelUrlWithPair = currentTunnelUrl ? `${currentTunnelUrl}/?qrPair=${encodeURIComponent(pairId)}` : null;
+        if (tunnelUrlWithPair) {
             try {
-                tunnelQr = await qrcode.toDataURL(currentTunnelUrl);
+                tunnelQr = await qrcode.toDataURL(tunnelUrlWithPair);
             } catch (e) {}
         }
 
@@ -1661,15 +1765,117 @@ app.get('/api/info', async (req, res) => {
             allIps: localIps,
             httpPort: HTTP_PORT,
             httpsPort: HTTPS_PORT,
-            httpUrl,
-            httpsUrl,
+            httpUrl: baseHttpUrl,
+            httpsUrl: baseHttpsUrl,
+            qrPairUrl: httpsUrlWithPair,
+            pairId,
             qrCode: qrDataUrl,
             tunnelUrl: currentTunnelUrl,
+            tunnelPairUrl: tunnelUrlWithPair,
             tunnelQrCode: tunnelQr,
-            isCloud: !!cloudUrl || IS_CLOUD
+            isCloud: !!cloudUrl || IS_CLOUD,
+            localPcUsername: localPcUsername || '',
+            lastPairedMobileSession
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
+    }
+});
+
+// Cep telefonu QR kodu okuttuğunda bilgisayar ekranını cep telefonundaki kullanıcıyla anında entegre açan API
+app.post('/api/auth/qr_pair_confirm', async (req, res) => {
+    try {
+        const { pairId, username, phone, token } = req.body || {};
+        if (!username || String(username).trim().length < 2) {
+            return res.status(400).json({ success: false, error: 'Cep telefonunda aktif kullanıcı adı gerekli' });
+        }
+        const cleanUser = String(username).trim();
+        const cleanPhone = phone ? normalizePhone(phone) : '';
+        let user = await db.getUser(cleanUser);
+        if (!user) {
+            user = await db.ensureUserExists(cleanUser, '/avatars/default.svg', { phone: cleanPhone });
+        }
+        if (cleanPhone && !isLikelyPhoneNumber(user.username)) {
+            const intRes = await integrateUserWithPhoneIfApplicable(user.username, cleanPhone);
+            if (intRes && intRes.user) user = intRes.user;
+        }
+
+        let effectiveToken = token || '';
+        if (effectiveToken) {
+            const sess = await db.getSession(effectiveToken);
+            if (!sess || normalizeKey(sess.username) !== normalizeKey(user.username)) {
+                await db.saveSession(effectiveToken, user.username);
+            }
+        } else {
+            const lastSess = await db.getLastSessionForUser(user.username);
+            effectiveToken = (lastSess && lastSess.token) ? lastSess.token : crypto.randomBytes(32).toString('hex');
+            await db.saveSession(effectiveToken, user.username);
+        }
+
+        broadcastUserOnlineStatus(user, false);
+        notifyPcOfMobilePairing(user, effectiveToken, pairId || '');
+
+        res.json({
+            success: true,
+            pairId: pairId || '',
+            token: effectiveToken,
+            user: {
+                username: user.username,
+                phone: user.phone || cleanPhone || '',
+                avatar: user.avatar || '/avatars/default.svg'
+            }
+        });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+app.get('/api/auth/qr_pair_status', async (req, res) => {
+    try {
+        const pairId = (req.query.pairId || req.query.qrPair || '').trim();
+        if (pairId && qrPairSessions.has(pairId)) {
+            const sess = qrPairSessions.get(pairId);
+            if (sess && sess.paired && sess.user) {
+                return res.json({
+                    success: true,
+                    paired: true,
+                    pairId,
+                    user: sess.user,
+                    token: sess.token
+                });
+            }
+        }
+        if (lastPairedMobileSession && lastPairedMobileSession.user && (Date.now() - lastPairedMobileSession.pairedAt < 10 * 60 * 1000)) {
+            return res.json({
+                success: true,
+                paired: true,
+                pairId: pairId || 'recent',
+                user: lastPairedMobileSession.user,
+                token: lastPairedMobileSession.token
+            });
+        }
+        // Eğer cep telefonundan yakın zamanda giriş yapılmış bir oturum varsa onu da döndür
+        if (localPcUsername && !isLikelyPhoneNumber(localPcUsername)) {
+            const u = await db.getUser(localPcUsername);
+            if (u) {
+                const lastSess = await db.getLastSessionForUser(u.username);
+                if (lastSess && lastSess.token) {
+                    return res.json({
+                        success: true,
+                        paired: false,
+                        availablePcUser: {
+                            username: u.username,
+                            phone: u.phone || '',
+                            avatar: u.avatar || '/avatars/default.svg'
+                        },
+                        availableToken: lastSess.token
+                    });
+                }
+            }
+        }
+        res.json({ success: true, paired: false });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
     }
 });
 
@@ -1832,31 +2038,36 @@ function autoOpenDesktopWindowIfClosed(entry) {
     const sndKey = normalizeKey(entry.sender);
     if (!recKey || !sndKey || recKey === sndKey) return;
 
-    // Yalnızca bu bilgisayarda oturum açmış olan gerçek PC kullanıcısına gelen mesaj/aramalar için pencereyi aç!
-    // Başka kullanıcılara (ör. telefondan eklenen başka bir kişiye) yapılan aramalar bilgisayarı ASLA açmaz!
-    if (!localPcUsername || normalizeKey(localPcUsername) !== recKey) {
-        return;
-    }
-
     // Alıcı zaten tarayıcıda çevrimiçiyse yeni pencere açmaya gerek yok (soket üzerinden anında ekrana düşer)
     if (onlineUserSockets.has(recKey) && onlineUserSockets.get(recKey).size > 0) {
         return;
     }
 
+    // Eğer gönderen kişi şu an bu bilgisayarda açık olan pencerede aktifse kendi gönderdiği mesaj için pencere açma
+    const pcKey = localPcUsername ? normalizeKey(localPcUsername) : '';
+    const isPcUserCurrentlyOpen = pcKey && onlineUserSockets.has(pcKey) && onlineUserSockets.get(pcKey).size > 0;
+    if (isPcUserCurrentlyOpen && pcKey !== recKey) {
+        return;
+    }
+
     // MSJ.exe arka plan tepsi servisi aktifse 1.5 saniye içinde pencereyi ve bildirim kartını kendisi açar;
     // eğer MSJ.exe çalışmıyorsa veya 1.8 saniye içinde pencere hala açılmadıysa doğrudan node sunucusu pencereyi açar!
-    const delayMs = (Date.now() - lastDesktopTrayPollTime < 2500) ? 2200 : 400;
+    const delayMs = (Date.now() - lastDesktopTrayPollTime < 2500) ? 2000 : 350;
     setTimeout(async () => {
         try {
             if (onlineUserSockets.has(recKey) && onlineUserSockets.get(recKey).size > 0) return;
             if (await db.isUserBlocked(entry.recipient, entry.sender)) return;
 
             const now = Date.now();
-            if (now - lastAutoLaunchedWindowAt < 4500 && entry.type !== 'call') return;
+            if (now - lastAutoLaunchedWindowAt < 4000 && entry.type !== 'call') return;
             lastAutoLaunchedWindowAt = now;
 
+            if (!isLikelyPhoneNumber(entry.recipient)) {
+                setLocalPcUsername(entry.recipient);
+            }
+
             const isCall = entry.type === 'call';
-            const targetUrl = `http://localhost:${HTTP_PORT}/?openChat=${encodeURIComponent(entry.sender)}${isCall ? '&incomingCall=1' : ''}`;
+            const targetUrl = `http://localhost:${HTTP_PORT}/?openChat=${encodeURIComponent(entry.sender)}${isCall ? '&incomingCall=1' : ''}&autoUser=${encodeURIComponent(entry.recipient)}`;
             const browserExe = findWindowsDesktopBrowserPath();
             const userDataDir = path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'MSJ', 'AppData');
             const { spawn } = require('child_process');
@@ -1989,13 +2200,19 @@ app.get('/api/system/notifications/poll', (req, res) => {
     let newItems = [];
     if (isBridge) {
         newItems = systemNotificationsQueue.filter(n => n.id > since);
-    } else if (forUserKey) {
+    } else if (forUserKey || isDesktopTrayPoll) {
         newItems = systemNotificationsQueue
             .filter(n => {
                 if (n.id <= since || !n.recipient) return false;
                 const recKey = normalizeKey(n.recipient);
                 const sndKey = normalizeKey(n.sender);
-                return recKey === forUserKey && sndKey !== forUserKey;
+                if (!recKey || recKey === sndKey) return false;
+                if (forUserKey && recKey === forUserKey) return true;
+                // Eğer program penceresi kapalıysa (!isLocalUserOnline) ve masaüstü tepsi uygulaması soruyorsa gelen mesaj/aramayı kaçırma!
+                if (isDesktopTrayPoll && !isLocalUserOnline && (!forUserKey || sndKey !== forUserKey)) {
+                    return true;
+                }
+                return false;
             })
             .map(n => ({
                 ...n,
@@ -2004,11 +2221,15 @@ app.get('/api/system/notifications/poll', (req, res) => {
     }
 
     const activeCalls = [];
-    if (isBridge || forUserKey) {
+    if (isBridge || forUserKey || isDesktopTrayPoll) {
         for (const [, callObj] of pendingCalls.entries()) {
+            if (!callObj || !callObj.recipient) continue;
+            const recKey = normalizeKey(callObj.recipient);
+            const callerKey = normalizeKey(callObj.callerUsername);
             if (
                 isBridge ||
-                (forUserKey && callObj.recipient && normalizeKey(callObj.recipient) === forUserKey && normalizeKey(callObj.callerUsername) !== forUserKey)
+                (forUserKey && recKey === forUserKey && callerKey !== forUserKey) ||
+                (isDesktopTrayPoll && !isLocalUserOnline && (!forUserKey || callerKey !== forUserKey))
             ) {
                 activeCalls.push(callObj);
             }
