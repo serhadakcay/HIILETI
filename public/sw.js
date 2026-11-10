@@ -1,5 +1,5 @@
 // MSJ Service Worker - Arka Plan Mesaj ve Arama Bildirimleri (WhatsApp / Signal / Telegram Tarzı Kalıcı Uyandırma)
-const CACHE_NAME = 'msj-cache-v23';
+const CACHE_NAME = 'msj-cache-v24';
 const SW_DB_NAME = 'msj_sw_state_db';
 const SW_STORE_NAME = 'sw_kv';
 

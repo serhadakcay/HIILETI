@@ -2,14 +2,35 @@
 // HIHABERLEŞME WEB / MOBILE SPA - CLIENT LOGIC
 // ==========================================================
 
+// Sürüm 24 Temiz Kurulum & Silinen Kullanıcıların Geri Gelmesini Engelleme Epoch Kontrolü
+const CLIENT_RESET_EPOCH = 'msj_clean_v24';
+(function enforceCleanClientEpoch() {
+    try {
+        if (localStorage.getItem('msj_reset_epoch') !== CLIENT_RESET_EPOCH) {
+            const keysToClear = [];
+            for (let i = 0; i < localStorage.length; i++) {
+                const k = localStorage.key(i);
+                if (k && k.startsWith('msj_') && k !== 'msj_bg_settings') {
+                    keysToClear.push(k);
+                }
+            }
+            keysToClear.forEach(k => localStorage.removeItem(k));
+            sessionStorage.removeItem('msj_token');
+            sessionStorage.removeItem('msj_qr_pair_id');
+            localStorage.setItem('msj_reset_epoch', CLIENT_RESET_EPOCH);
+        }
+    } catch (e) {}
+})();
+
 const socket = io();
+const liveOnlineUsersMap = new Map(); // normalizedKey -> { username, phone, avatar, isOnline: true, updatedAt }
 
 // Soket bağlantısı kurulduğunda veya koptuktan sonra yeniden bağlandığında aktif kullanıcının oturumunu geri yükle
 socket.on('connect', () => {
     console.log('[HIHaberleşme Socket] Bağlandı:', socket.id);
     if (currentUser && currentUser.username) {
         const token = sessionStorage.getItem('msj_token') || localStorage.getItem('msj_token');
-        socket.emit('user:join', { token, username: currentUser.username });
+        socket.emit('user:join', { token, username: currentUser.username, phone: currentUser.phone || '' });
     }
 });
 
@@ -1196,24 +1217,39 @@ function isMessageForCurrentUserAndContact(msg, contactKey) {
 
 function getPersonalPhoneBookForCurrentUser() {
     const uName = (currentUser && currentUser.username) || localStorage.getItem('msj_saved_username') || '';
-    if (!uName) return [];
+    const merged = [];
+    const seen = new Set();
+    const pushList = (arr) => {
+        if (!Array.isArray(arr)) return;
+        arr.forEach(item => {
+            if (!item || (!item.username && !item.phone && !item.customName)) return;
+            const k = normalizeKey(item.phone || item.username || item.customName);
+            if (!k || seen.has(k)) return;
+            seen.add(k);
+            merged.push(item);
+        });
+    };
     try {
-        const key = 'msj_phone_book_' + normalizeKey(uName);
-        const raw = localStorage.getItem(key);
-        if (raw) {
-            const parsed = JSON.parse(raw);
-            if (Array.isArray(parsed)) return parsed;
+        if (uName) {
+            const key = 'msj_phone_book_' + normalizeKey(uName);
+            const raw = localStorage.getItem(key);
+            if (raw) pushList(JSON.parse(raw));
         }
+        const devRaw = localStorage.getItem('msj_device_phone_book');
+        if (devRaw) pushList(JSON.parse(devRaw));
     } catch (e) {}
-    return [];
+    return merged;
 }
 
 function savePersonalPhoneBookForCurrentUser(list) {
+    if (!Array.isArray(list)) return;
     const uName = (currentUser && currentUser.username) || localStorage.getItem('msj_saved_username') || '';
-    if (!uName || !Array.isArray(list)) return;
     try {
-        const key = 'msj_phone_book_' + normalizeKey(uName);
-        localStorage.setItem(key, JSON.stringify(list));
+        if (uName) {
+            const key = 'msj_phone_book_' + normalizeKey(uName);
+            localStorage.setItem(key, JSON.stringify(list));
+        }
+        localStorage.setItem('msj_device_phone_book', JSON.stringify(list));
     } catch (e) {}
 }
 
@@ -1357,7 +1393,9 @@ function mergeContactsWithPermanentUsers(serverChats) {
         serverChats.forEach(c => {
             if (!c || !c.username) return;
             const k = normalizeKey(c.username);
-            if (k && k !== effectiveMyKey && !deletedSet.has(k)) {
+            const liveOnline = liveOnlineUsersMap.get(k);
+            const isOnlineNow = Boolean(c.isOnline || (liveOnline && liveOnline.isOnline));
+            if (k && k !== effectiveMyKey && (!deletedSet.has(k) || isOnlineNow || c.phone)) {
                 const validMsg = isMessageForCurrentUserAndContact(c.lastMessage, k) ? c.lastMessage : null;
                 const pKey = getPhoneMatchKeyClient(c.phone || (isPhoneQueryClient(c.username) ? c.username : ''));
                 // Eğer aynı telefon numarasına sahip hem numara kaydı hem gerçek kullanıcı adı varsa gerçek kullanıcı adını tut
@@ -1379,6 +1417,9 @@ function mergeContactsWithPermanentUsers(serverChats) {
 
                 map.set(k, {
                     ...c,
+                    isOnline: isOnlineNow,
+                    statusText: isOnlineNow ? 'Online' : (c.statusText || 'Offline'),
+                    lastSeen: isOnlineNow ? 'Online' : (c.lastSeen || 'Offline'),
                     lastMessage: validMsg,
                     unreadCount: myKey ? (Number(c.unreadCount) || 0) : 0
                 });
@@ -1413,16 +1454,18 @@ function mergeContactsWithPermanentUsers(serverChats) {
                         }
                         return;
                     }
-                    if (k && k !== effectiveMyKey && !deletedSet.has(k) && !map.has(k)) {
+                    const liveOnline = liveOnlineUsersMap.get(k);
+                    const isOnlineNow = Boolean(liveOnline && liveOnline.isOnline);
+                    if (k && k !== effectiveMyKey && !map.has(k)) {
                         if (pKey) phoneKeyToUserKey.set(pKey, k);
                         map.set(k, {
                             username: c.username,
                             customName: c.customName || '',
                             avatar: c.avatar || '/avatars/default.svg',
                             phone: c.phone || '',
-                            isOnline: false,
-                            statusText: 'Offline',
-                            lastSeen: 'Offline',
+                            isOnline: isOnlineNow,
+                            statusText: isOnlineNow ? 'Online' : 'Offline',
+                            lastSeen: isOnlineNow ? 'Online' : 'Offline',
                             lastMessage: null,
                             unreadCount: 0
                         });
@@ -1447,18 +1490,20 @@ function mergeContactsWithPermanentUsers(serverChats) {
                         }
                         return;
                     }
+                    const liveOnline = liveOnlineUsersMap.get(k);
+                    const isOnlineNow = Boolean(liveOnline && liveOnline.isOnline);
                     const validMsg = isMessageForCurrentUserAndContact(c.lastMessage, k) ? c.lastMessage : null;
-                    const hasPhoneOrMsg = Boolean(validMsg || c.phone || c.customName);
-                    if (k && k !== effectiveMyKey && !deletedSet.has(k) && !map.has(k) && hasPhoneOrMsg) {
+                    const hasPhoneOrMsg = Boolean(validMsg || c.phone || c.customName || isOnlineNow);
+                    if (k && k !== effectiveMyKey && (!deletedSet.has(k) || isOnlineNow) && !map.has(k) && hasPhoneOrMsg) {
                         if (pKey) phoneKeyToUserKey.set(pKey, k);
                         map.set(k, {
                             username: c.username,
                             customName: c.customName || '',
                             avatar: c.avatar || '/avatars/default.svg',
                             phone: c.phone || '',
-                            isOnline: false,
-                            statusText: 'Offline',
-                            lastSeen: c.lastSeen || 'Offline',
+                            isOnline: isOnlineNow,
+                            statusText: isOnlineNow ? 'Online' : 'Offline',
+                            lastSeen: isOnlineNow ? 'Online' : (c.lastSeen || 'Offline'),
                             lastMessage: validMsg,
                             unreadCount: validMsg ? (Number(c.unreadCount) || 0) : 0
                         });
@@ -1468,6 +1513,32 @@ function mergeContactsWithPermanentUsers(serverChats) {
         } catch (e) {}
     }
 
+    // 3. Canlı soket üzerinden Online olan (ve üstte Online bildirimi veren) tüm kullanıcıların Online ekranına kesin olarak düşmesini sağla!
+    liveOnlineUsersMap.forEach((liveInfo, k) => {
+        if (!liveInfo || !liveInfo.isOnline || !liveInfo.username) return;
+        if (k === effectiveMyKey) return;
+        if (map.has(k)) {
+            const item = map.get(k);
+            item.isOnline = true;
+            item.statusText = 'Online';
+            item.lastSeen = 'Online';
+            if (liveInfo.phone && !item.phone) item.phone = liveInfo.phone;
+            if (liveInfo.avatar && (!item.avatar || item.avatar === '/avatars/default.svg')) item.avatar = liveInfo.avatar;
+        } else {
+            map.set(k, {
+                username: liveInfo.username,
+                customName: '',
+                avatar: liveInfo.avatar || '/avatars/default.svg',
+                phone: liveInfo.phone || '',
+                isOnline: true,
+                statusText: 'Online',
+                lastSeen: 'Online',
+                lastMessage: null,
+                unreadCount: 0
+            });
+        }
+    });
+
     return Array.from(map.values());
 }
 
@@ -1475,6 +1546,7 @@ function removePermanentLocalUser(usernameToRemove) {
     const key = normalizeKey(usernameToRemove);
     if (!key) return;
     addDeletedLocalUserKey(key);
+    liveOnlineUsersMap.delete(key);
     try {
         const existing = getPermanentLocalUsers().filter(u => normalizeKey(u.username) !== key);
         localStorage.setItem('msj_permanent_users', JSON.stringify(existing));
@@ -1501,37 +1573,22 @@ function removePermanentLocalUser(usernameToRemove) {
 
 async function syncPermanentUsersWithServer() {
     try {
-        const deletedSet = new Set(getDeletedLocalUserKeys());
-        const localUsers = getPermanentLocalUsers().filter(u => u && u.username && !deletedSet.has(normalizeKey(u.username)));
-        const savedUsername = localStorage.getItem('msj_saved_username');
-        if (savedUsername && !deletedSet.has(normalizeKey(savedUsername))) {
-            localUsers.push({ username: savedUsername, avatar: '/avatars/default.svg' });
-        }
-        const cached = getCachedContactsForCurrentUser();
-        if (Array.isArray(cached)) {
-            cached.forEach(c => {
-                if (c && c.username && !deletedSet.has(normalizeKey(c.username))) {
-                    localUsers.push({
-                        username: c.username,
-                        avatar: c.avatar,
-                        salt: c.salt,
-                        hash: c.hash,
-                        createdAt: c.createdAt
+        // Silinmiş eski kullanıcıların tarayıcı önbelleğinden sunucuya geri yüklenmesini engellemek için sadece sunucudan güncel listeyi çek
+        const res = await fetch('/api/users');
+        const data = await res.json();
+        if (data && data.success && Array.isArray(data.users)) {
+            data.users.forEach(u => {
+                if (u && u.username && u.isOnline) {
+                    liveOnlineUsersMap.set(normalizeKey(u.username), {
+                        username: u.username,
+                        phone: u.phone || '',
+                        avatar: u.avatar || '/avatars/default.svg',
+                        isOnline: true,
+                        updatedAt: Date.now()
                     });
                 }
             });
-        }
-        const res = await fetch('/api/users/sync', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                users: localUsers,
-                deletedUsers: Array.from(deletedSet)
-            })
-        });
-        const data = await res.json();
-        if (data && data.success && Array.isArray(data.users)) {
-            savePermanentLocalUsers(data.users, data.deletedUsers);
+            localStorage.setItem('msj_permanent_users', JSON.stringify(data.users));
             return data.users;
         }
     } catch (e) {}
@@ -1934,14 +1991,12 @@ async function initAuth() {
         const loggedIn = await quickLoginAsRegisteredUser(savedUsername);
         if (loggedIn) return;
 
-        if (savedUserStr) {
-            try {
-                const localUser = JSON.parse(savedUserStr);
-                onUserAuthenticated(localUser, token || 'local_session');
-                authModal.style.display = 'none';
-                return;
-            } catch(err) {}
-        }
+        // Eğer sunucuda bu kullanıcı silinmişse yerel hafızayı temizle ve sahte oturum açma!
+        localStorage.removeItem('msj_saved_username');
+        localStorage.removeItem('msj_user');
+        localStorage.removeItem('msj_token');
+        sessionStorage.removeItem('msj_token');
+        savedUsername = '';
     }
 
     // 3. Kullanıcı listesini yükle
@@ -2451,16 +2506,30 @@ function checkUrlDeepLinkActions() {
 // ==========================================================
 
 async function loadChatsList() {
-    let token = localStorage.getItem('msj_token') || sessionStorage.getItem('msj_token');
+    let token = localStorage.getItem('msj_token') || sessionStorage.getItem('msj_token') || 'local_session';
 
-    if (token && currentUser) {
+    if (currentUser && currentUser.username) {
         try {
-            const res = await fetch('/api/chats', {
-                headers: { 'x-auth-token': token }
+            const res = await fetch('/api/chats?user=' + encodeURIComponent(currentUser.username), {
+                headers: {
+                    'x-auth-token': token,
+                    'x-auth-user': currentUser.username
+                }
             });
             const data = await res.json();
 
             if (data.success && Array.isArray(data.chats)) {
+                data.chats.forEach(c => {
+                    if (c && c.username && c.isOnline) {
+                        liveOnlineUsersMap.set(normalizeKey(c.username), {
+                            username: c.username,
+                            phone: c.phone || '',
+                            avatar: c.avatar || '/avatars/default.svg',
+                            isOnline: true,
+                            updatedAt: Date.now()
+                        });
+                    }
+                });
                 contactsList = mergeContactsWithPermanentUsers(data.chats);
                 saveCachedContactsForCurrentUser(contactsList);
                 renderChatsList(contactsList);
@@ -2624,12 +2693,13 @@ function createUnregisteredPhoneLookupElement(rawPhoneQuery) {
             <div style="width:42px; height:42px; border-radius:50%; background:#00a884; color:#fff; display:flex; align-items:center; justify-content:center; font-size:20px; flex-shrink:0;">📱</div>
             <div style="flex:1;">
                 <div style="font-size:15px; font-weight:700; color:#e9edef;">${escapeHtml(prettyPhone)}</div>
-                <div style="font-size:12.5px; color:#25d366;">Kayıtlı olmasa bile bu telefon numarasına mesaj gönderebilir veya arayabilirsiniz</div>
+                <div style="font-size:12.5px; color:#25d366;">Kayıtlı olmasa bile bu telefon numarasını programa ekleyebilir, mesaj gönderebilir veya arayabilirsiniz</div>
             </div>
         </div>
         <div style="display:flex; gap:8px; flex-wrap:wrap;">
-            <button type="button" data-phone-act="message" style="flex:2; padding:8px 12px; border-radius:8px; border:none; background:#00a884; color:#fff; font-weight:700; font-size:13px; cursor:pointer;">💬 Numaraya Mesaj Gönder</button>
-            <button type="button" data-phone-act="voice" style="flex:1; padding:8px 10px; border-radius:8px; border:1px solid rgba(0,168,132,0.5); background:#1f2c34; color:#25d366; font-weight:600; font-size:13px; cursor:pointer;">📞 Sesli Ara</button>
+            <button type="button" data-phone-act="save" style="flex:2; padding:8px 12px; border-radius:8px; border:none; background:#25d366; color:#111b21; font-weight:800; font-size:13px; cursor:pointer;">➕ Programa / Rehbere Ekle</button>
+            <button type="button" data-phone-act="message" style="flex:2; padding:8px 12px; border-radius:8px; border:none; background:#00a884; color:#fff; font-weight:700; font-size:13px; cursor:pointer;">💬 Mesaj Gönder</button>
+            <button type="button" data-phone-act="voice" style="flex:1; padding:8px 10px; border-radius:8px; border:1px solid rgba(0,168,132,0.5); background:#1f2c34; color:#25d366; font-weight:600; font-size:13px; cursor:pointer;">📞 Sesli</button>
             <button type="button" data-phone-act="video" style="flex:1; padding:8px 10px; border-radius:8px; border:1px solid rgba(0,168,132,0.5); background:#1f2c34; color:#25d366; font-weight:600; font-size:13px; cursor:pointer;">📹 Görüntülü</button>
         </div>
     `;
@@ -2637,6 +2707,12 @@ function createUnregisteredPhoneLookupElement(rawPhoneQuery) {
         btn.addEventListener('click', (e) => {
             e.stopPropagation();
             const act = btn.getAttribute('data-phone-act');
+            if (act === 'save' && typeof window.addPhoneContactsToProgram === 'function') {
+                window.addPhoneContactsToProgram([{ name: '', phone: cleanDigits || rawPhoneQuery }]);
+                if (inputSearchChats) inputSearchChats.value = '';
+                if (btnClearSearch) btnClearSearch.style.display = 'none';
+                return;
+            }
             window.findAndContactByPhone(cleanDigits || rawPhoneQuery, '', act);
         });
     });
@@ -3835,11 +3911,48 @@ socket.on('user:phone_integrated', (data) => {
     });
 });
 
+// Sunucuya bağlanıldığında mevcut çevrimiçi (Online) kullanıcıların tam listesini al ve Online ekranına yansıt
+socket.on('users:online_list', (data) => {
+    if (!data || !Array.isArray(data.users)) return;
+    const myKey = currentUser ? normalizeKey(currentUser.username) : '';
+    data.users.forEach(u => {
+        if (!u || !u.username) return;
+        const uk = normalizeKey(u.username);
+        if (!uk || uk === myKey) return;
+        removeDeletedLocalUserKey(u.username);
+        liveOnlineUsersMap.set(uk, {
+            username: u.username,
+            phone: u.phone || '',
+            avatar: u.avatar || '/avatars/default.svg',
+            isOnline: true,
+            updatedAt: Date.now()
+        });
+    });
+    contactsList = mergeContactsWithPermanentUsers(contactsList);
+    saveCachedContactsForCurrentUser(contactsList);
+    renderChatsList(contactsList);
+});
+
 // Kullanıcı Çevrimiçi/Çevrimdışı Durum Değişimi (Online / Offline Bildirimi)
 socket.on('user:status_change', (data) => {
     if (!data || !data.username) return;
     const incomingKey = normalizeKey(data.username);
     const incomingPhoneKey = getPhoneMatchKeyClient(data.phone || '');
+    const isOnlineNow = Boolean(data.isOnline);
+
+    if (isOnlineNow) {
+        removeDeletedLocalUserKey(data.username);
+        if (data.phone) removeDeletedLocalUserKey(data.phone);
+        liveOnlineUsersMap.set(incomingKey, {
+            username: data.username,
+            phone: data.phone || '',
+            avatar: data.avatar || '/avatars/default.svg',
+            isOnline: true,
+            updatedAt: Date.now()
+        });
+    } else {
+        liveOnlineUsersMap.delete(incomingKey);
+    }
 
     savePermanentLocalUsers([{
         username: data.username,
@@ -3850,8 +3963,8 @@ socket.on('user:status_change', (data) => {
     // Kendi durum değişimimiz değilse ekranda sesli ve görsel uyarı ver
     const isMe = currentUser && normalizeKey(currentUser.username) === incomingKey;
     if (currentUser && !isMe) {
-        showStatusToast(data.username, data.isOnline);
-        playStatusChime(data.isOnline);
+        showStatusToast(data.username, isOnlineNow);
+        playStatusChime(isOnlineNow);
     }
 
     // Eğer rehberde telefon numarasıyla kayıtlıysa ve şimdi kullanıcı adıyla Online olduysa anında entegre et
@@ -3861,17 +3974,18 @@ socket.on('user:status_change', (data) => {
             getPhoneMatchKeyClient(c.phone || (isPhoneQueryClient(c.username) ? c.username : '')) === incomingPhoneKey
         );
         if (phoneContact) {
-            integratePhoneContactOnClient(phoneContact.username, data.username, data.phone, data.avatar || '/avatars/default.svg', Boolean(data.isOnline));
+            integratePhoneContactOnClient(phoneContact.username, data.username, data.phone, data.avatar || '/avatars/default.svg', isOnlineNow);
         }
     }
 
     let contact = contactsList.find(c => normalizeKey(c.username) === incomingKey);
     if (contact) {
-        contact.isOnline = Boolean(data.isOnline);
-        contact.statusText = data.isOnline ? 'Online' : 'Offline';
-        contact.lastSeen = data.isOnline ? 'Online' : 'Offline';
+        contact.isOnline = isOnlineNow;
+        contact.statusText = isOnlineNow ? 'Online' : 'Offline';
+        contact.lastSeen = isOnlineNow ? 'Online' : 'Offline';
         if (data.phone && !contact.phone) contact.phone = data.phone;
         if (data.avatar && (!contact.avatar || contact.avatar === '/avatars/default.svg')) contact.avatar = data.avatar;
+        saveCachedContactsForCurrentUser(contactsList);
         renderChatsList(contactsList);
     } else if (!isMe) {
         // Programı kullanmaya başlayan kullanıcı üstte Online uyarısı verdiğinde Online ekranında da ANINDA görünsün!
@@ -3880,9 +3994,9 @@ socket.on('user:status_change', (data) => {
             customName: '',
             avatar: data.avatar || '/avatars/default.svg',
             phone: data.phone || '',
-            isOnline: Boolean(data.isOnline),
-            statusText: data.isOnline ? 'Online' : 'Offline',
-            lastSeen: data.isOnline ? 'Online' : 'Offline',
+            isOnline: isOnlineNow,
+            statusText: isOnlineNow ? 'Online' : 'Offline',
+            lastSeen: isOnlineNow ? 'Online' : 'Offline',
             lastMessage: null,
             unreadCount: 0
         };
@@ -3899,12 +4013,12 @@ socket.on('user:status_change', (data) => {
     loadChatsList();
 
     if (activeContact && normalizeKey(activeContact.username) === incomingKey) {
-        activeContact.isOnline = Boolean(data.isOnline);
+        activeContact.isOnline = isOnlineNow;
         if (data.phone && !activeContact.phone) {
             activeContact.phone = data.phone;
             if (chatContactName) chatContactName.textContent = formatContactIntegratedDisplayName(activeContact);
         }
-        if (data.isOnline) {
+        if (isOnlineNow) {
             chatContactStatus.textContent = 'Online';
             headerOnlineDot.style.display = 'block';
         } else {
@@ -3913,7 +4027,7 @@ socket.on('user:status_change', (data) => {
         }
     }
 
-    if (data.isOnline && currentCallTarget && normalizeKey(currentCallTarget) === incomingKey) {
+    if (isOnlineNow && currentCallTarget && normalizeKey(currentCallTarget) === incomingKey) {
         if (outgoingCallModal && outgoingCallModal.style.display === 'flex' && outgoingCallStatus) {
             outgoingCallStatus.textContent = 'Çalıyor (Karşı cihaz Online oldu)...';
         }
@@ -3926,13 +4040,25 @@ function handleNewUserRegisteredEvent(data) {
     const uKey = normalizeKey(data.username);
     if (uKey === normalizeKey(currentUser.username)) return;
 
+    const isOnlineNow = data.isOnline !== false;
+    removeDeletedLocalUserKey(data.username);
+    if (data.phone) removeDeletedLocalUserKey(data.phone);
+    if (isOnlineNow) {
+        liveOnlineUsersMap.set(uKey, {
+            username: data.username,
+            phone: data.phone || '',
+            avatar: data.avatar || '/avatars/default.svg',
+            isOnline: true,
+            updatedAt: Date.now()
+        });
+    }
+
     const incomingPhoneKey = getPhoneMatchKeyClient(data.phone || '');
     if (incomingPhoneKey && !isPhoneQueryClient(data.username)) {
-        integratePhoneContactOnClient(data.phone, data.username, data.phone, data.avatar || '/avatars/default.svg', data.isOnline !== false);
+        integratePhoneContactOnClient(data.phone, data.username, data.phone, data.avatar || '/avatars/default.svg', isOnlineNow);
     }
 
     let existing = contactsList.find(c => normalizeKey(c.username) === uKey);
-    const isOnlineNow = data.isOnline !== false;
     if (existing) {
         existing.isOnline = isOnlineNow;
         existing.statusText = isOnlineNow ? 'Online' : 'Offline';
@@ -6422,23 +6548,26 @@ setInterval(async () => {
 
         for (const item of entries) {
             const cleanPhone = normalizePhoneClient(item.phone || '');
-            if (!cleanPhone || cleanPhone.length < 7) continue;
             const cName = (item.name || '').trim();
+            const hasValidPhone = Boolean(cleanPhone && cleanPhone.length >= 7);
+            const hasValidName = Boolean(cName && cName.length >= 2);
+            if (!hasValidPhone && !hasValidName) continue;
 
-            removeDeletedLocalUserKey(cleanPhone);
-            if (cName) removeDeletedLocalUserKey(cName);
+            const contactKeyName = hasValidPhone ? cleanPhone : cName;
+            if (hasValidPhone) removeDeletedLocalUserKey(cleanPhone);
+            if (hasValidName) removeDeletedLocalUserKey(cName);
 
-            validEntries.push({ name: cName, phone: cleanPhone });
+            validEntries.push({ name: cName, phone: hasValidPhone ? cleanPhone : '' });
 
-            // Kişisel telefon rehberine (msj_phone_book_<user>) anında kaydet
+            // Kişisel telefon rehberine (msj_phone_book_<user> ve msj_device_phone_book) anında kaydet
             const existingPbIdx = myPhoneBook.findIndex(pb =>
-                (pb.phone && normalizePhoneClient(pb.phone) === cleanPhone) ||
-                (cName && normalizeKey(pb.customName || pb.username) === normalizeKey(cName))
+                (hasValidPhone && pb.phone && normalizePhoneClient(pb.phone) === cleanPhone) ||
+                (hasValidName && normalizeKey(pb.customName || pb.username) === normalizeKey(cName))
             );
             const pbEntry = {
-                username: cleanPhone,
+                username: contactKeyName,
                 customName: cName,
-                phone: cleanPhone,
+                phone: hasValidPhone ? cleanPhone : '',
                 avatar: '/avatars/default.svg'
             };
             if (existingPbIdx >= 0) {
@@ -6449,29 +6578,31 @@ setInterval(async () => {
 
             // Aktif contactsList içine ekle/güncelle
             let contactObj = contactsList.find(c =>
-                (c.phone && normalizePhoneClient(c.phone) === cleanPhone) ||
-                normalizeKey(c.username) === normalizeKey(cleanPhone) ||
-                (cName && normalizeKey(c.customName || c.username) === normalizeKey(cName))
+                (hasValidPhone && c.phone && normalizePhoneClient(c.phone) === cleanPhone) ||
+                normalizeKey(c.username) === normalizeKey(contactKeyName) ||
+                (hasValidName && normalizeKey(c.customName || c.username) === normalizeKey(cName))
             );
+            const liveOnline = liveOnlineUsersMap.get(normalizeKey(contactKeyName));
+            const isOnlineNow = Boolean(liveOnline && liveOnline.isOnline);
             if (!contactObj) {
                 contactObj = {
-                    username: cleanPhone,
+                    username: contactKeyName,
                     customName: cName,
                     avatar: '/avatars/default.svg',
-                    phone: cleanPhone,
-                    isOnline: false,
-                    statusText: 'Offline',
-                    lastSeen: 'Offline',
+                    phone: hasValidPhone ? cleanPhone : '',
+                    isOnline: isOnlineNow,
+                    statusText: isOnlineNow ? 'Online' : 'Offline',
+                    lastSeen: isOnlineNow ? 'Online' : 'Offline',
                     lastMessage: null,
                     unreadCount: 0
                 };
                 contactsList.unshift(contactObj);
             } else {
-                contactObj.phone = cleanPhone;
+                if (hasValidPhone) contactObj.phone = cleanPhone;
                 if (cName) contactObj.customName = cName;
             }
 
-            if (window.MSJCryptoEngine && typeof window.MSJCryptoEngine.hashPhoneForPrivateDiscovery === 'function') {
+            if (hasValidPhone && window.MSJCryptoEngine && typeof window.MSJCryptoEngine.hashPhoneForPrivateDiscovery === 'function') {
                 try {
                     const h = await window.MSJCryptoEngine.hashPhoneForPrivateDiscovery(cleanPhone);
                     if (h) hashes.push(h);
@@ -6480,9 +6611,18 @@ setInterval(async () => {
         }
 
         if (validEntries.length === 0) {
-            showStatusToast('⚠️ Lütfen geçerli bir telefon numarası girin veya seçin.', false);
+            showStatusToast('⚠️ Lütfen geçerli bir telefon numarası veya kişi adı girin.', false);
             return;
         }
+
+        // Kişi eklendiğinde aktif filtreyi "Tümü" sekmesine al ki eklenen kişi ekranda anında görünsün!
+        currentChatFilter = 'all';
+        filterChips.forEach(c => {
+            if (c.id !== 'btnQuickPhoneLookup' && c.id !== 'btnAddFilter') {
+                if (c.dataset && c.dataset.filter === 'all') c.classList.add('active');
+                else c.classList.remove('active');
+            }
+        });
 
         // 1. ANINDA YEREL KAYDET VE ARAYÜZDE GÖSTER (Sıfır gecikme!)
         savePersonalPhoneBookForCurrentUser(myPhoneBook);
@@ -6493,12 +6633,13 @@ setInterval(async () => {
         // 2. SUNUCUYA TOPLU SENKRONİZE ET (/api/contacts/import_batch)
         if (myUsername) {
             try {
-                const token = localStorage.getItem('msj_token') || sessionStorage.getItem('msj_token');
+                const token = localStorage.getItem('msj_token') || sessionStorage.getItem('msj_token') || 'local_session';
                 const res = await fetch('/api/contacts/import_batch', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
-                        ...(token ? { 'x-auth-token': token } : {})
+                        'x-auth-token': token,
+                        'x-auth-user': myUsername
                     },
                     body: JSON.stringify({
                         ownerUsername: myUsername,
@@ -6509,8 +6650,11 @@ setInterval(async () => {
                     const data = await res.json();
                     if (data && data.success && Array.isArray(data.contacts)) {
                         data.contacts.forEach(srvC => {
-                            const pNorm = normalizePhoneClient(srvC.phone);
-                            const found = contactsList.find(c => normalizePhoneClient(c.phone) === pNorm);
+                            const pNorm = normalizePhoneClient(srvC.phone || '');
+                            const found = contactsList.find(c =>
+                                (pNorm && normalizePhoneClient(c.phone || '') === pNorm) ||
+                                normalizeKey(c.username) === normalizeKey(srvC.username)
+                            );
                             if (found) {
                                 found.username = srvC.username || found.username;
                                 if (srvC.customName) found.customName = srvC.customName;
@@ -6546,6 +6690,8 @@ setInterval(async () => {
         showStatusToast(`📒 ${validEntries.length} kişi programa ve rehberinize başarıyla eklendi!`, true);
     }
 
+    window.addPhoneContactsToProgram = processImportedPhoneEntries;
+
     async function triggerDeviceContactsImport() {
         if (headerDropdown) headerDropdown.style.display = 'none';
 
@@ -6568,12 +6714,16 @@ setInterval(async () => {
                         } else if (typeof c.tel === 'string') {
                             tels = [c.tel];
                         }
-                        tels.forEach(t => {
-                            const clean = normalizePhoneClient(t);
-                            if (clean && clean.length >= 7) {
-                                parsed.push({ name, phone: clean });
-                            }
-                        });
+                        if (tels.length > 0) {
+                            tels.forEach(t => {
+                                const clean = normalizePhoneClient(t);
+                                if (clean && clean.length >= 7) {
+                                    parsed.push({ name, phone: clean });
+                                }
+                            });
+                        } else if (name && name.length >= 2) {
+                            parsed.push({ name, phone: '' });
+                        }
                     });
                     if (parsed.length > 0) {
                         await processImportedPhoneEntries(parsed);
@@ -6589,14 +6739,25 @@ setInterval(async () => {
             }
         }
 
-        // 2. Eğer numara kutusuna zaten numara yazılmışsa doğrudan ekle; değilse Kişi Ekleme ekranını aç ve odakla
+        // 2. Eğer numara veya isim kutusuna zaten bilgi yazılmışsa doğrudan ekle
         const typedPhone = inputLookupPhone ? inputLookupPhone.value.trim() : '';
         const typedName = inputLookupCustomName ? inputLookupCustomName.value.trim() : '';
-        if (typedPhone && normalizePhoneClient(typedPhone).length >= 7) {
+        if ((typedPhone && normalizePhoneClient(typedPhone).length >= 7) || (typedName && typedName.length >= 2)) {
             await processImportedPhoneEntries([{ name: typedName, phone: typedPhone }]);
             if (inputLookupPhone) inputLookupPhone.value = '';
             if (inputLookupCustomName) inputLookupCustomName.value = '';
             return;
+        }
+
+        // 3. Eğer Yeni Sohbet / Kişi Ekleme ekranı zaten açıksa ve tarayıcı doğrudan rehber API'sini desteklemiyorsa (iOS Safari / HTTP vb.)
+        if (newChatModal && newChatModal.style.display === 'flex') {
+            const quickPhone = prompt('📱 Programa eklenecek kişinin Telefon Numarasını girin (Örn: 0555 123 45 67):', '');
+            if (quickPhone === null) return;
+            const quickName = prompt('👤 Kişinin Adını girin (İsteğe bağlı, Örn: Ahmet):', '') || '';
+            if ((quickPhone && normalizePhoneClient(quickPhone).length >= 7) || (quickName && quickName.trim().length >= 2)) {
+                await processImportedPhoneEntries([{ name: quickName.trim(), phone: quickPhone.trim() }]);
+                return;
+            }
         }
 
         openNewChatModal(true);
@@ -6607,8 +6768,8 @@ setInterval(async () => {
         btnLookupSaveContactOnly.addEventListener('click', async () => {
             const rawP = inputLookupPhone ? inputLookupPhone.value.trim() : '';
             const rawN = inputLookupCustomName ? inputLookupCustomName.value.trim() : '';
-            if (!rawP || normalizePhoneClient(rawP).length < 7) {
-                alert('Lütfen programa eklenecek kişinin telefon numarasını girin (Örn: 05XX XXX XX XX).');
+            if ((!rawP || normalizePhoneClient(rawP).length < 7) && (!rawN || rawN.length < 2)) {
+                alert('Lütfen programa eklenecek kişinin telefon numarasını (Örn: 05XX XXX XX XX) veya adını girin.');
                 if (inputLookupPhone) inputLookupPhone.focus();
                 return;
             }
@@ -6657,12 +6818,9 @@ setInterval(async () => {
         });
     }
 
-    [menuItemImportContacts, btnImportPhoneContactsModal].forEach(btn => {
+    [menuItemImportContacts, btnImportPhoneContactsModal, btnAddFilter].forEach(btn => {
         if (btn) btn.addEventListener('click', triggerDeviceContactsImport);
     });
-    if (btnAddFilter) {
-        btnAddFilter.addEventListener('click', () => openNewChatModal(true));
-    }
 })();
 
 // ==========================================================

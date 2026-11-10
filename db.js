@@ -198,6 +198,45 @@ class DatabaseManager {
             await this.initSqlite();
         }
 
+        // Sürüm 24 Temiz Kurulum (Tüm eski kayıtlı kullanıcıların hem yerel hem bulut sunucuda tek seferlik sıfırlanması)
+        const resetEpochFile = path.join(dataDir, 'reset_epoch.txt');
+        const TARGET_RESET_EPOCH = 'msj_clean_v24';
+        let currentEpoch = '';
+        try {
+            if (fs.existsSync(resetEpochFile)) {
+                currentEpoch = fs.readFileSync(resetEpochFile, 'utf8').trim();
+            }
+        } catch (e) {}
+
+        if (currentEpoch !== TARGET_RESET_EPOCH) {
+            try {
+                if (this.type === 'mysql' && this.mysqlPool) {
+                    for (const t of ['users', 'messages', 'sessions', 'deleted_users', 'user_contacts', 'blocked_users']) {
+                        await this.mysqlPool.query(`DELETE FROM ${t}`).catch(() => {});
+                    }
+                } else if (this.sqliteDb) {
+                    for (const t of ['users', 'messages', 'sessions', 'deleted_users', 'user_contacts', 'blocked_users']) {
+                        try { this.sqliteDb.exec(`DELETE FROM ${t};`); } catch (e) {}
+                    }
+                    this.checkpointSqlite();
+                }
+                fs.writeFileSync(usersFile, '{}', 'utf8');
+                fs.writeFileSync(messagesFile, '{}', 'utf8');
+                fs.writeFileSync(sessionsFile, '{}', 'utf8');
+                fs.writeFileSync(deletedUsersFile, '[]', 'utf8');
+                fs.writeFileSync(userContactsFile, '{}', 'utf8');
+                fs.writeFileSync(blockedUsersFile, '{}', 'utf8');
+                const e2eeFile = path.join(dataDir, 'e2ee_keys.json');
+                const pcUserFile = path.join(dataDir, 'local_pc_user.json');
+                if (fs.existsSync(e2eeFile)) fs.writeFileSync(e2eeFile, '{}', 'utf8');
+                if (fs.existsSync(pcUserFile)) try { fs.unlinkSync(pcUserFile); } catch (e) {}
+                fs.writeFileSync(resetEpochFile, TARGET_RESET_EPOCH, 'utf8');
+                console.log('[Veritabanı] Sürüm 24 temiz kurulum: Tüm eski kayıtlı kullanıcılar ve oturumlar sıfırlandı.');
+            } catch (e) {
+                console.error('[Veritabanı] Sıfırlama uyarısı:', e.message);
+            }
+        }
+
         // Çift yönlü otomatik senkronizasyon:
         // 1. JSON dosyalarındaki tüm kullanıcı ve mesajları veritabanına yükler.
         // 2. Veritabanındaki tüm kullanıcı ve mesajları JSON dosyalarına yedekler.
@@ -1448,9 +1487,11 @@ class DatabaseManager {
             if (byPhone) {
                 return byPhone;
             }
-            if (!extraData || !extraData.allowPhoneAsUsername) {
+            if (extraData && extraData.fromSync && this.isUserDeleted(userKey)) {
                 return null;
             }
+            const createdPhoneRes = await this.findOrCreateUserByPhone(clean, (extraData && extraData.customName) || '');
+            return (createdPhoneRes && createdPhoneRes.user) ? createdPhoneRes.user : null;
         }
 
         // Eğer gerçek bir kullanıcı adı ve telefon numarası birlikte geldiyse numaralı placeholder kaydıyla entegre et
@@ -1541,6 +1582,14 @@ class DatabaseManager {
         } catch (e) {}
 
         return { success: true, username: deletedUsername, userKey };
+    }
+
+    markUserDeletedInFile(usernameOrKey) {
+        return markUserDeletedInFile(usernameOrKey);
+    }
+
+    unmarkUserDeletedInFile(usernameOrKey) {
+        return unmarkUserDeletedInFile(usernameOrKey);
     }
 
     formatUserRow(row) {
@@ -2105,7 +2154,10 @@ class DatabaseManager {
                 }
             } else if (rawName && rawName.length >= 2) {
                 unmarkUserDeletedInFile(normalizeKey(rawName));
-                const existingByName = await this.getUser(rawName);
+                let existingByName = await this.getUser(rawName);
+                if (!existingByName) {
+                    existingByName = await this.ensureUserExists(rawName);
+                }
                 const contactUsername = existingByName ? existingByName.username : rawName;
                 const contactKey = normalizeKey(contactUsername);
                 if (contactKey && contactKey !== ownerKey) {
@@ -2604,14 +2656,28 @@ class DatabaseManager {
             }
         }
 
+        const isKeyOnlineInMap = (k) => {
+            if (!onlineUserKeysMap || !k) return false;
+            if (typeof onlineUserKeysMap.get === 'function') {
+                const v = onlineUserKeysMap.get(k);
+                return Boolean(v && (typeof v.size === 'number' ? v.size > 0 : v));
+            }
+            if (typeof onlineUserKeysMap.has === 'function') {
+                return onlineUserKeysMap.has(k);
+            }
+            return false;
+        };
+
         for (const contact of allUsers) {
             if (contact.userKey === currentKey) continue; // Kendisini hariç tut
+
+            const isOnline = isKeyOnlineInMap(contact.userKey);
 
             const contactCleanPhone = normalizePhone(contact.phone || (isLikelyPhoneNumber(contact.username) ? contact.username : ''));
             const phoneLookupKey = contactCleanPhone.length >= 10 ? contactCleanPhone.slice(-10) : contactCleanPhone;
             const savedContactInfo = personalContactsMap.get(contact.userKey) || (phoneLookupKey ? personalContactsByPhone.get(phoneLookupKey) : null);
 
-            if (!savedContactInfo && this.isUserDeleted(contact.userKey)) continue;
+            if (!isOnline && !savedContactInfo && this.isUserDeleted(contact.userKey)) continue;
 
             const convoKey = getConvoKey(currentUsername, contact.username);
             
@@ -2641,26 +2707,12 @@ class DatabaseManager {
                 unreadCount = uRow ? uRow.cnt : 0;
             }
 
-            // Kullanıcı bu kişiyi kendi rehberinden özel olarak sildiyse ve yeni mesajı yoksa listede gösterme
-            if (removedContactsSet.has(contact.userKey) && !lastRow && unreadCount === 0) {
+            // Kullanıcı bu kişiyi kendi rehberinden özel olarak sildiyse ve yeni mesajı yoksa listede gösterme (ancak Online ise Online ekranında göster)
+            if (!isOnline && !savedContactInfo && removedContactsSet.has(contact.userKey) && !lastRow && unreadCount === 0) {
                 continue;
             }
 
-            const isOnline = Boolean(
-                onlineUserKeysMap &&
-                onlineUserKeysMap.has(contact.userKey) &&
-                onlineUserKeysMap.get(contact.userKey).size > 0
-            );
             const isBlocked = blockedUsersMap.has(contact.userKey);
-
-            // Eğer sadece telefon numarasından oluşan sahipsiz/boş bir placeholder ise ve ne mesajı ne rehber kaydı ne de online durumu varsa gösterme;
-            // ancak programı kullanmaya başlayan gerçek kullanıcılar ve Online olanlar her zaman listede ve Online ekranında görünsün!
-            const isInPersonalContacts = Boolean(savedContactInfo);
-            const isUnclaimedPhoneOnly = isLikelyPhoneNumber(contact.username);
-            if (isUnclaimedPhoneOnly && !isInPersonalContacts && !lastRow && unreadCount === 0 && !isOnline) {
-                continue;
-            }
-
             const lastMsg = lastRow ? this.formatMessageRow(lastRow) : null;
 
             chatItems.push({
@@ -2691,7 +2743,14 @@ class DatabaseManager {
         // 2. Kişisel rehbere (user_contacts) eklenmiş ancak henüz users tablosunda tam hesabı olmayan kişileri de sohbet listesine dahil et
         for (const [cKey, cInfo] of personalContactsMap.entries()) {
             if (cKey === currentKey || seenKeys.has(cKey)) continue;
-            if (removedContactsSet.has(cKey)) continue;
+
+            const cPhoneNorm = normalizePhone(cInfo.phone || '');
+            const cPhone10 = cPhoneNorm.length >= 10 ? cPhoneNorm.slice(-10) : cPhoneNorm;
+            const alreadyAddedByPhone = cPhone10 && chatItems.some(ci => {
+                const p = normalizePhone(ci.phone || (isLikelyPhoneNumber(ci.username) ? ci.username : ''));
+                return p && (p === cPhoneNorm || (p.length >= 10 && p.slice(-10) === cPhone10));
+            });
+            if (alreadyAddedByPhone) continue;
 
             const contactUsername = cInfo.contactUsername || cInfo.customName || cInfo.phone;
             if (!contactUsername) continue;
@@ -2724,11 +2783,7 @@ class DatabaseManager {
             }
 
             const lastMsg = lastRow ? this.formatMessageRow(lastRow) : null;
-            const isOnline = Boolean(
-                onlineUserKeysMap &&
-                onlineUserKeysMap.has(cKey) &&
-                onlineUserKeysMap.get(cKey).size > 0
-            );
+            const isOnline = isKeyOnlineInMap(cKey);
 
             chatItems.push({
                 username: contactUsername,
@@ -2753,6 +2808,31 @@ class DatabaseManager {
                 unreadCount
             });
             seenKeys.add(cKey);
+        }
+
+        // 3. Şu an aktif Online haritasında (onlineUserKeysMap) olup henüz listeye girmemiş olan çevrimiçi kullanıcıları da Online ekranı için ekle
+        if (onlineUserKeysMap) {
+            const entries = (typeof onlineUserKeysMap.get === 'function')
+                ? Array.from(onlineUserKeysMap.keys()).filter(k => isKeyOnlineInMap(k))
+                : Array.from(onlineUserKeysMap);
+            for (const onKey of entries) {
+                if (!onKey || onKey === currentKey || seenKeys.has(onKey)) continue;
+                const uObj = await this.getUser(onKey);
+                const dispName = (uObj && uObj.username) ? uObj.username : onKey;
+                chatItems.push({
+                    username: dispName,
+                    customName: '',
+                    phone: (uObj && uObj.phone) || '',
+                    avatar: (uObj && uObj.avatar) || '/avatars/default.svg',
+                    isOnline: true,
+                    isBlocked: blockedUsersMap.has(onKey),
+                    statusText: 'Online',
+                    lastSeen: 'Online',
+                    lastMessage: null,
+                    unreadCount: 0
+                });
+                seenKeys.add(onKey);
+            }
         }
 
         // Sıralama: Önce okunmamış mesajı olanlar ve Online olanlar, ardından son mesaj tarihine göre

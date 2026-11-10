@@ -326,22 +326,34 @@ async function authenticateToken(req, res, next) {
     try {
         const authHeader = req.headers['authorization'];
         const token = (authHeader && authHeader.split(' ')[1]) || req.headers['x-auth-token'] || req.query.token;
-        if (!token) {
+        const fallbackUsername = String(req.headers['x-auth-user'] || req.query.user || '').trim();
+        if (!token && !fallbackUsername) {
             return res.status(401).json({ success: false, error: 'Oturum açılmamış veya geçersiz' });
         }
-        const session = await db.getSession(token);
+        let session = token ? await db.getSession(token) : null;
+        if (!session && fallbackUsername) {
+            const existingUser = await db.getUser(fallbackUsername);
+            if (existingUser) {
+                const effectiveToken = token || crypto.randomBytes(32).toString('hex');
+                await db.saveSession(effectiveToken, existingUser.username);
+                session = { token: effectiveToken, username: existingUser.username };
+            }
+        }
         if (!session) {
             return res.status(401).json({ success: false, error: 'Oturum açılmamış veya geçersiz' });
         }
-        await db.updateSessionLastUsed(token);
+        if (token) {
+            await db.updateSessionLastUsed(token);
+        }
 
         const user = await db.getUser(session.username);
         if (!user) {
-            await db.deleteSession(token);
+            if (token) await db.deleteSession(token);
             return res.status(401).json({ success: false, error: 'Kullanıcı bulunamadı' });
         }
+        markUserOnline(user.username);
         req.user = user;
-        req.token = token;
+        req.token = token || session.token;
         next();
     } catch (err) {
         return res.status(500).json({ success: false, error: err.message });
@@ -627,10 +639,6 @@ app.post('/api/auth/auto_login', async (req, res) => {
         const cleanPhone = phone ? normalizePhone(phone) : '';
         let user = await db.getUser(cleanUser);
         if (!user) {
-            // Cihazda kayıtlı kullanıcı varsa silinmesine izin verme, veritabanına otomatik geri yükle
-            user = await db.ensureUserExists(cleanUser);
-        }
-        if (!user) {
             return res.json({ success: false, requireLogin: true, error: 'Kullanıcı bulunamadı' });
         }
 
@@ -638,7 +646,7 @@ app.post('/api/auth/auto_login', async (req, res) => {
             const intRes = await integrateUserWithPhoneIfApplicable(user.username, cleanPhone);
             if (intRes && intRes.user) user = intRes.user;
         }
-        markUserOnline(user.username);
+        broadcastUserOnlineStatus(user, false);
 
         const pairId = (req.body && (req.body.pairId || req.body.qrPair)) || '';
         const isMobileReq = Boolean(pairId) || /Android|iPhone|iPad|iPod|Mobile/i.test(req.headers['user-agent'] || '');
@@ -688,13 +696,13 @@ app.post('/api/auth/verify', async (req, res) => {
         const session = await db.getSession(token);
         if (!session) {
             if (username && username.trim().length >= 2) {
-                const ensuredUser = await db.ensureUserExists(username.trim());
-                if (ensuredUser) {
-                    markUserOnline(ensuredUser.username);
-                    await db.saveSession(token, ensuredUser.username);
+                const existingUser = await db.getUser(username.trim());
+                if (existingUser) {
+                    broadcastUserOnlineStatus(existingUser, false);
+                    await db.saveSession(token, existingUser.username);
                     return res.json({
                         success: true,
-                        user: { username: ensuredUser.username, phone: ensuredUser.phone || '', avatar: ensuredUser.avatar }
+                        user: { username: existingUser.username, phone: existingUser.phone || '', avatar: existingUser.avatar }
                     });
                 }
             }
@@ -702,15 +710,13 @@ app.post('/api/auth/verify', async (req, res) => {
         }
 
         await db.updateSessionLastUsed(token);
-        let user = await db.getUser(session.username);
-        if (!user && session.username) {
-            user = await db.ensureUserExists(session.username);
-        }
+        const user = await db.getUser(session.username);
         if (!user) {
+            await db.deleteSession(token);
             return res.status(401).json({ success: false, error: 'Kullanıcı bulunamadı' });
         }
 
-        markUserOnline(user.username);
+        broadcastUserOnlineStatus(user, false);
 
         res.json({
             success: true,
@@ -1046,7 +1052,10 @@ app.post('/api/contacts/add', async (req, res) => {
 // Toplu Telefon Rehberi İçe Aktarma API (Mobile Contact Picker / .vcf desteği)
 app.post('/api/contacts/import_batch', async (req, res) => {
     try {
-        const ownerUsername = ((req.body && req.body.ownerUsername) || '').trim();
+        let ownerUsername = ((req.body && req.body.ownerUsername) || '').trim();
+        if (!ownerUsername) {
+            ownerUsername = await resolveOwnerUsernameFromReq(req);
+        }
         const contacts = (req.body && req.body.contacts) || [];
         if (!ownerUsername) {
             return res.status(400).json({ success: false, error: 'Sahip kullanıcı adı gerekli' });
@@ -1055,6 +1064,13 @@ app.post('/api/contacts/import_batch', async (req, res) => {
             return res.json({ success: true, count: 0, contacts: [] });
         }
         const result = await db.importContactsBatch(ownerUsername, contacts);
+        if (result && Array.isArray(result.contacts)) {
+            result.contacts.forEach(c => {
+                if (c && c.username) {
+                    c.isOnline = isUserEffectivelyOnline(c.username);
+                }
+            });
+        }
         res.json(result);
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
@@ -3024,6 +3040,38 @@ function ensureCloudSocketForUser(username, avatar = '/avatars/default.svg') {
             cSocket.emit('user:join', { username: cleanUser, avatar });
         });
 
+        cSocket.on('user:status_change', async (data) => {
+            try {
+                if (!data || !data.username) return;
+                const remKey = normalizeKey(data.username);
+                if (remKey === uKey) return;
+                await db.ensureUserExists(data.username, data.avatar || '/avatars/default.svg', { phone: data.phone || '' });
+                if (data.isOnline) {
+                    cloudOnlineUsers.set(remKey, Date.now() + 65000);
+                } else {
+                    cloudOnlineUsers.delete(remKey);
+                }
+                if (globalIo) {
+                    globalIo.emit('user:status_change', data);
+                }
+            } catch (e) {}
+        });
+
+        cSocket.on('user:new_registered', async (data) => {
+            try {
+                if (!data || !data.username) return;
+                const remKey = normalizeKey(data.username);
+                if (remKey === uKey) return;
+                await db.ensureUserExists(data.username, data.avatar || '/avatars/default.svg', { phone: data.phone || '' });
+                if (data.isOnline !== false) {
+                    cloudOnlineUsers.set(remKey, Date.now() + 65000);
+                }
+                if (globalIo) {
+                    globalIo.emit('user:new_registered', data);
+                }
+            } catch (e) {}
+        });
+
         cSocket.on('chat:message', async (msg) => {
             try {
                 if (!msg || !msg.id || !msg.sender || !msg.recipient) return;
@@ -3269,6 +3317,10 @@ async function startServer() {
             bindSocketToUser(socket, finalUsername, avatar);
             markUserOnline(finalUsername);
 
+            if (data && data.token) {
+                await db.saveSession(data.token, finalUsername).catch(() => {});
+            }
+
             // Eğer bu bağlantı yerel bilgisayardan (localhost / 127.0.0.1) yapılmışsa ve henüz PC kullanıcısı seçilmemişse kaydet
             const remoteAddr = (socket.handshake && socket.handshake.address) || '';
             if (remoteAddr === '127.0.0.1' || remoteAddr === '::1' || remoteAddr === '::ffff:127.0.0.1') {
@@ -3290,6 +3342,27 @@ async function startServer() {
                 isOnline: true,
                 statusText: 'Online'
             });
+
+            // Bağlanan kullanıcıya şu an sistemde Online olan diğer tüm kullanıcıları hemen gönder ki Online ekranına anında düşsün!
+            try {
+                const effMap = getEffectiveOnlineMap();
+                const allU = await db.getAllUsers();
+                const onlineList = [];
+                for (const u of allU) {
+                    if (u.userKey !== userKey && effMap.has(u.userKey) && effMap.get(u.userKey).size > 0) {
+                        onlineList.push({
+                            username: u.username,
+                            phone: u.phone || '',
+                            avatar: u.avatar || '/avatars/default.svg',
+                            isOnline: true,
+                            statusText: 'Online'
+                        });
+                    }
+                }
+                if (onlineList.length > 0) {
+                    socket.emit('users:online_list', { users: onlineList });
+                }
+            } catch (e) {}
 
             socket.emit('auth:success', {
                 user: { username: finalUsername, avatar, phone }
